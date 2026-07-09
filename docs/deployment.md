@@ -74,6 +74,29 @@ python3 scripts/sync_from_pi.py
 
 Runtime captures go under `captures/` and are ignored by git. Selected ROS/Cartographer map artifacts go under `assets/ros_maps/` and can be committed when useful.
 
+## Systemd service
+
+The repo contains a Pi systemd unit:
+
+```text
+systemd/beep-bridge.service
+```
+
+Install/enable/restart it through Jupyter:
+
+```bash
+python3 scripts/install_systemd_service.py
+```
+
+After install, verify:
+
+```bash
+systemctl status beep-bridge.service
+curl -s http://192.168.8.88:8766/config | python3 -m json.tool
+```
+
+The service is designed to restart automatically after crashes and boot automatically after Pi reboot. A tiny act of civilization.
+
 ## Verification
 
 ```bash

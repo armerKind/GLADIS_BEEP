@@ -45,6 +45,7 @@ scripts/check_bridge.sh              # Check live bridge status
 scripts/capture_bridge_state.sh      # Capture status/maps/frame into captures/
 scripts/sync_from_pi.py              # Pull bridge + selected Pi artifacts into repo
 scripts/jupyter_deploy_bridge.py     # Upload/restart bridge through Jupyter
+scripts/install_systemd_service.py    # Install/enable bridge as Pi systemd service
 ```
 
 ## Robot network assumptions
