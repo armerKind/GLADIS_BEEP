@@ -34,8 +34,17 @@ beep_bridge/      Bridge source code for the Pi
 scripts/          Deployment/sync/helper scripts
 docs/             API and architecture notes
 notebooks/        Optional exploratory notebooks; keep only useful ones
-assets/           Example generated maps/screenshots worth documenting
+assets/           Example generated maps/screenshots and selected ROS map artifacts
 maps/             Placeholder only; generated maps are ignored by git
+```
+
+## Useful scripts
+
+```bash
+scripts/check_bridge.sh              # Check live bridge status
+scripts/capture_bridge_state.sh      # Capture status/maps/frame into captures/
+scripts/sync_from_pi.py              # Pull bridge + selected Pi artifacts into repo
+scripts/jupyter_deploy_bridge.py     # Upload/restart bridge through Jupyter
 ```
 
 ## Robot network assumptions

@@ -1,0 +1,6 @@
+image: /home/pi/gladis_maps/barf_rotated_20230810_204051.pgm
+resolution: 0.050000
+origin: [-1.450000, -1.096541, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196

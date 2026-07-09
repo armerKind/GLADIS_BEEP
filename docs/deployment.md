@@ -48,6 +48,32 @@ nohup bash -lc '
 ' > logs/bridge.log 2>&1 & echo $! > bridge.pid
 ```
 
+## Scripted deployment
+
+From the repository root, if Jupyter is reachable on port `8888`:
+
+```bash
+python3 scripts/jupyter_deploy_bridge.py
+```
+
+Useful environment overrides:
+
+```bash
+BEEP_HOST=192.168.8.88
+BEEP_JUPYTER_PASSWORD=yahboom
+BEEP_BRIDGE_SRC=beep_bridge/beep_bridge.py
+```
+
+## Sync from Pi
+
+Pull live bridge source and useful artifacts:
+
+```bash
+python3 scripts/sync_from_pi.py
+```
+
+Runtime captures go under `captures/` and are ignored by git. Selected ROS/Cartographer map artifacts go under `assets/ros_maps/` and can be committed when useful.
+
 ## Verification
 
 ```bash
