@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Runtime/generated robot data
+logs/
+*.log
+captures/
+maps/*.json
+maps/*.svg
+
+# Large media captures
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+*.ogg
+
+# Local OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets
+*.pem
+*.key
+secrets.*
+.env.*
