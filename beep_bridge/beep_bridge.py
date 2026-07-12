@@ -82,7 +82,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.8.0-tricks",
+    "version": "0.8.1-fast-tricks",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -202,6 +202,10 @@ def resolve_trick(name=None, action_id=None):
     raise ValueError(f"unknown trick {key!r}; use /actions")
 
 
+def truthy(value):
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def tricks_payload():
     items = []
     for name, meta in sorted(TRICK_ACTIONS.items(), key=lambda kv: kv[1]["id"]):
@@ -233,6 +237,33 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
             state["moving"] = False
         remember("sdk_trick_done", trick=trick, settle_s=settle_s)
     return {"ok": True, "dry_run": False, "trick": trick, "settle_s": settle_s}
+
+
+def sdk_trick_async(name=None, action_id=None, dry_run=False, settle_s=None):
+    trick = resolve_trick(name=name, action_id=action_id)
+    settle_s = trick.get("duration_s", TRICK_SETTLE_S) if settle_s is None else float(settle_s)
+    settle_s = max(0.0, min(settle_s, 8.0))
+    if dry_run:
+        remember("sdk_trick_async_dry_run", trick=trick, settle_s=settle_s)
+        return {"ok": True, "accepted": False, "async": True, "dry_run": True, "trick": trick, "settle_s": settle_s}
+
+    def _runner():
+        try:
+            sdk_trick(action_id=trick["id"], settle_s=settle_s)
+        except Exception as exc:
+            with state_lock:
+                state["moving"] = False
+                state["last_error"] = repr(exc)
+            remember("sdk_trick_async_error", trick=trick, error=repr(exc))
+
+    with state_lock:
+        state["last_command"] = "sdk_action_queued:" + trick["name"]
+        state["last_command_at"] = time.time()
+        state["last_error"] = None
+    remember("sdk_trick_async_accepted", trick=trick, settle_s=settle_s)
+    thread = threading.Thread(target=_runner, name="beep-trick-" + trick["name"], daemon=True)
+    thread.start()
+    return {"ok": True, "accepted": True, "async": True, "dry_run": False, "trick": trick, "settle_s": settle_s}
 
 
 def motor_send(action: str, step=None):
@@ -1091,9 +1122,11 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path in ("/action", "/trick"):
                 name = (qs.get("name") or qs.get("action") or qs.get("trick") or [None])[0]
                 action_id = (qs.get("id") or qs.get("action_id") or [None])[0]
-                dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
+                dry = truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0])
                 settle = (qs.get("settle_s") or qs.get("duration") or [None])[0]
-                self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=dry, settle_s=settle))
+                async_requested = truthy((qs.get("async") or ["0"])[0]) or not truthy((qs.get("wait") or ["1"])[0])
+                runner = sdk_trick_async if async_requested else sdk_trick
+                self.send_json(runner(name=name, action_id=action_id, dry_run=dry, settle_s=settle))
             elif p.path == "/mark_object":
                 dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
                 self.send_json(mark_object(
@@ -1141,7 +1174,9 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/move":
                 self.send_json(run_action(body.get("action", "stop"), float(body.get("duration", 0.2)), step=body.get("step")))
             elif p.path in ("/action", "/trick"):
-                self.send_json(sdk_trick(
+                async_requested = bool(body.get("async", False)) or body.get("wait", True) is False
+                runner = sdk_trick_async if async_requested else sdk_trick
+                self.send_json(runner(
                     name=body.get("name", body.get("action", body.get("trick"))),
                     action_id=body.get("id", body.get("action_id")),
                     dry_run=bool(body.get("dry_run", body.get("dry", False))),

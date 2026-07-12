@@ -30,8 +30,9 @@ http://192.168.8.88:8766
 - `POST /move` — JSON movement request
 - `GET /actions` / `/tricks` — list known Yahboom/DOGZILLA preset SDK actions
 - `GET /action?name=<pee|stretch|swing|pray|three_axis|crawl|reset>&dry_run=1` — resolve or run a named preset action
+- `GET /action?name=pee&wait=0` or `GET /action?name=pee&async=1` — trigger a preset action and return immediately; preferred for Telegram/voice demos
 - `GET /action?id=<1..255>` — run a raw vendor preset action ID
-- `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`
+- `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`; use `{ "name": "pee", "wait": false }` for fire-and-forget
 - `GET /mark_object?dry_run=1` / `POST /mark_object` — fair routine: guarded approach, turn sideways, then `pee`
 
 Example:
