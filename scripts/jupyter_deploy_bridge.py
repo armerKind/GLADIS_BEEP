@@ -88,38 +88,57 @@ p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py')], tex
 print('py_compile', p.returncode, p.stderr)
 if p.returncode:
     raise SystemExit(p.returncode)
+svc = subprocess.run(['bash','-lc','systemctl list-unit-files beep-bridge.service --no-legend 2>/dev/null | grep -q beep-bridge.service'], text=True)
 pidfile = base/'bridge.pid'
-if pidfile.exists():
-    try:
-        pid = int(pidfile.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        print('killed old pid', pid)
-        time.sleep(.5)
-    except Exception as e:
-        print('kill old skipped', repr(e))
-log = open(base/'logs'/'bridge.log', 'ab', buffering=0)
-env = os.environ.copy()
-env.update({
-    'ROS_DOMAIN_ID': '16',
-    'ROS_LOCALHOST_ONLY': '0',
-    'BEEP_APP_HOST': '192.168.8.88',
-    'BEEP_CAMERA_URL': 'http://192.168.8.88:6500/video_feed',
-    'BEEP_FORWARD_UNTIL_MAX_S': '12',
-    'BEEP_MOTOR_BACKEND': 'sdk',
-    'BEEP_SDK_STEP': '10',
-    'BEEP_SDK_GAIT': 'walk',
-    'BEEP_SDK_PACE': 'slow',
-    'BEEP_MAP_DIR': '/home/pi/beep_bridge/maps',
-    'BEEP_SDK_FORWARD_M_PER_S': '0.045',
-    'BEEP_SDK_STRAFE_M_PER_S': '0.035',
-    'BEEP_SDK_TURN_RAD_PER_S': '0.45',
-})
-cmd = ['bash','-lc','source /opt/ros/foxy/setup.bash; source /home/pi/cartographer_ws2/install/setup.bash 2>/dev/null || true; exec python3 /home/pi/beep_bridge/beep_bridge.py']
-proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
-pidfile.write_text(str(proc.pid))
-print('started pid', proc.pid)
-time.sleep(1.5)
-print('alive', proc.poll() is None)
+if svc.returncode == 0:
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print('killed legacy pid', pid)
+            pidfile.unlink(missing_ok=True)
+            time.sleep(.5)
+        except Exception as e:
+            print('legacy pid cleanup skipped', repr(e))
+    r = subprocess.run(['sudo','systemctl','restart','beep-bridge'], text=True, capture_output=True, timeout=20)
+    print('systemd_restart', r.returncode, r.stderr)
+    if r.returncode:
+        raise SystemExit(r.returncode)
+    time.sleep(2.0)
+    active = subprocess.run(['systemctl','is-active','beep-bridge'], text=True, capture_output=True, timeout=5)
+    print('systemd_active', active.stdout.strip())
+else:
+    log = open(base/'logs'/'bridge.log', 'ab', buffering=0)
+    env = os.environ.copy()
+    env.update({
+        'ROS_DOMAIN_ID': '16',
+        'ROS_LOCALHOST_ONLY': '0',
+        'BEEP_APP_HOST': '192.168.8.88',
+        'BEEP_CAMERA_URL': 'http://192.168.8.88:6500/video_feed',
+        'BEEP_FORWARD_UNTIL_MAX_S': '12',
+        'BEEP_MOTOR_BACKEND': 'sdk',
+        'BEEP_SDK_STEP': '10',
+        'BEEP_SDK_GAIT': 'walk',
+        'BEEP_SDK_PACE': 'slow',
+        'BEEP_MAP_DIR': '/home/pi/beep_bridge/maps',
+        'BEEP_SDK_FORWARD_M_PER_S': '0.045',
+        'BEEP_SDK_STRAFE_M_PER_S': '0.035',
+        'BEEP_SDK_TURN_RAD_PER_S': '0.45',
+    })
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print('killed old pid', pid)
+            time.sleep(.5)
+        except Exception as e:
+            print('kill old skipped', repr(e))
+    cmd = ['bash','-lc','source /opt/ros/foxy/setup.bash; source /home/pi/cartographer_ws2/install/setup.bash 2>/dev/null || true; exec python3 /home/pi/beep_bridge/beep_bridge.py']
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    pidfile.write_text(str(proc.pid))
+    print('started pid', proc.pid)
+    time.sleep(1.5)
+    print('alive', proc.poll() is None)
 '''
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"
     async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8) as ws:

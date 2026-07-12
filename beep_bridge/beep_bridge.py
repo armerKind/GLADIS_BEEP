@@ -58,6 +58,22 @@ EXPLORE_SAFE_SIDE_M = float(os.environ.get("BEEP_EXPLORE_SAFE_SIDE_M", "0.25"))
 SDK_FORWARD_M_PER_S = float(os.environ.get("BEEP_SDK_FORWARD_M_PER_S", "0.045"))
 SDK_STRAFE_M_PER_S = float(os.environ.get("BEEP_SDK_STRAFE_M_PER_S", "0.035"))
 SDK_TURN_RAD_PER_S = float(os.environ.get("BEEP_SDK_TURN_RAD_PER_S", "0.45"))
+TRICK_SETTLE_S = float(os.environ.get("BEEP_TRICK_SETTLE_S", "2.0"))
+TRICK_ACTIONS = {
+    "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
+    "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
+    "three_axis": {"id": 10, "label": "3-axis body motion", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["3axis", "axis", "body_demo"]},
+    "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 3.5, "safe_for_fair": True, "aliases": ["leg_lift", "mark", "urinate"]},
+    "stretch": {"id": 14, "label": "Stretch", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["show", "startup_show", "lazy"]},
+    "swing": {"id": 16, "label": "Swing", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["shake", "wobble"]},
+    "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["beg", "begging", "request_food"]},
+}
+TRICK_ALIASES = {}
+for _trick_name, _trick_meta in TRICK_ACTIONS.items():
+    TRICK_ALIASES[_trick_name] = _trick_name
+    TRICK_ALIASES[str(_trick_meta["id"])] = _trick_name
+    for _alias in _trick_meta.get("aliases", []):
+        TRICK_ALIASES[str(_alias).lower()] = _trick_name
 sdk_dog = None
 sdk_error = None
 
@@ -66,7 +82,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.7.1-scanmatch-localmap",
+    "version": "0.8.0-tricks",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -163,6 +179,60 @@ def sdk_send(action: str, step=None):
         state["last_command_at"] = time.time()
         state["moving"] = action != "stop"
     remember("sdk_send", action=action, step=step)
+
+
+def resolve_trick(name=None, action_id=None):
+    key = None
+    if action_id is not None:
+        key = str(int(action_id))
+    elif name is not None:
+        key = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+    if not key:
+        raise ValueError("provide trick name or action id")
+    mapped = TRICK_ALIASES.get(key)
+    if mapped:
+        meta = dict(TRICK_ACTIONS[mapped])
+        meta["name"] = mapped
+        return meta
+    if key.isdigit():
+        raw_id = int(key)
+        if raw_id <= 0 or raw_id > 255:
+            raise ValueError("raw action id must be in 1..255")
+        return {"name": f"raw_{raw_id}", "id": raw_id, "label": f"Raw SDK action {raw_id}", "duration_s": TRICK_SETTLE_S, "safe_for_fair": False, "aliases": []}
+    raise ValueError(f"unknown trick {key!r}; use /actions")
+
+
+def tricks_payload():
+    items = []
+    for name, meta in sorted(TRICK_ACTIONS.items(), key=lambda kv: kv[1]["id"]):
+        item = dict(meta)
+        item["name"] = name
+        items.append(item)
+    return {"actions": items, "aliases": dict(sorted(TRICK_ALIASES.items())), "raw_action_ids_supported": True}
+
+
+def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
+    trick = resolve_trick(name=name, action_id=action_id)
+    settle_s = trick.get("duration_s", TRICK_SETTLE_S) if settle_s is None else float(settle_s)
+    settle_s = max(0.0, min(settle_s, 8.0))
+    if dry_run:
+        remember("sdk_trick_dry_run", trick=trick)
+        return {"ok": True, "dry_run": True, "trick": trick}
+    with motion_lock:
+        g = sdk_init()
+        with state_lock:
+            state["last_command"] = "sdk_action:" + trick["name"]
+            state["last_command_at"] = time.time()
+            state["moving"] = True
+            state["last_error"] = None
+        remember("sdk_trick_start", trick=trick)
+        g.action(int(trick["id"]))
+        if settle_s:
+            time.sleep(settle_s)
+        with state_lock:
+            state["moving"] = False
+        remember("sdk_trick_done", trick=trick, settle_s=settle_s)
+    return {"ok": True, "dry_run": False, "trick": trick, "settle_s": settle_s}
 
 
 def motor_send(action: str, step=None):
@@ -907,6 +977,37 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
     return result
 
 
+def mark_object(target_front=0.45, max_duration=5.0, turn="right", turn_duration=0.75, dry_run=False):
+    """Fair routine: approach frontal object, turn sideways, then run pee trick."""
+    target_front = max(0.35, min(float(target_front), 1.0))
+    max_duration = max(0.0, min(float(max_duration), 8.0))
+    turn_duration = max(0.0, min(float(turn_duration), 2.0))
+    turn = str(turn).lower()
+    if turn not in ("left", "right"):
+        raise ValueError("turn must be 'left' or 'right'")
+    plan = {"mode": "mark_object", "target_front_m": target_front, "max_duration_s": max_duration,
+            "turn": turn, "turn_duration_s": turn_duration, "trick": resolve_trick(name="pee")}
+    if dry_run:
+        remember("mark_object_dry_run", plan=plan)
+        return {"ok": True, "dry_run": True, "plan": plan, "status": snapshot()}
+    steps = []
+    approach = forward_until(target_front=target_front, max_duration=max_duration, pulse=0.35, min_target=0.30, reorient=True)
+    steps.append({"step": "approach", "result": approach})
+    snap = snapshot()
+    front = (snap.get("sectors") or {}).get("front")
+    if front is None or front < 0.30:
+        stop_burst(3)
+        result = {"ok": False, "mode": "mark_object", "reason": "unsafe_after_approach", "steps": steps, "status": snap}
+        remember("mark_object_abort", reason=result["reason"], front=front)
+        return result
+    turn_action = "turnright" if turn == "right" else "turnleft"
+    steps.append({"step": "turn", "result": run_action(turn_action, turn_duration)})
+    steps.append({"step": "pee", "result": sdk_trick(name="pee")})
+    result = {"ok": True, "mode": "mark_object", "steps": steps, "status": snapshot()}
+    remember("mark_object_done", ok=True)
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "BEEPBridge/0.5"
 
@@ -948,9 +1049,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
-                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "dead_reckoning+local_scan_matching", "local_map": True})
+                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "dead_reckoning+local_scan_matching", "local_map": True,
+                                "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S}})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
+            elif p.path in ("/actions", "/tricks"):
+                self.send_json(tricks_payload())
             elif p.path == "/scan":
                 snap = snapshot()
                 self.send_json({"sectors": snap.get("sectors", {}), "scan_age_s": snap.get("scan_age_s"), "scan_count": snap.get("scan_count")})
@@ -984,6 +1088,21 @@ class Handler(BaseHTTPRequestHandler):
                 duration = float((qs.get("duration") or ["0.2"])[0])
                 step = (qs.get("step") or [None])[0]
                 self.send_json(run_action(action, duration, step=step))
+            elif p.path in ("/action", "/trick"):
+                name = (qs.get("name") or qs.get("action") or qs.get("trick") or [None])[0]
+                action_id = (qs.get("id") or qs.get("action_id") or [None])[0]
+                dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
+                settle = (qs.get("settle_s") or qs.get("duration") or [None])[0]
+                self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=dry, settle_s=settle))
+            elif p.path == "/mark_object":
+                dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
+                self.send_json(mark_object(
+                    target_front=float((qs.get("target_front") or ["0.45"])[0]),
+                    max_duration=float((qs.get("max_duration") or ["5.0"])[0]),
+                    turn=(qs.get("turn") or ["right"])[0],
+                    turn_duration=float((qs.get("turn_duration") or ["0.75"])[0]),
+                    dry_run=dry,
+                ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
                 self.send_json(forward_until(
                     target_front=float((qs.get("target_front") or qs.get("target") or ["0.10"])[0]),
@@ -1002,7 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
                     rotate_scan=(qs.get("rotate_scan") or ["1"])[0] != "0",
                 ))
             else:
-                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/forward_until", "/explore_room", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)
@@ -1021,6 +1140,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
             elif p.path == "/move":
                 self.send_json(run_action(body.get("action", "stop"), float(body.get("duration", 0.2)), step=body.get("step")))
+            elif p.path in ("/action", "/trick"):
+                self.send_json(sdk_trick(
+                    name=body.get("name", body.get("action", body.get("trick"))),
+                    action_id=body.get("id", body.get("action_id")),
+                    dry_run=bool(body.get("dry_run", body.get("dry", False))),
+                    settle_s=body.get("settle_s", body.get("duration")),
+                ))
+            elif p.path == "/mark_object":
+                self.send_json(mark_object(
+                    target_front=float(body.get("target_front", 0.45)),
+                    max_duration=float(body.get("max_duration", 5.0)),
+                    turn=body.get("turn", "right"),
+                    turn_duration=float(body.get("turn_duration", 0.75)),
+                    dry_run=bool(body.get("dry_run", body.get("dry", False))),
+                ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
                 self.send_json(forward_until(
                     target_front=float(body.get("target_front", body.get("target", 0.10))),

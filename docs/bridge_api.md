@@ -28,6 +28,11 @@ http://192.168.8.88:8766
 - `GET /stop` / `POST /stop` — stop burst
 - `GET /move?action=<action>&duration=<seconds>&step=<step>` — bounded primitive
 - `POST /move` — JSON movement request
+- `GET /actions` / `/tricks` — list known Yahboom/DOGZILLA preset SDK actions
+- `GET /action?name=<pee|stretch|swing|pray|three_axis|crawl|reset>&dry_run=1` — resolve or run a named preset action
+- `GET /action?id=<1..255>` — run a raw vendor preset action ID
+- `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`
+- `GET /mark_object?dry_run=1` / `POST /mark_object` — fair routine: guarded approach, turn sideways, then `pee`
 
 Example:
 
