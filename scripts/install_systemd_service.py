@@ -102,7 +102,8 @@ cmds = [
     ['systemctl','--no-pager','--lines','20','status','beep-bridge.service'],
 ]
 for cmd in cmds:
-    print('\n###', ' '.join(cmd))
+    print()
+    print('###', ' '.join(cmd))
     p = subprocess.run(cmd, text=True, capture_output=True, timeout=20)
     print('rc', p.returncode)
     print((p.stdout + p.stderr)[-4000:])
