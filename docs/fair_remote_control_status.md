@@ -82,6 +82,33 @@ no wlan1 created
 
 Conclusion: this AIC/UGREEN dongle is **not fair-safe** unless more driver debugging is done. Do not rely on it for next week.
 
+## Cleanup performed
+
+The failed AIC driver experiment was removed from BEEP after verification:
+
+```text
+AIC kernel modules: absent
+AIC DKMS entry: absent
+/usr/src/aic8800-radxa: removed
+/var/lib/dkms/aic8800: removed
+/lib/firmware/aic8800D80: removed
+/home/pi/aic8800_bundle*: removed
+/etc/usb_modeswitch.d/a69c:5723: removed
+dkms/dctrl-tools packages: purged
+tailscale package: retained
+```
+
+Bridge and Tailscale remained active after cleanup:
+
+```text
+beep-bridge: active
+tailscaled: active
+scan_seen: true
+scan_age_s: <0.1s during verification
+```
+
+Note: `apt autoremove` removed ROS GUI/demo packages such as `rviz2`, `rqt`, `turtlesim`, and ROS examples. The bridge and live LiDAR `/scan` remained functional. Do not reinstall demo/GUI packages for the fair unless a concrete workflow needs them.
+
 ## Recommended fair path
 
 Use one of these instead:
