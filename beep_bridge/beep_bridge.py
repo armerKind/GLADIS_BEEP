@@ -59,6 +59,9 @@ SDK_FORWARD_M_PER_S = float(os.environ.get("BEEP_SDK_FORWARD_M_PER_S", "0.045"))
 SDK_STRAFE_M_PER_S = float(os.environ.get("BEEP_SDK_STRAFE_M_PER_S", "0.035"))
 SDK_TURN_RAD_PER_S = float(os.environ.get("BEEP_SDK_TURN_RAD_PER_S", "0.45"))
 TRICK_SETTLE_S = float(os.environ.get("BEEP_TRICK_SETTLE_S", "2.0"))
+MARK_TURN_DIRECTION = os.environ.get("BEEP_MARK_TURN_DIRECTION", "left").strip().lower()
+MARK_TURN_DEGREES = float(os.environ.get("BEEP_MARK_TURN_DEGREES", "90.0"))
+MARK_TURN_DURATION_S = float(os.environ.get("BEEP_MARK_TURN_90_S", "0.75"))
 TRICK_ACTIONS = {
     "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
@@ -82,7 +85,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.8.1-fast-tricks",
+    "version": "0.8.2-left-marking",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1008,8 +1011,9 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
     return result
 
 
-def mark_object(target_front=0.45, max_duration=5.0, turn="right", turn_duration=0.75, dry_run=False):
-    """Fair routine: approach frontal object, turn sideways, then run pee trick."""
+def mark_object(target_front=0.45, max_duration=5.0, turn=MARK_TURN_DIRECTION,
+                turn_duration=MARK_TURN_DURATION_S, dry_run=False):
+    """Approach a target, turn left 90 degrees, then lift the right leg."""
     target_front = max(0.35, min(float(target_front), 1.0))
     max_duration = max(0.0, min(float(max_duration), 8.0))
     turn_duration = max(0.0, min(float(turn_duration), 2.0))
@@ -1017,7 +1021,8 @@ def mark_object(target_front=0.45, max_duration=5.0, turn="right", turn_duration
     if turn not in ("left", "right"):
         raise ValueError("turn must be 'left' or 'right'")
     plan = {"mode": "mark_object", "target_front_m": target_front, "max_duration_s": max_duration,
-            "turn": turn, "turn_duration_s": turn_duration, "trick": resolve_trick(name="pee")}
+            "turn": turn, "turn_degrees": MARK_TURN_DEGREES, "turn_duration_s": turn_duration,
+            "marking_side": "right", "trick": resolve_trick(name="pee")}
     if dry_run:
         remember("mark_object_dry_run", plan=plan)
         return {"ok": True, "dry_run": True, "plan": plan, "status": snapshot()}
@@ -1132,8 +1137,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(mark_object(
                     target_front=float((qs.get("target_front") or ["0.45"])[0]),
                     max_duration=float((qs.get("max_duration") or ["5.0"])[0]),
-                    turn=(qs.get("turn") or ["right"])[0],
-                    turn_duration=float((qs.get("turn_duration") or ["0.75"])[0]),
+                    turn=(qs.get("turn") or [MARK_TURN_DIRECTION])[0],
+                    turn_duration=float((qs.get("turn_duration") or [str(MARK_TURN_DURATION_S)])[0]),
                     dry_run=dry,
                 ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
@@ -1186,8 +1191,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(mark_object(
                     target_front=float(body.get("target_front", 0.45)),
                     max_duration=float(body.get("max_duration", 5.0)),
-                    turn=body.get("turn", "right"),
-                    turn_duration=float(body.get("turn_duration", 0.75)),
+                    turn=body.get("turn", MARK_TURN_DIRECTION),
+                    turn_duration=float(body.get("turn_duration", MARK_TURN_DURATION_S)),
                     dry_run=bool(body.get("dry_run", body.get("dry", False))),
                 ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
