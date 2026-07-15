@@ -62,6 +62,8 @@ TRICK_SETTLE_S = float(os.environ.get("BEEP_TRICK_SETTLE_S", "2.0"))
 MARK_TURN_DIRECTION = os.environ.get("BEEP_MARK_TURN_DIRECTION", "left").strip().lower()
 MARK_TURN_DEGREES = float(os.environ.get("BEEP_MARK_TURN_DEGREES", "90.0"))
 MARK_TURN_DURATION_S = float(os.environ.get("BEEP_MARK_TURN_90_S", "0.75"))
+MARK_TARGET_FRONT_M = float(os.environ.get("BEEP_MARK_TARGET_FRONT_M", "0.25"))
+MARK_MIN_FRONT_M = float(os.environ.get("BEEP_MARK_MIN_FRONT_M", "0.16"))
 TRICK_ACTIONS = {
     "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
@@ -85,7 +87,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.8.2-left-marking",
+    "version": "0.8.3-close-marking",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1011,10 +1013,10 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
     return result
 
 
-def mark_object(target_front=0.45, max_duration=5.0, turn=MARK_TURN_DIRECTION,
+def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TURN_DIRECTION,
                 turn_duration=MARK_TURN_DURATION_S, dry_run=False):
     """Approach a target, turn left 90 degrees, then lift the right leg."""
-    target_front = max(0.35, min(float(target_front), 1.0))
+    target_front = max(0.20, min(float(target_front), 1.0))
     max_duration = max(0.0, min(float(max_duration), 8.0))
     turn_duration = max(0.0, min(float(turn_duration), 2.0))
     turn = str(turn).lower()
@@ -1027,11 +1029,11 @@ def mark_object(target_front=0.45, max_duration=5.0, turn=MARK_TURN_DIRECTION,
         remember("mark_object_dry_run", plan=plan)
         return {"ok": True, "dry_run": True, "plan": plan, "status": snapshot()}
     steps = []
-    approach = forward_until(target_front=target_front, max_duration=max_duration, pulse=0.35, min_target=0.30, reorient=True)
+    approach = forward_until(target_front=target_front, max_duration=max_duration, pulse=0.20, min_target=0.18, reorient=True)
     steps.append({"step": "approach", "result": approach})
     snap = snapshot()
     front = (snap.get("sectors") or {}).get("front")
-    if front is None or front < 0.30:
+    if front is None or front < MARK_MIN_FRONT_M:
         stop_burst(3)
         result = {"ok": False, "mode": "mark_object", "reason": "unsafe_after_approach", "steps": steps, "status": snap}
         remember("mark_object_abort", reason=result["reason"], front=front)
@@ -1135,7 +1137,7 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/mark_object":
                 dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
                 self.send_json(mark_object(
-                    target_front=float((qs.get("target_front") or ["0.45"])[0]),
+                    target_front=float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0]),
                     max_duration=float((qs.get("max_duration") or ["5.0"])[0]),
                     turn=(qs.get("turn") or [MARK_TURN_DIRECTION])[0],
                     turn_duration=float((qs.get("turn_duration") or [str(MARK_TURN_DURATION_S)])[0]),
@@ -1189,7 +1191,7 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif p.path == "/mark_object":
                 self.send_json(mark_object(
-                    target_front=float(body.get("target_front", 0.45)),
+                    target_front=float(body.get("target_front", MARK_TARGET_FRONT_M)),
                     max_duration=float(body.get("max_duration", 5.0)),
                     turn=body.get("turn", MARK_TURN_DIRECTION),
                     turn_duration=float(body.get("turn_duration", MARK_TURN_DURATION_S)),

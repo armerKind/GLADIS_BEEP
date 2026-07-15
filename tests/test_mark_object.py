@@ -16,6 +16,7 @@ class MarkObjectPlanTests(unittest.TestCase):
         result = bridge.mark_object(dry_run=True)
 
         plan = result["plan"]
+        self.assertEqual(plan["target_front_m"], 0.25)
         self.assertEqual(plan["turn"], "left")
         self.assertEqual(plan["turn_degrees"], 90.0)
         self.assertEqual(plan["marking_side"], "right")
