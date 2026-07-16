@@ -87,7 +87,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.9.1-reactive-explorer",
+    "version": "0.10.0-cartographer-slam",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -100,6 +100,7 @@ state = {
     "last_frame_at": None,
     "last_frame_bytes": None,
     "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0, "source": "dead_reckoning", "confidence": 0.25, "scan_match_score": None},
+    "slam": {"active": False, "pose_at": None, "pose_age_s": None, "map_at": None, "map_age_s": None, "map_width": None, "map_height": None, "resolution_m": None},
     "map": {"active": False, "updated_at": None, "scan_updates": 0, "occupied_cells": 0, "free_cells": 0, "quality": "none"},
 }
 last_scan = None
@@ -345,11 +346,37 @@ def scan_callback(msg):
         last_scan = {"at": state["scan_at"], "ranges": ranges, "range_max": float(msg.range_max)}
 
 
+def quaternion_to_yaw(x, y, z, w):
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def occupancy_callback(msg):
+    now = time.time()
+    data = list(msg.data)
+    known = sum(1 for value in data if int(value) >= 0)
+    occupied = sum(1 for value in data if int(value) >= 50)
+    with state_lock:
+        slam = dict(state.get("slam") or {})
+        slam.update({
+            "map_at": now,
+            "map_age_s": 0.0,
+            "map_width": int(msg.info.width),
+            "map_height": int(msg.info.height),
+            "resolution_m": float(msg.info.resolution),
+            "known_cells": known,
+            "occupied_cells": occupied,
+        })
+        state["slam"] = slam
+
+
 def ros_thread():
     try:
         import rclpy
         from rclpy.node import Node
         from sensor_msgs.msg import LaserScan
+        from nav_msgs.msg import OccupancyGrid
+        from rclpy.time import Time
+        from tf2_ros import Buffer, TransformListener
     except Exception as e:
         with state_lock:
             state["last_error"] = "rclpy import failed: " + repr(e)
@@ -359,6 +386,39 @@ def ros_thread():
         def __init__(self):
             super().__init__("beep_bridge_scan")
             self.create_subscription(LaserScan, "/scan", scan_callback, 10)
+            self.create_subscription(OccupancyGrid, "/map", occupancy_callback, 10)
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
+            self.create_timer(0.20, self.update_slam_pose)
+
+        def update_slam_pose(self):
+            now = time.time()
+            try:
+                transform = self.tf_buffer.lookup_transform("map", "base_link", Time())
+                t = transform.transform.translation
+                q = transform.transform.rotation
+                yaw = quaternion_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
+                with state_lock:
+                    state["pose"] = {
+                        "x": round(float(t.x), 4),
+                        "y": round(float(t.y), 4),
+                        "yaw": round(yaw, 4),
+                        "source": "cartographer_slam",
+                        "confidence": 0.95,
+                        "scan_match_score": None,
+                    }
+                    slam = dict(state.get("slam") or {})
+                    slam.pop("tf_error", None)
+                    slam.update({"active": True, "pose_at": now, "pose_age_s": 0.0})
+                    state["slam"] = slam
+            except Exception as exc:
+                with state_lock:
+                    slam = dict(state.get("slam") or {})
+                    pose_at = slam.get("pose_at")
+                    slam["pose_age_s"] = None if not pose_at else round(now - float(pose_at), 3)
+                    slam["active"] = bool(pose_at and now - float(pose_at) <= 1.0)
+                    slam["tf_error"] = repr(exc)
+                    state["slam"] = slam
 
     try:
         rclpy.init(args=None)
@@ -379,6 +439,12 @@ def snapshot(full=False):
         out = dict(state)
         out["uptime_s"] = round(time.time() - state["started_at"], 2)
         out["scan_age_s"] = None if not state.get("scan_at") else round(time.time() - state["scan_at"], 3)
+        slam = dict(out.get("slam") or {})
+        slam["pose_age_s"] = None if not slam.get("pose_at") else round(time.time() - float(slam["pose_at"]), 3)
+        slam["map_age_s"] = None if not slam.get("map_at") else round(time.time() - float(slam["map_at"]), 3)
+        pose_age = slam.get("pose_age_s")
+        slam["active"] = bool(slam.get("pose_at") and pose_age is not None and float(pose_age) <= 1.0)
+        out["slam"] = slam
         if full:
             out["last_run"] = last_run
         elif last_run:
@@ -497,6 +563,10 @@ def update_pose_for_action(action, duration):
     action = str(action).lower()
     duration = float(duration or 0.0)
     with state_lock:
+        slam = dict(state.get("slam") or {})
+        slam_at = slam.get("pose_at")
+        if state.get("pose", {}).get("source") == "cartographer_slam" and slam_at and time.time() - float(slam_at) <= 1.0:
+            return
         p = dict(state.get("pose") or {"x": 0.0, "y": 0.0, "yaw": 0.0, "source": "dead_reckoning"})
         x, y, yaw = float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("yaw", 0.0))
         if action == "forward":
@@ -542,7 +612,7 @@ def new_room_map(name="room"):
         "log_odds": {},
         "path": [],
         "scan_updates": 0,
-        "notes": "Dead-reckoned LiDAR occupancy map. Good enough to avoid obvious doom; not loop-closed SLAM.",
+        "notes": "LiDAR occupancy trace placed with Cartographer pose when SLAM is active; ROS /map remains the authoritative loop-closed map.",
     }
 
 
@@ -857,6 +927,9 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
             s0 = snapshot()
             if not scan_ok(s0):
                 reason = "scan_stale_or_missing_before_start"
+                return {"ok": False, "mode": "explore_room", "reason": reason, "status": s0, "map": map_summary(m), "trace_tail": []}
+            if not (s0.get("slam") or {}).get("active"):
+                reason = "slam_pose_unavailable_before_start"
                 return {"ok": False, "mode": "explore_room", "reason": reason, "status": s0, "map": map_summary(m), "trace_tail": []}
             update_map_from_scan(m, scan_match=False)
             if rotate_scan:

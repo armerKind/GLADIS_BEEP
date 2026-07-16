@@ -1,0 +1,6 @@
+image: /home/pi/gladis_maps/beep_slam_20260717_051341.pgm
+resolution: 0.050000
+origin: [-1.520036, -3.222297, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196

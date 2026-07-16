@@ -97,6 +97,26 @@ curl -s http://192.168.8.88:8766/config | python3 -m json.tool
 
 The service is designed to restart automatically after crashes and boot automatically after Pi reboot. A tiny act of civilization.
 
+## Persistent Cartographer SLAM
+
+Install and enable `systemd/beep-cartographer.service` and `systemd/beep-occupancy-grid.service`. Cartographer uses `config/beep_2d.lua`, a Pi-safe configuration that filters quadruped vibration, limits pose-graph work, publishes `map -> odom -> base_link`, and consumes `/scan` without requiring wheel odometry.
+
+Healthy runtime signals:
+
+- `beep-cartographer`, `beep-occupancy-grid`, and `beep-bridge` are active.
+- `/health` reports `pose.source: cartographer_slam` and `slam.active: true`.
+- `slam.pose_age_s` and `slam.map_age_s` remain below one second.
+- ROS publishes `/map` as `nav_msgs/msg/OccupancyGrid` at 0.05 m resolution.
+
+Save the current trajectory and export `.pbstream`, `.pgm`, and `.yaml` artifacts with:
+
+```bash
+/home/pi/beep_bridge/save_slam_map.sh
+sudo systemctl restart beep-cartographer beep-occupancy-grid
+```
+
+The restart creates a fresh mapping trajectory. `/explore_room` refuses autonomous movement when the SLAM pose is missing or stale.
+
 ## Verification
 
 ```bash

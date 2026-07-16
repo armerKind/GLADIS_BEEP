@@ -1,0 +1,17 @@
+[Unit]
+Description=BEEP Cartographer 2D SLAM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Environment=ROS_DOMAIN_ID=16
+Environment=ROS_LOCALHOST_ONLY=0
+ExecStart=/bin/bash -lc 'source /opt/ros/foxy/setup.bash; source /home/pi/cartographer_ws2/install/setup.bash; exec ros2 run cartographer_ros cartographer_node -configuration_directory /home/pi/cartographer_ws2/install/cartographer_ros/share/cartographer_ros/configuration_files -configuration_basename beep_2d.lua --ros-args -r /scan:=/scan'
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

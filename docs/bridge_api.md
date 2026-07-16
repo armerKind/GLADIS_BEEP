@@ -34,7 +34,9 @@ http://192.168.8.88:8766
 - `GET /action?id=<1..255>` — run a raw vendor preset action ID
 - `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`; use `{ "name": "pee", "wait": false }` for fire-and-forget
 - `GET /mark_object?dry_run=1` / `POST /mark_object` — marking routine: one fluent continuous walk to 0.25m under live LiDAR stop control, calibrated 90° left turn, then `pee` (the preset lifts the right leg, placing it beside the target). It aborts before turning if the approach does not reach its target.
-- `GET /explore_room?max_duration=30&reset=1&rotate_scan=0` — reactive LiDAR exploration with visible step-20 forward strides, obstacle-driven turns/strafe escapes, fast dead-reckoned map updates, final stop, and optional JSON map save. This favors responsive motion over expensive scan matching during the run.
+- `GET /explore_room?max_duration=30&reset=1&rotate_scan=0` — Cartographer-SLAM-localized LiDAR exploration with visible step-20 forward strides, obstacle-driven turns/strafe escapes, map-frame poses, final stop, and optional JSON trace save. The endpoint refuses to move when the Cartographer pose is unavailable or stale.
+
+`/health` and `/status` expose `pose.source=cartographer_slam` plus a `slam` object containing pose/map freshness, ROS occupancy-grid dimensions, resolution, known cells, and occupied cells. The authoritative room map is ROS `/map`; the bridge JSON map is only a compact trace/diagnostic rendering.
 
 Example:
 

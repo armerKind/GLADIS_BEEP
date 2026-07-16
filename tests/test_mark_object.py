@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import math
 import unittest
 
 
@@ -70,6 +71,12 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertEqual(action, "forward")
         self.assertEqual(duration, 0.8)
         self.assertEqual(reason, "front_clear_stride")
+
+    def test_quaternion_to_yaw_extracts_planar_slam_heading(self):
+        yaw = math.pi / 2
+        actual = bridge.quaternion_to_yaw(0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
+
+        self.assertAlmostEqual(actual, yaw, places=6)
 
 
 if __name__ == "__main__":
