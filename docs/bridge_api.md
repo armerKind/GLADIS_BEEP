@@ -33,7 +33,8 @@ http://192.168.8.88:8766
 - `GET /action?name=pee&wait=0` or `GET /action?name=pee&async=1` — trigger a preset action and return immediately; preferred for Telegram/voice demos
 - `GET /action?id=<1..255>` — run a raw vendor preset action ID
 - `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`; use `{ "name": "pee", "wait": false }` for fire-and-forget
-- `GET /mark_object?dry_run=1` / `POST /mark_object` — marking routine: approach to 0.25m with fine pulses, calibrated 90° left turn, then `pee` (the preset lifts the right leg, placing it beside the target)
+- `GET /mark_object?dry_run=1` / `POST /mark_object` — marking routine: one fluent continuous walk to 0.25m under live LiDAR stop control, calibrated 90° left turn, then `pee` (the preset lifts the right leg, placing it beside the target). It aborts before turning if the approach does not reach its target.
+- `GET /explore_room?max_duration=30&reset=1&rotate_scan=0` — reactive LiDAR exploration with visible step-20 forward strides, obstacle-driven turns/strafe escapes, fast dead-reckoned map updates, final stop, and optional JSON map save. This favors responsive motion over expensive scan matching during the run.
 
 Example:
 

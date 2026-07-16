@@ -87,7 +87,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.8.3-close-marking",
+    "version": "0.9.1-reactive-explorer",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -722,7 +722,7 @@ def local_map_svg():
     svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='{size}' height='{size}' viewBox='0 0 {size} {size}'><rect width='100%' height='100%' fill='white'/>{''.join(rings)}{''.join(dots)}{robot}<text x='10' y='20' font-size='16'>BEEP local LiDAR map (robot frame)</text></svg>"
     return svg.encode('utf-8')
 
-def update_map_from_scan(m=None):
+def update_map_from_scan(m=None, scan_match=True):
     global room_map
     if m is None:
         m = ensure_room_map()
@@ -731,7 +731,7 @@ def update_map_from_scan(m=None):
         pose = dict(state.get("pose") or {})
     if not scan or not scan.get("ranges"):
         return {"ok": False, "reason": "no_scan"}
-    match = maybe_scan_match_pose()
+    match = maybe_scan_match_pose() if scan_match else {"ok": False, "reason": "disabled_for_fast_explore"}
     with state_lock:
         pose = dict(state.get("pose") or {})
     px, py, yaw = float(pose.get("x", 0.0)), float(pose.get("y", 0.0)), float(pose.get("yaw", 0.0))
@@ -822,16 +822,26 @@ def choose_explore_action(sectors):
     # BEEP has shown left-biased/stiff forward motion. Prefer lateral escape when
     # the left/front-left sector tightens instead of turning in place repeatedly.
     if (fl < 0.32 or left < 0.28) and right > 0.42:
-        return "right", 0.35, "left_close_strafe_right"
+        return "right", 0.60, "left_close_strafe_right"
     if (fr < 0.32 or right < 0.28) and left > 0.42:
-        return "left", 0.35, "right_close_strafe_left"
+        return "left", 0.60, "right_close_strafe_left"
     if front > max(EXPLORE_SAFE_FRONT_M, 0.50) and fl > 0.34 and fr > 0.34:
-        return "forward", 0.35, "soft_front_clear"
+        return "forward", 0.80, "front_clear_stride"
     # If forward is blocked but one side is open, use short turns only. DogZilla
     # SDK clamps turn step to at least 30, so duration must stay short.
     if max(left, fl) >= max(right, fr):
-        return "turnleft", 0.30, "left_more_open_short_turn"
-    return "turnright", 0.30, "right_more_open_short_turn"
+        return "turnleft", 0.45, "left_more_open_turn"
+    return "turnright", 0.45, "right_more_open_turn"
+
+
+def explore_step_for(action):
+    if action == "forward":
+        return 20
+    if action in ("left", "right"):
+        return 18
+    if action in ("turnleft", "turnright"):
+        return 30
+    return SDK_STEP_DEFAULT
 
 
 def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rotate_scan=True):
@@ -848,19 +858,19 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
             if not scan_ok(s0):
                 reason = "scan_stale_or_missing_before_start"
                 return {"ok": False, "mode": "explore_room", "reason": reason, "status": s0, "map": map_summary(m), "trace_tail": []}
-            update_map_from_scan(m)
+            update_map_from_scan(m, scan_match=False)
             if rotate_scan:
                 # In-place panorama: crude but valuable when odometry is unreliable.
                 for i in range(6):
                     if time.time() - started >= max_duration:
                         break
-                    motor_send("turnleft")
-                    dur = 0.25
+                    motor_send("turnleft", step=30)
+                    dur = 0.45
                     time.sleep(dur)
                     stop_burst(2)
                     update_pose_for_action("turnleft", dur)
                     time.sleep(0.08)
-                    up = update_map_from_scan(m)
+                    up = update_map_from_scan(m, scan_match=False)
                     trace.append({"phase": "rotate_scan", "i": i + 1, "update": up, "sectors": snapshot().get("sectors", {})})
             while time.time() - started < max_duration:
                 st = snapshot()
@@ -871,35 +881,36 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                 if (sec.get("front") or 99) < 0.22 or (sec.get("front_left") or 99) < 0.20 or (sec.get("front_right") or 99) < 0.20:
                     # Try one lateral escape if the opposite side is clearly open; otherwise stop.
                     if (sec.get("front_left") or 99) < 0.20 and (sec.get("right") or 0) > 0.45:
-                        motor_send("right")
-                        dur = 0.28
+                        motor_send("right", step=18)
+                        dur = 0.55
                         time.sleep(dur)
                         stop_burst(2)
                         update_pose_for_action("right", dur)
-                        time.sleep(0.10)
-                        up = update_map_from_scan(m)
-                        trace.append({"action": "right", "duration": round(dur, 2), "why": "reflex_left_close_escape", "sectors": sec, "pose": pose_copy(), "map_update": up})
+                        time.sleep(0.05)
+                        up = update_map_from_scan(m, scan_match=False)
+                        trace.append({"action": "right", "step": 18, "duration": round(dur, 2), "why": "reflex_left_close_escape", "sectors": sec, "pose": pose_copy(), "map_update": up})
                         continue
                     if (sec.get("front_right") or 99) < 0.20 and (sec.get("left") or 0) > 0.45:
-                        motor_send("left")
-                        dur = 0.28
+                        motor_send("left", step=18)
+                        dur = 0.55
                         time.sleep(dur)
                         stop_burst(2)
                         update_pose_for_action("left", dur)
-                        time.sleep(0.10)
-                        up = update_map_from_scan(m)
-                        trace.append({"action": "left", "duration": round(dur, 2), "why": "reflex_right_close_escape", "sectors": sec, "pose": pose_copy(), "map_update": up})
+                        time.sleep(0.05)
+                        up = update_map_from_scan(m, scan_match=False)
+                        trace.append({"action": "left", "step": 18, "duration": round(dur, 2), "why": "reflex_right_close_escape", "sectors": sec, "pose": pose_copy(), "map_update": up})
                         continue
                     reason = "too_close_reflex_stop"
                     break
                 action, dur, why = choose_explore_action(sec)
-                motor_send(action)
+                step = explore_step_for(action)
+                motor_send(action, step=step)
                 time.sleep(dur)
                 stop_burst(2)
                 update_pose_for_action(action, dur)
-                time.sleep(0.10)
-                up = update_map_from_scan(m)
-                trace.append({"action": action, "duration": round(dur, 2), "why": why, "sectors": sec, "pose": pose_copy(), "map_update": up})
+                time.sleep(0.05)
+                up = update_map_from_scan(m, scan_match=False)
+                trace.append({"action": action, "step": step, "duration": round(dur, 2), "why": why, "sectors": sec, "pose": pose_copy(), "map_update": up})
         except Exception as e:
             reason = "exception:" + repr(e)
             with state_lock:
@@ -1013,6 +1024,69 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
     return result
 
 
+def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.16,
+                             poll_interval=0.05, step=None):
+    """Walk forward continuously and stop from live LiDAR feedback."""
+    global last_run
+    target_front = max(float(target_front), float(min_target))
+    max_duration = min(max(float(max_duration), 0.0), FORWARD_UNTIL_MAX_S)
+    poll_interval = min(max(float(poll_interval), 0.02), 0.20)
+    started = time.time()
+    reason = "max_duration"
+    trace = []
+    final_state = snapshot()
+
+    with motion_lock:
+        if not scan_ok(final_state):
+            result = {"ok": False, "mode": "forward_continuous_until",
+                      "reason": "scan_stale_or_missing_before_start", "status": final_state, "trace_tail": []}
+            last_run = result
+            return result
+        initial_front = front_distance(final_state)
+        if initial_front is not None and initial_front <= target_front:
+            result = {"ok": True, "mode": "forward_continuous_until",
+                      "reason": f"already_at_target:{initial_front:.3f}", "status": final_state, "trace_tail": []}
+            last_run = result
+            return result
+
+        try:
+            motor_send("forward", step=step)
+            while time.time() - started < max_duration:
+                final_state = snapshot()
+                elapsed = time.time() - started
+                front = front_distance(final_state)
+                sectors = final_state.get("sectors") or {}
+                trace.append({"elapsed_s": round(elapsed, 3), "front": front,
+                              "front_left": sectors.get("front_left"),
+                              "front_right": sectors.get("front_right")})
+                if not scan_ok(final_state):
+                    reason = "scan_stale_or_missing"
+                    break
+                if front is not None and front <= target_front:
+                    reason = f"target_reached:{front:.3f}"
+                    break
+                close_side = min(sectors.get("front_left") or 99, sectors.get("front_right") or 99)
+                if close_side < min_target:
+                    reason = f"side_too_close:{close_side:.3f}"
+                    break
+                time.sleep(poll_interval)
+        except Exception as e:
+            reason = "exception:" + repr(e)
+            with state_lock:
+                state["last_error"] = repr(e)
+        finally:
+            stop_burst(3)
+
+    elapsed = time.time() - started
+    reached = reason.startswith("target_reached") or reason.startswith("already_at_target")
+    result = {"ok": reached, "mode": "forward_continuous_until", "target_front_m": target_front,
+              "reason": reason, "commanded_s": round(elapsed, 2), "elapsed_s": round(elapsed, 2),
+              "trace_tail": trace[-40:], "status": final_state}
+    last_run = result
+    remember("forward_continuous_done", reason=reason, commanded_s=round(elapsed, 2), target_front_m=target_front)
+    return result
+
+
 def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TURN_DIRECTION,
                 turn_duration=MARK_TURN_DURATION_S, dry_run=False):
     """Approach a target, turn left 90 degrees, then lift the right leg."""
@@ -1022,20 +1096,21 @@ def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TU
     turn = str(turn).lower()
     if turn not in ("left", "right"):
         raise ValueError("turn must be 'left' or 'right'")
-    plan = {"mode": "mark_object", "target_front_m": target_front, "max_duration_s": max_duration,
+    plan = {"mode": "mark_object", "approach_mode": "continuous", "target_front_m": target_front, "max_duration_s": max_duration,
             "turn": turn, "turn_degrees": MARK_TURN_DEGREES, "turn_duration_s": turn_duration,
             "marking_side": "right", "trick": resolve_trick(name="pee")}
     if dry_run:
         remember("mark_object_dry_run", plan=plan)
         return {"ok": True, "dry_run": True, "plan": plan, "status": snapshot()}
     steps = []
-    approach = forward_until(target_front=target_front, max_duration=max_duration, pulse=0.20, min_target=0.18, reorient=True)
+    approach = forward_continuous_until(target_front=target_front, max_duration=max_duration, min_target=MARK_MIN_FRONT_M)
     steps.append({"step": "approach", "result": approach})
     snap = snapshot()
     front = (snap.get("sectors") or {}).get("front")
-    if front is None or front < MARK_MIN_FRONT_M:
+    if not approach.get("ok") or front is None or front < MARK_MIN_FRONT_M:
         stop_burst(3)
-        result = {"ok": False, "mode": "mark_object", "reason": "unsafe_after_approach", "steps": steps, "status": snap}
+        reason = "approach_failed:" + str(approach.get("reason")) if not approach.get("ok") else "unsafe_after_approach"
+        result = {"ok": False, "mode": "mark_object", "reason": reason, "steps": steps, "status": snap}
         remember("mark_object_abort", reason=result["reason"], front=front)
         return result
     turn_action = "turnright" if turn == "right" else "turnleft"
