@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.12.2-lidar-avoid-resume",
+    "version": "0.13.0-fluent-arcs",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -202,6 +202,37 @@ def sdk_send(action: str, step=None):
         if action != "stop" or was_moving:
             state["last_motion_at"] = now
     remember("sdk_send", action=action, step=step)
+
+
+def sdk_curve(direction, forward_step=20, yaw_step=30):
+    """Combine independent VX and VYAW registers for a fluent walking arc."""
+    direction = str(direction).lower()
+    if direction not in ("left", "right"):
+        raise ValueError("curve direction must be left or right")
+    g = sdk_init()
+    g.move_x(abs(int(forward_step)))
+    signed_yaw = abs(int(yaw_step)) if direction == "left" else -abs(int(yaw_step))
+    g.turn(signed_yaw)
+    now = time.time()
+    with state_lock:
+        state["last_command"] = "sdk:curve_" + direction
+        state["last_command_at"] = now
+        state["last_motion_at"] = now
+        state["moving"] = True
+    remember("sdk_curve", direction=direction, forward_step=forward_step, yaw_step=signed_yaw)
+
+
+def sdk_straighten():
+    """Clear yaw velocity while preserving the active forward gait."""
+    g = sdk_init()
+    g.turn(0)
+    now = time.time()
+    with state_lock:
+        state["last_command"] = "sdk:forward"
+        state["last_command_at"] = now
+        state["last_motion_at"] = now
+        state["moving"] = True
+    remember("sdk_straighten")
 
 
 def resolve_trick(name=None, action_id=None):
@@ -1161,6 +1192,35 @@ def lidar_walk(max_duration=60.0, save=True):
                         reason = supervised["reason"]
                         break
                     continue
+                curve_direction = None
+                if action in ("turnleft", "left"):
+                    curve_direction = "left"
+                elif action in ("turnright", "right"):
+                    curve_direction = "right"
+                can_curve = (
+                    curve_direction is not None and
+                    float(sec.get("front") or 0) > 0.52 and
+                    float(sec.get("front_left") or 0) > 0.22 and
+                    float(sec.get("front_right") or 0) > 0.22
+                )
+                if can_curve:
+                    assert curve_direction is not None
+                    curve_duration = (0.90 if action.startswith("turn") else 0.65)
+                    sdk_curve(curve_direction, forward_step=20, yaw_step=30)
+                    current_action = "forward"
+                    supervised = supervise_lidar_forward(min(curve_duration, remaining))
+                    trace.append({"action": "arc_" + curve_direction, "duration": round(supervised["elapsed_s"], 3), "why": why, "sectors": sec})
+                    if supervised["ok"]:
+                        sdk_straighten()
+                        continue
+                    stop_burst(2)
+                    current_action = None
+                    if supervised["reason"] == "obstacle_during_lidar_walk":
+                        trace.append({"action": "stop_reassess", "why": supervised["reason"], "sectors": snapshot().get("sectors") or {}})
+                        time.sleep(0.10)
+                        continue
+                    reason = supervised["reason"]
+                    break
                 if current_action is not None:
                     stop_burst(2)
                     current_action = None

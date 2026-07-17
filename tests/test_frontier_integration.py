@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 from beep_bridge.frontier_planner import OccupancyGrid
 
@@ -14,6 +14,21 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_sdk_curve_combines_forward_and_yaw_then_straightens_without_stop(self):
+        dog = MagicMock()
+        original = dict(bridge.state)
+        try:
+            with patch.object(bridge, "sdk_init", return_value=dog):
+                bridge.sdk_curve("right", forward_step=20, yaw_step=30)
+                bridge.sdk_straighten()
+            dog.move_x.assert_called_once_with(20)
+            self.assertEqual(dog.turn.call_args_list, [call(-30), call(0)])
+            self.assertTrue(bridge.state["moving"])
+            self.assertEqual(bridge.state["last_command"], "sdk:forward")
+        finally:
+            bridge.state.clear()
+            bridge.state.update(original)
+
     def test_lidar_forward_supervisor_stops_on_fresh_close_obstacle(self):
         close = {
             "scan_seen": True,
