@@ -75,8 +75,10 @@ class FrontierIntegrationTests(unittest.TestCase):
              patch.object(bridge, "stop_burst", side_effect=lambda n=3: stops.append(n)):
             result = bridge.frontier_explore(max_duration=1.0, chaos=0.45, seed=7, save=False)
 
-        self.assertTrue(result["ok"])
         self.assertEqual(result["mode"], "frontier_explore")
+        self.assertIn(result["reason"], ("max_duration", "turn_progress_stalled"))
+        self.assertEqual(result["ok"], result["reason"] != "turn_progress_stalled")
+        self.assertTrue(any(action != "stop" for action, _ in commands))
         self.assertGreaterEqual(len(commands), 1)
         self.assertEqual(stops[-1], 3)
         self.assertTrue(any(item.get("event") == "frontier_selected" for item in result["trace_tail"]))

@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.11.2-stop-semantics",
+    "version": "0.11.3-turn-watchdog",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1080,6 +1080,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     selected_meta = None
     stall_count = 0
     gait_action = None
+    turn_streak_action = None
+    turn_streak_count = 0
+    turn_streak_start_yaw = None
     reason = "max_duration"
     active_explore = {"active": True, "mode": "frontier_explore", "started_at": started, "name": name, "chaos": chaos, "seed": actual_seed}
 
@@ -1147,6 +1150,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                         reason = "coverage_complete_or_no_reachable_frontiers"
                         break
                     selected_target_world = tuple(plan["target_world"])
+                    turn_streak_action = None
+                    turn_streak_count = 0
+                    turn_streak_start_yaw = None
                     selected_meta = {
                         "cluster_size": plan["cluster_size"],
                         "frontier_clusters": plan["frontier_clusters"],
@@ -1181,6 +1187,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 before_pose = pose_tuple
                 motion_window = {"ok": True, "reason": "bounded_turn", "elapsed_s": float(decision["duration"])}
                 if decision["action"] == "forward":
+                    turn_streak_action = None
+                    turn_streak_count = 0
+                    turn_streak_start_yaw = None
                     gait_action, gait_started = start_or_continue_fluent_forward(gait_action, decision["step"])
                     motion_window = supervise_fluent_forward(float(decision["duration"]))
                     motion_window["gait_started"] = gait_started
@@ -1191,6 +1200,12 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     if gait_action is not None:
                         stop_burst(1)
                         gait_action = None
+                    if turn_streak_action == decision["action"]:
+                        turn_streak_count += 1
+                    else:
+                        turn_streak_action = decision["action"]
+                        turn_streak_count = 1
+                        turn_streak_start_yaw = float(before_pose[2])
                     motor_send(decision["action"], step=decision["step"])
                     time.sleep(float(decision["duration"]))
                     stop_burst(1)
@@ -1221,6 +1236,25 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     "sectors": sec,
                 })
 
+                if decision["action"] in ("turnleft", "turnright"):
+                    streak_start_yaw = float(after_pose[2] if turn_streak_start_yaw is None else turn_streak_start_yaw)
+                    turn_yaw_delta = abs(norm_angle(float(after_pose[2]) - streak_start_yaw))
+                    trace[-1]["turn_streak_count"] = turn_streak_count
+                    trace[-1]["turn_yaw_delta"] = round(turn_yaw_delta, 4)
+                    if ((turn_streak_count >= 4 and turn_yaw_delta < 0.18) or turn_streak_count >= 8):
+                        stop_burst(2)
+                        gait_action = None
+                        reason = "turn_progress_stalled"
+                        trace.append({
+                            "event": "turn_progress_stalled",
+                            "action": decision["action"],
+                            "turn_streak_count": turn_streak_count,
+                            "turn_yaw_delta": round(turn_yaw_delta, 4),
+                            "heading_error": decision.get("heading_error"),
+                            "pose": after_pose_dict,
+                        })
+                        break
+
                 if not motion_window["ok"]:
                     if motion_window["reason"] == "obstacle_during_fluent_forward":
                         continue
@@ -1245,7 +1279,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
             active_explore = None
 
     result = {
-        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_map_unavailable_or_stale", "slam_grid_not_received"),
+        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_map_unavailable_or_stale", "slam_grid_not_received", "turn_progress_stalled"),
         "mode": "frontier_explore",
         "reason": reason,
         "elapsed_s": round(time.time() - started, 2),
