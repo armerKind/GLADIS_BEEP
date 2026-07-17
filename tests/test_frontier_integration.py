@@ -14,6 +14,24 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_app_socket_timeout_does_not_invalidate_successful_sdk_stop(self):
+        with patch.object(bridge, "sdk_send") as sdk_send, \
+             patch.object(bridge, "app_send", side_effect=TimeoutError("camera socket")), \
+             patch.object(bridge.time, "sleep"):
+            error = bridge.stop_burst(3)
+
+        self.assertIsNone(error)
+        self.assertEqual(sdk_send.call_count, 3)
+        self.assertFalse(bridge.snapshot()["moving"])
+
+    def test_sdk_stop_failure_remains_a_motor_error(self):
+        with patch.object(bridge, "sdk_send", side_effect=RuntimeError("sdk unavailable")), \
+             patch.object(bridge, "app_send"), \
+             patch.object(bridge.time, "sleep"):
+            error = bridge.stop_burst(2)
+
+        self.assertIn("sdk unavailable", error)
+
     def test_consecutive_forward_windows_start_gait_only_once(self):
         commands = []
         with patch.object(bridge, "motor_send", side_effect=lambda action, step=None: commands.append((action, step))):

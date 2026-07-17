@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.11.1-fluent-frontiers",
+    "version": "0.11.2-stop-semantics",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -291,26 +291,31 @@ def motor_send(action: str, step=None):
 
 
 def stop_burst(n=3):
-    err = None
+    sdk_errors = []
+    sdk_ok = False
     for _ in range(n):
         try:
-            # Stop both layers: SDK for actual motors, app for camera/control state.
-            try:
-                sdk_send("stop")
-            except Exception as e:
-                err = repr(e)
-            try:
-                app_send("stop")
-            except Exception as e:
-                err = repr(e)
+            sdk_send("stop")
+            sdk_ok = True
         except Exception as e:
-            err = repr(e)
+            sdk_errors.append(repr(e))
         time.sleep(0.06)
+
+    # The SDK is the authoritative motor path. The vendor app socket is only
+    # a best-effort secondary stop for camera/control state and must not turn a
+    # successful physical stop into a reported motor failure.
+    app_error = None
+    try:
+        app_send("stop")
+    except Exception as e:
+        app_error = repr(e)
+
+    err = None if sdk_ok else (sdk_errors[-1] if sdk_errors else "sdk_stop_not_confirmed")
     with state_lock:
         state["moving"] = False
         if err:
             state["last_error"] = err
-    remember("stop_burst", n=n, error=err)
+    remember("stop_burst", n=n, error=err, app_error=app_error, sdk_ok=sdk_ok)
     return err
 
 
