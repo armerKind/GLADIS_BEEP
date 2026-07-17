@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.12.0-pose-guard",
+    "version": "0.12.2-lidar-avoid-resume",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1108,6 +1108,90 @@ def supervise_fluent_forward(duration, poll_s=0.08):
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
 
 
+def supervise_lidar_forward(duration, poll_s=0.08):
+    """Supervise fluent forward gait using only fresh local LiDAR."""
+    started = time.time()
+    deadline = started + max(0.0, float(duration))
+    while time.time() < deadline:
+        st = snapshot()
+        if not scan_ok(st):
+            return {"ok": False, "reason": "scan_stale_during_lidar_walk", "elapsed_s": time.time() - started}
+        sec = st.get("sectors") or {}
+        if (float(sec.get("front") or 99) < 0.38 or
+                float(sec.get("front_left") or 99) < 0.22 or
+                float(sec.get("front_right") or 99) < 0.22):
+            return {"ok": False, "reason": "obstacle_during_lidar_walk", "elapsed_s": time.time() - started}
+        time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
+    return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
+
+
+def lidar_walk(max_duration=60.0, save=True):
+    """Presentation-safe local walk: fluent forward motion, fresh LiDAR, no SLAM claims."""
+    global active_explore, last_run
+    max_duration = min(max(float(max_duration), 0.0), 180.0)
+    started = time.time()
+    trace = []
+    reason = "max_duration"
+    current_action = None
+    active_explore = {"active": True, "started_at": started, "name": "lidar_walk"}
+    with motion_lock:
+        try:
+            initial = snapshot()
+            if not scan_ok(initial):
+                reason = "scan_stale_or_missing_before_start"
+            while reason == "max_duration" and time.time() - started < max_duration:
+                st = snapshot()
+                if not scan_ok(st):
+                    reason = "scan_stale_or_missing"
+                    break
+                sec = st.get("sectors") or {}
+                action, duration, why = choose_explore_action(sec)
+                remaining = max_duration - (time.time() - started)
+                if action == "forward":
+                    current_action, gait_started = start_or_continue_fluent_forward(current_action, step=20)
+                    supervised = supervise_lidar_forward(min(0.50, remaining))
+                    trace.append({"action": "forward", "gait_started": gait_started, "duration": round(supervised["elapsed_s"], 3), "why": why, "sectors": sec})
+                    if not supervised["ok"]:
+                        stop_burst(2)
+                        current_action = None
+                        if supervised["reason"] == "obstacle_during_lidar_walk":
+                            trace.append({"action": "stop_reassess", "why": supervised["reason"], "sectors": snapshot().get("sectors") or {}})
+                            time.sleep(0.10)
+                            continue
+                        reason = supervised["reason"]
+                        break
+                    continue
+                if current_action is not None:
+                    stop_burst(2)
+                    current_action = None
+                if action in ("turnleft", "turnright"):
+                    duration *= 2.0
+                duration = min(duration, remaining)
+                motor_send(action, step=explore_step_for(action))
+                time.sleep(duration)
+                stop_burst(2)
+                trace.append({"action": action, "duration": round(duration, 3), "why": why, "sectors": sec})
+        except Exception as exc:
+            reason = "exception:" + repr(exc)
+            with state_lock:
+                state["last_error"] = repr(exc)
+        finally:
+            stop_burst(3)
+            active_explore = None
+    result = {
+        "ok": not reason.startswith("exception") and not reason.startswith("scan_stale"),
+        "mode": "lidar_walk",
+        "localization": "local_lidar_reactive_no_global_slam",
+        "reason": reason,
+        "elapsed_s": round(time.time() - started, 2),
+        "trace": trace,
+        "status": snapshot(),
+    }
+    last_run = result
+    remember("lidar_walk_done", reason=reason, elapsed_s=result["elapsed_s"])
+    return result
+
+
 def start_or_continue_fluent_forward(current_action, step):
     """Start the gait once; later planning windows leave it running uninterrupted."""
     if current_action == "forward":
@@ -1662,6 +1746,11 @@ class Handler(BaseHTTPRequestHandler):
                     reset_map=(qs.get("reset") or ["0"])[0] == "1",
                     save=(qs.get("save") or ["1"])[0] != "0",
                     rotate_scan=(qs.get("rotate_scan") or ["1"])[0] != "0",
+                ))
+            elif p.path in ("/lidar_walk", "/demo_walk"):
+                self.send_json(lidar_walk(
+                    max_duration=float((qs.get("max_duration") or ["60"])[0]),
+                    save=(qs.get("save") or ["1"])[0] != "0",
                 ))
             elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
                 seed_value = (qs.get("seed") or [None])[0]

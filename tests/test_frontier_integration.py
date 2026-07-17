@@ -14,6 +14,17 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_lidar_forward_supervisor_stops_on_fresh_close_obstacle(self):
+        close = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {"front": 0.30, "front_left": 0.8, "front_right": 0.8},
+        }
+        with patch.object(bridge, "snapshot", return_value=close):
+            result = bridge.supervise_lidar_forward(1.0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "obstacle_during_lidar_walk")
+
     def test_pose_guard_rejects_stationary_drift_but_keeps_raw_diagnosable(self):
         accepted, anchor, valid, reason = bridge.guard_slam_pose(None, None, (0.0, 0.0, 0.0), False)
         self.assertTrue(valid)
