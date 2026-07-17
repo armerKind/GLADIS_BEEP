@@ -37,13 +37,15 @@ TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
 
 -- Reject gait vibration and scan jitter as robot motion. The vendor's 0.1 degree
 -- threshold created hundreds of stationary nodes and starved TF publication.
-TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 0.5
+-- A stationary robot does not need a new pose node twice per second. Movement
+-- still passes immediately through the distance/angle thresholds below.
+TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 5.0
 TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.03
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 TRAJECTORY_BUILDER_2D.submaps.num_range_data = 60
 
-POSE_GRAPH.optimize_every_n_nodes = 90
-POSE_GRAPH.constraint_builder.sampling_ratio = 0.15
+POSE_GRAPH.optimize_every_n_nodes = 120
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.05
 POSE_GRAPH.constraint_builder.min_score = 0.65
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.70
 

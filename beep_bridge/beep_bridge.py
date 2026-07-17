@@ -1033,7 +1033,7 @@ def save_frontier_trace(name, result):
     return str(path)
 
 
-def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=None, save=True):
+def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=None, save=True, dry_run=False):
     """Explore reachable occupancy-grid frontiers with a bounded, dog-like motion policy."""
     global active_explore, last_run
     max_duration = min(max(float(max_duration), 0.0), 300.0)
@@ -1071,7 +1071,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 pose = pose_copy()
                 pose_tuple = (float(pose["x"]), float(pose["y"]), float(pose["yaw"]))
                 sec = st.get("sectors") or {}
-                if min(float(sec.get("front") or 99), float(sec.get("front_left") or 99), float(sec.get("front_right") or 99)) < 0.20:
+                if (float(sec.get("front") or 99) < 0.20 or
+                        float(sec.get("front_left") or 99) < 0.14 or
+                        float(sec.get("front_right") or 99) < 0.14):
                     reason = "hard_obstacle_stop"
                     break
 
@@ -1121,6 +1123,20 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 waypoint_cell = path[min(len(path) - 1, lookahead_cells)]
                 waypoint_world = grid.cell_to_world(waypoint_cell)
                 decision = choose_natural_motion(pose_tuple, waypoint_world, sec, rng, chaos=chaos)
+
+                if dry_run:
+                    trace.append({
+                        "event": "dry_run_plan",
+                        "decision": decision,
+                        "target_world": selected_target_world,
+                        "waypoint_world": [round(waypoint_world[0], 4), round(waypoint_world[1], 4)],
+                        "path_cells": len(path),
+                        "frontier": selected_meta,
+                        "pose": pose,
+                        "sectors": sec,
+                    })
+                    reason = "dry_run_plan_ready"
+                    break
 
                 before_pose = pose_tuple
                 motor_send(decision["action"], step=decision["step"])
@@ -1172,6 +1188,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
         "elapsed_s": round(time.time() - started, 2),
         "chaos": chaos,
         "seed": actual_seed,
+        "dry_run": bool(dry_run),
         "excluded_frontiers": len(excluded_world),
         "trace_tail": trace[-80:],
         "status": snapshot(),
@@ -1504,6 +1521,7 @@ class Handler(BaseHTTPRequestHandler):
                     chaos=float((qs.get("chaos") or ["0.45"])[0]),
                     seed=None if seed_value in (None, "") else int(seed_value),
                     save=(qs.get("save") or ["1"])[0] != "0",
+                    dry_run=truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0]),
                 ))
             else:
                 self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/frontier_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
@@ -1567,6 +1585,7 @@ class Handler(BaseHTTPRequestHandler):
                     chaos=float(body.get("chaos", 0.45)),
                     seed=body.get("seed"),
                     save=bool(body.get("save", True)),
+                    dry_run=bool(body.get("dry_run", body.get("dry", False))),
                 ))
             elif p.path == "/map_reset":
                 reset_pose(float(body.get("x", 0.0)), float(body.get("y", 0.0)), float(body.get("yaw", 0.0)))
