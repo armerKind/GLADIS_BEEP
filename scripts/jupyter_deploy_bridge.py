@@ -25,6 +25,7 @@ import websockets
 HOST = os.environ.get("BEEP_HOST", "192.168.8.88")
 PASSWORD = os.environ.get("BEEP_JUPYTER_PASSWORD", "yahboom")
 BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"))
+PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
 BASE = f"http://{HOST}:8888"
 
 
@@ -71,6 +72,15 @@ def put_bridge(session: requests.Session, xsrf: str) -> None:
     )
     resp.raise_for_status()
     print("uploaded: /home/pi/beep_bridge/beep_bridge.py")
+    if PLANNER_SRC.exists():
+        planner = session.put(
+            f"{BASE}/api/contents/beep_bridge/frontier_planner.py",
+            headers=headers,
+            json={"type": "file", "format": "text", "content": PLANNER_SRC.read_text()},
+            timeout=10,
+        )
+        planner.raise_for_status()
+        print("uploaded: /home/pi/beep_bridge/frontier_planner.py")
 
 
 async def restart_bridge(session: requests.Session, xsrf: str) -> None:
@@ -84,7 +94,7 @@ import subprocess, os, time, pathlib, signal
 base = pathlib.Path('/home/pi/beep_bridge')
 (base/'logs').mkdir(parents=True, exist_ok=True)
 (base/'maps').mkdir(parents=True, exist_ok=True)
-p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py')], text=True, capture_output=True, timeout=10)
+p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(base/'frontier_planner.py')], text=True, capture_output=True, timeout=10)
 print('py_compile', p.returncode, p.stderr)
 if p.returncode:
     raise SystemExit(p.returncode)

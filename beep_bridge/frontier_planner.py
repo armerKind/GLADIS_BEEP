@@ -6,6 +6,8 @@ import heapq
 import math
 from collections import deque
 
+TURN_DURATION_SCALE = 2.0
+
 
 class OccupancyGrid:
     def __init__(self, width, height, resolution, origin_x, origin_y, data):
@@ -229,13 +231,13 @@ def choose_natural_motion(pose, waypoint_world, sectors, rng, chaos=0.35):
 
     if front < 0.40 or min(front_left, front_right) < 0.27:
         action = "turnright" if max(right, front_right) > max(left, front_left) else "turnleft"
-        return {"action": action, "step": 30, "duration": round(rng.uniform(0.38, 0.62), 2),
+        return {"action": action, "step": 30, "duration": round(rng.uniform(0.38, 0.62) * TURN_DURATION_SCALE, 2),
                 "reason": "front_blocked_open_side", "heading_error": round(heading_error, 4)}
 
     turn_threshold = 0.23 + chaos * 0.08
     if abs(heading_error) > turn_threshold:
         action = "turnleft" if heading_error > 0 else "turnright"
-        duration = min(0.78, max(0.25, abs(heading_error) / 1.5))
+        duration = min(0.78, max(0.25, abs(heading_error) / 1.5)) * TURN_DURATION_SCALE
         duration *= rng.uniform(0.88, 1.12)
         return {"action": action, "step": 30, "duration": round(duration, 2),
                 "reason": "align_to_frontier_path", "heading_error": round(heading_error, 4)}
@@ -244,7 +246,7 @@ def choose_natural_motion(pose, waypoint_world, sectors, rng, chaos=0.35):
     # replans toward a frontier, so this resembles curiosity rather than navigational collapse.
     if chaos > 0.15 and rng.random() < 0.08 + chaos * 0.10 and max(left, right) > 0.95:
         action = "turnleft" if left > right else "turnright"
-        return {"action": action, "step": 30, "duration": round(rng.uniform(0.24, 0.38), 2),
+        return {"action": action, "step": 30, "duration": round(rng.uniform(0.24, 0.38) * TURN_DURATION_SCALE, 2),
                 "reason": "curiosity_glance", "heading_error": round(heading_error, 4)}
 
     duration = rng.uniform(0.68, 0.92 + chaos * 0.28)

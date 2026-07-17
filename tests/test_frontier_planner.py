@@ -46,7 +46,8 @@ class FrontierPlannerTests(unittest.TestCase):
         stride = choose_natural_motion((0.0, 0.0, 0.0), (1.0, 0.0), sectors, random.Random(2), chaos=0.4)
 
         self.assertEqual(turn["action"], "turnleft")
-        self.assertGreaterEqual(turn["duration"], 0.25)
+        self.assertGreaterEqual(turn["duration"], 0.50)
+        self.assertLessEqual(turn["duration"], 1.75)
         self.assertEqual(stride["action"], "forward")
         self.assertGreaterEqual(stride["duration"], 0.62)
         self.assertLessEqual(stride["duration"], 1.08)
@@ -58,6 +59,8 @@ class FrontierPlannerTests(unittest.TestCase):
 
         self.assertEqual(decision["action"], "turnright")
         self.assertEqual(decision["reason"], "front_blocked_open_side")
+        self.assertGreaterEqual(decision["duration"], 0.76)
+        self.assertLessEqual(decision["duration"], 1.24)
 
 
 if __name__ == "__main__":

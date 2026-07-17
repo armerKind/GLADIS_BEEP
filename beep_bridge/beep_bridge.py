@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.11.3-turn-watchdog",
+    "version": "0.11.4-double-turns",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
