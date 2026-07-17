@@ -35,6 +35,9 @@ http://192.168.8.88:8766
 - `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`; use `{ "name": "pee", "wait": false }` for fire-and-forget
 - `GET /mark_object?dry_run=1` / `POST /mark_object` — marking routine: one fluent continuous walk to 0.25m under live LiDAR stop control, calibrated 90° left turn, then `pee` (the preset lifts the right leg, placing it beside the target). It aborts before turning if the approach does not reach its target.
 - `GET /explore_room?max_duration=30&reset=1&rotate_scan=0` — Cartographer-SLAM-localized LiDAR exploration with visible step-20 forward strides, obstacle-driven turns/strafe escapes, map-frame poses, final stop, and optional JSON trace save. The endpoint refuses to move when the Cartographer pose is unavailable or stale.
+- `GET /frontier_explore?max_duration=90&chaos=0.45` — systematic frontier exploration over the authoritative ROS occupancy grid. It clusters free/unknown boundaries, inflates obstacles for BEEP's leg sweep, runs A* through known free space, keeps a selected frontier until reached or stalled, and replans after every bounded gait action. `chaos` is clamped to `0..1`: it varies selection among the best reachable frontiers, stride length, turn duration, and occasional side-opening “curiosity glances” without permitting movement outside planned/sensed-safe space. Optional `seed=<int>` makes a run reproducible.
+
+Aliases: `/dog_explore` and `/explore_frontiers`.
 
 `/health` and `/status` expose `pose.source=cartographer_slam` plus a `slam` object containing pose/map freshness, ROS occupancy-grid dimensions, resolution, known cells, and occupied cells. The authoritative room map is ROS `/map`; the bridge JSON map is only a compact trace/diagnostic rendering.
 

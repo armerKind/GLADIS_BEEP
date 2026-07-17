@@ -117,6 +117,14 @@ sudo systemctl restart beep-cartographer beep-occupancy-grid
 
 The restart creates a fresh mapping trajectory. `/explore_room` refuses autonomous movement when the SLAM pose is missing or stale.
 
+For office exploration, prefer the frontier planner once `/health` reports fresh SLAM and map data:
+
+```bash
+curl 'http://127.0.0.1:8766/frontier_explore?name=office&max_duration=90&chaos=0.45'
+```
+
+Start with 30 seconds for physical verification, then use 60–90 seconds. The planner remains systematic, but weighted frontier selection and variable gait decisions make the path look exploratory rather than like deterministic vacuum-cleaner stripes.
+
 ## Verification
 
 ```bash

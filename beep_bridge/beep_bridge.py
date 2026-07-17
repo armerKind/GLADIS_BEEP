@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import socket
 import sys
 import threading
@@ -24,6 +25,16 @@ from pathlib import Path
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from frontier_planner import (  # noqa: E402
+    OccupancyGrid as FrontierGrid,
+    astar_path,
+    choose_natural_motion,
+    find_frontier_plan,
+    inflate_obstacles,
+    nearest_free_cell,
+)
 
 HOST = os.environ.get("BEEP_APP_HOST", "192.168.8.88")
 APP_PORT = int(os.environ.get("BEEP_APP_PORT", "6000"))
@@ -87,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.10.0-cartographer-slam",
+    "version": "0.11.0-dog-frontiers",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -104,6 +115,7 @@ state = {
     "map": {"active": False, "updated_at": None, "scan_updates": 0, "occupied_cells": 0, "free_cells": 0, "quality": "none"},
 }
 last_scan = None
+slam_grid = None
 room_map = None
 active_explore = None
 scan_match_ref = None
@@ -351,10 +363,19 @@ def quaternion_to_yaw(x, y, z, w):
 
 
 def occupancy_callback(msg):
+    global slam_grid
     now = time.time()
     data = list(msg.data)
     known = sum(1 for value in data if int(value) >= 0)
     occupied = sum(1 for value in data if int(value) >= 50)
+    slam_grid = FrontierGrid(
+        int(msg.info.width),
+        int(msg.info.height),
+        float(msg.info.resolution),
+        float(msg.info.origin.position.x),
+        float(msg.info.origin.position.y),
+        data,
+    )
     with state_lock:
         slam = dict(state.get("slam") or {})
         slam.update({
@@ -997,6 +1018,173 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
     remember("explore_done", reason=reason, elapsed_s=result["elapsed_s"], saved_path=saved_path)
     return result
 
+
+def slam_grid_copy():
+    # FrontierGrid is immutable after construction, so sharing the latest complete
+    # callback snapshot is atomic enough under CPython and avoids copying thousands of cells.
+    return slam_grid
+
+
+def save_frontier_trace(name, result):
+    MAP_DIR.mkdir(parents=True, exist_ok=True)
+    safe = ''.join(c if c.isalnum() or c in '-_' else '_' for c in str(name or "dog_frontier"))[:60]
+    path = MAP_DIR / f"{safe}_frontiers_{int(time.time())}.json"
+    path.write_text(json.dumps(result, sort_keys=True, indent=2))
+    return str(path)
+
+
+def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=None, save=True):
+    """Explore reachable occupancy-grid frontiers with a bounded, dog-like motion policy."""
+    global active_explore, last_run
+    max_duration = min(max(float(max_duration), 0.0), 300.0)
+    chaos = min(max(float(chaos), 0.0), 1.0)
+    actual_seed = int(seed) if seed is not None else int(time.time_ns() & 0x7fffffff)
+    rng = random.Random(actual_seed)
+    started = time.time()
+    trace = []
+    excluded_world = deque(maxlen=16)
+    selected_target_world = None
+    selected_meta = None
+    stall_count = 0
+    reason = "max_duration"
+    active_explore = {"active": True, "mode": "frontier_explore", "started_at": started, "name": name, "chaos": chaos, "seed": actual_seed}
+
+    with motion_lock:
+        try:
+            while time.time() - started < max_duration:
+                st = snapshot()
+                slam = st.get("slam") or {}
+                if not scan_ok(st):
+                    reason = "scan_stale_or_missing"
+                    break
+                if not slam.get("active") or slam.get("pose_age_s") is None or float(slam["pose_age_s"]) > 1.0:
+                    reason = "slam_pose_unavailable_or_stale"
+                    break
+                if slam.get("map_age_s") is None or float(slam["map_age_s"]) > 2.5:
+                    reason = "slam_map_unavailable_or_stale"
+                    break
+                grid = slam_grid_copy()
+                if grid is None:
+                    reason = "slam_grid_not_received"
+                    break
+
+                pose = pose_copy()
+                pose_tuple = (float(pose["x"]), float(pose["y"]), float(pose["yaw"]))
+                sec = st.get("sectors") or {}
+                if min(float(sec.get("front") or 99), float(sec.get("front_left") or 99), float(sec.get("front_right") or 99)) < 0.20:
+                    reason = "hard_obstacle_stop"
+                    break
+
+                path = None
+                target_cell = None
+                if selected_target_world is not None:
+                    if math.hypot(selected_target_world[0] - pose_tuple[0], selected_target_world[1] - pose_tuple[1]) <= 0.28:
+                        excluded_world.append(selected_target_world)
+                        trace.append({"event": "frontier_reached", "target_world": selected_target_world, "pose": pose})
+                        selected_target_world = None
+                        selected_meta = None
+                        stall_count = 0
+                    else:
+                        target_cell = grid.world_to_cell(*selected_target_world)
+                        radius_cells = max(1, int(math.ceil(0.16 / grid.resolution)))
+                        blocked = inflate_obstacles(grid, radius_cells)
+                        start_cell = nearest_free_cell(grid, grid.world_to_cell(pose_tuple[0], pose_tuple[1]), blocked)
+                        if start_cell is not None:
+                            path = astar_path(grid, start_cell, target_cell, blocked)
+                        if not path:
+                            excluded_world.append(selected_target_world)
+                            trace.append({"event": "frontier_path_lost", "target_world": selected_target_world, "pose": pose})
+                            selected_target_world = None
+                            selected_meta = None
+                            stall_count = 0
+
+                if selected_target_world is None:
+                    excluded_cells = [grid.world_to_cell(x, y) for x, y in excluded_world]
+                    plan = find_frontier_plan(grid, pose_tuple, rng, chaos=chaos, robot_radius_m=0.16, excluded=excluded_cells)
+                    if plan is None:
+                        reason = "coverage_complete_or_no_reachable_frontiers"
+                        break
+                    selected_target_world = tuple(plan["target_world"])
+                    selected_meta = {
+                        "cluster_size": plan["cluster_size"],
+                        "frontier_clusters": plan["frontier_clusters"],
+                        "reachable_frontiers": plan["reachable_frontiers"],
+                        "score": round(float(plan["score"]), 4),
+                    }
+                    path = plan["path"]
+                    target_cell = plan["target_cell"]
+                    trace.append({"event": "frontier_selected", "target_world": selected_target_world, **selected_meta, "pose": pose})
+
+                if not path:
+                    continue
+                lookahead_cells = max(2, int(round(0.32 / grid.resolution)))
+                waypoint_cell = path[min(len(path) - 1, lookahead_cells)]
+                waypoint_world = grid.cell_to_world(waypoint_cell)
+                decision = choose_natural_motion(pose_tuple, waypoint_world, sec, rng, chaos=chaos)
+
+                before_pose = pose_tuple
+                motor_send(decision["action"], step=decision["step"])
+                time.sleep(float(decision["duration"]))
+                stop_burst(2)
+                time.sleep(rng.uniform(0.08, 0.18))
+                after_pose_dict = pose_copy()
+                after_pose = (float(after_pose_dict["x"]), float(after_pose_dict["y"]), float(after_pose_dict["yaw"]))
+                translated = math.hypot(after_pose[0] - before_pose[0], after_pose[1] - before_pose[1])
+                if decision["action"] == "forward" and translated < 0.008:
+                    stall_count += 1
+                elif decision["action"] == "forward":
+                    stall_count = 0
+
+                trace.append({
+                    "event": "motion",
+                    "action": decision["action"],
+                    "step": decision["step"],
+                    "duration": decision["duration"],
+                    "why": decision["reason"],
+                    "heading_error": decision["heading_error"],
+                    "translated_m": round(translated, 4),
+                    "target_world": selected_target_world,
+                    "waypoint_world": [round(waypoint_world[0], 4), round(waypoint_world[1], 4)],
+                    "path_cells": len(path),
+                    "frontier": selected_meta,
+                    "pose": after_pose_dict,
+                    "sectors": sec,
+                })
+
+                if stall_count >= 3 and selected_target_world is not None:
+                    excluded_world.append(selected_target_world)
+                    trace.append({"event": "frontier_blacklisted_after_stall", "target_world": selected_target_world})
+                    selected_target_world = None
+                    selected_meta = None
+                    stall_count = 0
+        except Exception as exc:
+            reason = "exception:" + repr(exc)
+            with state_lock:
+                state["last_error"] = repr(exc)
+        finally:
+            stop_burst(3)
+            active_explore = None
+
+    result = {
+        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_map_unavailable_or_stale", "slam_grid_not_received"),
+        "mode": "frontier_explore",
+        "reason": reason,
+        "elapsed_s": round(time.time() - started, 2),
+        "chaos": chaos,
+        "seed": actual_seed,
+        "excluded_frontiers": len(excluded_world),
+        "trace_tail": trace[-80:],
+        "status": snapshot(),
+    }
+    saved_path = None
+    if save:
+        saved_path = save_frontier_trace(name, result)
+    result["saved_path"] = saved_path
+    last_run = result
+    remember("frontier_explore_done", reason=reason, elapsed_s=result["elapsed_s"], saved_path=saved_path, chaos=chaos, seed=actual_seed)
+    return result
+
+
 def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=5, stall_delta=0.03,
                   min_target=0.08, reorient=True):
     global last_run
@@ -1308,8 +1496,17 @@ class Handler(BaseHTTPRequestHandler):
                     save=(qs.get("save") or ["1"])[0] != "0",
                     rotate_scan=(qs.get("rotate_scan") or ["1"])[0] != "0",
                 ))
+            elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
+                seed_value = (qs.get("seed") or [None])[0]
+                self.send_json(frontier_explore(
+                    name=(qs.get("name") or ["dog_frontier"])[0],
+                    max_duration=float((qs.get("max_duration") or ["60"])[0]),
+                    chaos=float((qs.get("chaos") or ["0.45"])[0]),
+                    seed=None if seed_value in (None, "") else int(seed_value),
+                    save=(qs.get("save") or ["1"])[0] != "0",
+                ))
             else:
-                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/frontier_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)
@@ -1362,6 +1559,14 @@ class Handler(BaseHTTPRequestHandler):
                     reset_map=bool(body.get("reset", False)),
                     save=bool(body.get("save", True)),
                     rotate_scan=bool(body.get("rotate_scan", True)),
+                ))
+            elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
+                self.send_json(frontier_explore(
+                    name=body.get("name", "dog_frontier"),
+                    max_duration=float(body.get("max_duration", 60.0)),
+                    chaos=float(body.get("chaos", 0.45)),
+                    seed=body.get("seed"),
+                    save=bool(body.get("save", True)),
                 ))
             elif p.path == "/map_reset":
                 reset_pose(float(body.get("x", 0.0)), float(body.get("y", 0.0)), float(body.get("yaw", 0.0)))
