@@ -13,6 +13,19 @@ SPEC.loader.exec_module(bridge)
 
 
 class MarkObjectPlanTests(unittest.TestCase):
+    def test_dead_reckoning_does_not_overwrite_fresh_guarded_slam_pose(self):
+        original_pose = dict(bridge.state["pose"])
+        original_slam = dict(bridge.state["slam"])
+        try:
+            bridge.state["pose"] = {"x": 1.0, "y": 2.0, "yaw": 0.3, "source": "guarded_cartographer_slam", "confidence": 0.9, "scan_match_score": None}
+            bridge.state["slam"] = {"pose_at": bridge.time.time()}
+            bridge.update_pose_for_action("turnright", 1.3)
+            self.assertEqual(bridge.state["pose"]["source"], "guarded_cartographer_slam")
+            self.assertEqual(bridge.state["pose"]["yaw"], 0.3)
+        finally:
+            bridge.state["pose"] = original_pose
+            bridge.state["slam"] = original_slam
+
     def test_default_plan_turns_left_90_degrees_before_right_leg_action(self):
         result = bridge.mark_object(dry_run=True)
 

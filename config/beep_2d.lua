@@ -33,7 +33,13 @@ TRAJECTORY_BUILDER_2D.min_range = 0.10
 TRAJECTORY_BUILDER_2D.max_range = 3.5
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
 TRAJECTORY_BUILDER_2D.use_imu_data = false
+-- Retain correlative matching for quadruped turns, but penalize invented motion
+-- ten times more strongly than the Cartographer defaults.
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 1.0
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 1.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 10.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.0
 
 -- Reject gait vibration and scan jitter as robot motion. The vendor's 0.1 degree
 -- threshold created hundreds of stationary nodes and starved TF publication.

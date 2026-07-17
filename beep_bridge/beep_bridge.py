@@ -98,10 +98,11 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.11.4-double-turns",
+    "version": "0.12.0-pose-guard",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
+    "last_motion_at": None,
     "last_error": None,
     "scan_seen": False,
     "scan_at": None,
@@ -193,9 +194,13 @@ def sdk_send(action: str, step=None):
     else:
         raise ValueError(f"unknown sdk action {action!r}")
     with state_lock:
+        was_moving = bool(state.get("moving"))
+        now = time.time()
         state["last_command"] = "sdk:" + action
-        state["last_command_at"] = time.time()
+        state["last_command_at"] = now
         state["moving"] = action != "stop"
+        if action != "stop" or was_moving:
+            state["last_motion_at"] = now
     remember("sdk_send", action=action, step=step)
 
 
@@ -367,6 +372,26 @@ def quaternion_to_yaw(x, y, z, w):
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def guard_slam_pose(accepted, stationary_anchor, raw, moving):
+    """Reject physically impossible Cartographer drift without hiding raw TF."""
+    raw = tuple(map(float, raw))
+    if accepted is None:
+        return raw, raw, True, "initialized"
+    accepted = tuple(map(float, accepted))
+    if moving:
+        distance = math.hypot(raw[0] - accepted[0], raw[1] - accepted[1])
+        yaw_delta = abs(norm_angle(raw[2] - accepted[2]))
+        if distance > 0.50 or yaw_delta > 0.90:
+            return accepted, None, False, "impossible_moving_jump"
+        return raw, None, True, "moving_update"
+    anchor = accepted if stationary_anchor is None else tuple(map(float, stationary_anchor))
+    distance = math.hypot(raw[0] - anchor[0], raw[1] - anchor[1])
+    yaw_delta = abs(norm_angle(raw[2] - anchor[2]))
+    if distance > 0.12 or yaw_delta > 0.18:
+        return accepted, anchor, False, "stationary_drift"
+    return raw, anchor, True, "stationary_jitter"
+
+
 def occupancy_callback(msg):
     global slam_grid
     now = time.time()
@@ -415,6 +440,8 @@ def ros_thread():
             self.create_subscription(OccupancyGrid, "/map", occupancy_callback, 10)
             self.tf_buffer = Buffer()
             self.tf_listener = TransformListener(self.tf_buffer, self)
+            self.accepted_slam_pose = None
+            self.stationary_anchor = None
             self.create_timer(0.20, self.update_slam_pose)
 
         def update_slam_pose(self):
@@ -424,18 +451,41 @@ def ros_thread():
                 t = transform.transform.translation
                 q = transform.transform.rotation
                 yaw = quaternion_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
+                raw_pose = (float(t.x), float(t.y), yaw)
                 with state_lock:
-                    state["pose"] = {
-                        "x": round(float(t.x), 4),
-                        "y": round(float(t.y), 4),
-                        "yaw": round(yaw, 4),
-                        "source": "cartographer_slam",
-                        "confidence": 0.95,
-                        "scan_match_score": None,
-                    }
+                    last_motion_at = state.get("last_motion_at")
+                    moving_or_settling = bool(state.get("moving")) or bool(
+                        last_motion_at and now - float(last_motion_at) <= 2.0
+                    )
+                    accepted, anchor, pose_valid, guard_reason = guard_slam_pose(
+                        self.accepted_slam_pose,
+                        self.stationary_anchor,
+                        raw_pose,
+                        moving_or_settling,
+                    )
+                    self.accepted_slam_pose = accepted
+                    self.stationary_anchor = anchor
+                    if pose_valid:
+                        state["pose"] = {
+                            "x": round(accepted[0], 4),
+                            "y": round(accepted[1], 4),
+                            "yaw": round(accepted[2], 4),
+                            "source": "guarded_cartographer_slam",
+                            "confidence": 0.90,
+                            "scan_match_score": None,
+                        }
                     slam = dict(state.get("slam") or {})
                     slam.pop("tf_error", None)
-                    slam.update({"active": True, "pose_at": now, "pose_age_s": 0.0})
+                    rejected = int(slam.get("pose_guard_rejections") or 0) + (0 if pose_valid else 1)
+                    slam.update({
+                        "active": True,
+                        "pose_at": now,
+                        "pose_age_s": 0.0,
+                        "pose_valid": pose_valid,
+                        "pose_guard_reason": guard_reason,
+                        "pose_guard_rejections": rejected,
+                        "raw_pose": {"x": round(raw_pose[0], 4), "y": round(raw_pose[1], 4), "yaw": round(raw_pose[2], 4)},
+                    })
                     state["slam"] = slam
             except Exception as exc:
                 with state_lock:
@@ -591,7 +641,7 @@ def update_pose_for_action(action, duration):
     with state_lock:
         slam = dict(state.get("slam") or {})
         slam_at = slam.get("pose_at")
-        if state.get("pose", {}).get("source") == "cartographer_slam" and slam_at and time.time() - float(slam_at) <= 1.0:
+        if state.get("pose", {}).get("source") in ("cartographer_slam", "guarded_cartographer_slam") and slam_at and time.time() - float(slam_at) <= 1.0:
             return
         p = dict(state.get("pose") or {"x": 0.0, "y": 0.0, "yaw": 0.0, "source": "dead_reckoning"})
         x, y, yaw = float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("yaw", 0.0))
@@ -1097,6 +1147,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 if not slam.get("active") or slam.get("pose_age_s") is None or float(slam["pose_age_s"]) > 1.0:
                     reason = "slam_pose_unavailable_or_stale"
                     break
+                if slam.get("pose_valid") is False:
+                    reason = "slam_pose_guard_rejected_drift"
+                    break
                 if slam.get("map_age_s") is None or float(slam["map_age_s"]) > 2.5:
                     reason = "slam_map_unavailable_or_stale"
                     break
@@ -1279,7 +1332,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
             active_explore = None
 
     result = {
-        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_map_unavailable_or_stale", "slam_grid_not_received", "turn_progress_stalled"),
+        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_pose_guard_rejected_drift", "slam_map_unavailable_or_stale", "slam_grid_not_received", "turn_progress_stalled"),
         "mode": "frontier_explore",
         "reason": reason,
         "elapsed_s": round(time.time() - started, 2),

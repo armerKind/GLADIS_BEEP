@@ -26,6 +26,7 @@ HOST = os.environ.get("BEEP_HOST", "192.168.8.88")
 PASSWORD = os.environ.get("BEEP_JUPYTER_PASSWORD", "yahboom")
 BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"))
 PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
+SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
 BASE = f"http://{HOST}:8888"
 
 
@@ -81,6 +82,15 @@ def put_bridge(session: requests.Session, xsrf: str) -> None:
         )
         planner.raise_for_status()
         print("uploaded: /home/pi/beep_bridge/frontier_planner.py")
+    if SLAM_CONFIG_SRC.exists():
+        slam_config = session.put(
+            f"{BASE}/api/contents/cartographer_ws2/install/cartographer_ros/share/cartographer_ros/configuration_files/beep_2d.lua",
+            headers=headers,
+            json={"type": "file", "format": "text", "content": SLAM_CONFIG_SRC.read_text()},
+            timeout=10,
+        )
+        slam_config.raise_for_status()
+        print("uploaded: Cartographer beep_2d.lua")
 
 
 async def restart_bridge(session: requests.Session, xsrf: str) -> None:

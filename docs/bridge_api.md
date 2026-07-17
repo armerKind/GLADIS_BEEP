@@ -39,7 +39,7 @@ http://192.168.8.88:8766
 
 Aliases: `/dog_explore` and `/explore_frontiers`.
 
-`/health` and `/status` expose `pose.source=cartographer_slam` plus a `slam` object containing pose/map freshness, ROS occupancy-grid dimensions, resolution, known cells, and occupied cells. The authoritative room map is ROS `/map`; the bridge JSON map is only a compact trace/diagnostic rendering.
+`/health` and `/status` expose `pose.source=guarded_cartographer_slam` plus a `slam` object containing pose/map freshness, ROS occupancy-grid dimensions, resolution, known cells, occupied cells, raw TF pose, pose-guard validity/reason, and rejection count. The guard anchors stationary pose to a 12cm/0.18rad jitter envelope, rejects impossible moving jumps, and allows two seconds for delayed post-motion scan matching. Frontier navigation refuses to proceed while a pose update is rejected. The authoritative room map is ROS `/map`; the bridge JSON map is only a compact trace/diagnostic rendering.
 
 Example:
 
@@ -114,6 +114,7 @@ Example:
 ## Safety notes
 
 - All bounded movements end with stop bursts.
+- Cartographer uses penalized online correlative matching because BEEP has no odometry or ROS IMU feed; the bridge pose guard is the final drift gate.
 - Local map is more trustworthy than global map for immediate safety.
 - Global map quality is marked `low`, `medium`, or `high` based on pose confidence.
 - Current scan matching is local and does not perform loop closure.

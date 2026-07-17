@@ -14,6 +14,26 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_pose_guard_rejects_stationary_drift_but_keeps_raw_diagnosable(self):
+        accepted, anchor, valid, reason = bridge.guard_slam_pose(None, None, (0.0, 0.0, 0.0), False)
+        self.assertTrue(valid)
+        accepted, anchor, valid, reason = bridge.guard_slam_pose(accepted, anchor, (0.03, -0.02, 0.03), False)
+        self.assertTrue(valid)
+        guarded, anchor, valid, reason = bridge.guard_slam_pose(accepted, anchor, (1.4, -0.8, 0.5), False)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "stationary_drift")
+        self.assertEqual(guarded, accepted)
+
+    def test_pose_guard_accepts_plausible_motion_and_rejects_teleport(self):
+        accepted = (0.0, 0.0, 0.0)
+        moved, anchor, valid, reason = bridge.guard_slam_pose(accepted, accepted, (0.12, 0.02, 0.20), True)
+        self.assertTrue(valid)
+        self.assertEqual(reason, "moving_update")
+        guarded, anchor, valid, reason = bridge.guard_slam_pose(moved, anchor, (2.0, 0.0, 2.0), True)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "impossible_moving_jump")
+        self.assertEqual(guarded, moved)
+
     def test_app_socket_timeout_does_not_invalidate_successful_sdk_stop(self):
         with patch.object(bridge, "sdk_send") as sdk_send, \
              patch.object(bridge, "app_send", side_effect=TimeoutError("camera socket")), \
