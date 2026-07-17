@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.11.0-dog-frontiers",
+    "version": "0.11.1-fluent-frontiers",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1033,6 +1033,34 @@ def save_frontier_trace(name, result):
     return str(path)
 
 
+def supervise_fluent_forward(duration, poll_s=0.08):
+    """Keep an already-started gait active while independently polling safety."""
+    started = time.time()
+    deadline = started + max(0.0, float(duration))
+    while time.time() < deadline:
+        st = snapshot()
+        slam = st.get("slam") or {}
+        if not scan_ok(st):
+            return {"ok": False, "reason": "scan_stale_during_fluent_forward", "elapsed_s": time.time() - started}
+        if not slam.get("active") or slam.get("pose_age_s") is None or float(slam["pose_age_s"]) > 1.0:
+            return {"ok": False, "reason": "slam_stale_during_fluent_forward", "elapsed_s": time.time() - started}
+        sec = st.get("sectors") or {}
+        if (float(sec.get("front") or 99) < 0.38 or
+                float(sec.get("front_left") or 99) < 0.22 or
+                float(sec.get("front_right") or 99) < 0.22):
+            return {"ok": False, "reason": "obstacle_during_fluent_forward", "elapsed_s": time.time() - started}
+        time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
+    return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
+
+
+def start_or_continue_fluent_forward(current_action, step):
+    """Start the gait once; later planning windows leave it running uninterrupted."""
+    if current_action == "forward":
+        return "forward", False
+    motor_send("forward", step=step)
+    return "forward", True
+
+
 def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=None, save=True, dry_run=False):
     """Explore reachable occupancy-grid frontiers with a bounded, dog-like motion policy."""
     global active_explore, last_run
@@ -1046,6 +1074,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     selected_target_world = None
     selected_meta = None
     stall_count = 0
+    gait_action = None
     reason = "max_duration"
     active_explore = {"active": True, "mode": "frontier_explore", "started_at": started, "name": name, "chaos": chaos, "seed": actual_seed}
 
@@ -1081,6 +1110,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 target_cell = None
                 if selected_target_world is not None:
                     if math.hypot(selected_target_world[0] - pose_tuple[0], selected_target_world[1] - pose_tuple[1]) <= 0.28:
+                        if gait_action is not None:
+                            stop_burst(1)
+                            gait_action = None
                         excluded_world.append(selected_target_world)
                         trace.append({"event": "frontier_reached", "target_world": selected_target_world, "pose": pose})
                         selected_target_world = None
@@ -1094,6 +1126,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                         if start_cell is not None:
                             path = astar_path(grid, start_cell, target_cell, blocked)
                         if not path:
+                            if gait_action is not None:
+                                stop_burst(1)
+                                gait_action = None
                             excluded_world.append(selected_target_world)
                             trace.append({"event": "frontier_path_lost", "target_world": selected_target_world, "pose": pose})
                             selected_target_world = None
@@ -1139,10 +1174,22 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     break
 
                 before_pose = pose_tuple
-                motor_send(decision["action"], step=decision["step"])
-                time.sleep(float(decision["duration"]))
-                stop_burst(2)
-                time.sleep(rng.uniform(0.08, 0.18))
+                motion_window = {"ok": True, "reason": "bounded_turn", "elapsed_s": float(decision["duration"])}
+                if decision["action"] == "forward":
+                    gait_action, gait_started = start_or_continue_fluent_forward(gait_action, decision["step"])
+                    motion_window = supervise_fluent_forward(float(decision["duration"]))
+                    motion_window["gait_started"] = gait_started
+                    if not motion_window["ok"]:
+                        stop_burst(2)
+                        gait_action = None
+                else:
+                    if gait_action is not None:
+                        stop_burst(1)
+                        gait_action = None
+                    motor_send(decision["action"], step=decision["step"])
+                    time.sleep(float(decision["duration"]))
+                    stop_burst(1)
+                    time.sleep(rng.uniform(0.04, 0.10))
                 after_pose_dict = pose_copy()
                 after_pose = (float(after_pose_dict["x"]), float(after_pose_dict["y"]), float(after_pose_dict["yaw"]))
                 translated = math.hypot(after_pose[0] - before_pose[0], after_pose[1] - before_pose[1])
@@ -1156,6 +1203,8 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     "action": decision["action"],
                     "step": decision["step"],
                     "duration": decision["duration"],
+                    "motion_window": motion_window,
+                    "fluent_gait_active": gait_action == "forward",
                     "why": decision["reason"],
                     "heading_error": decision["heading_error"],
                     "translated_m": round(translated, 4),
@@ -1167,7 +1216,16 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     "sectors": sec,
                 })
 
+                if not motion_window["ok"]:
+                    if motion_window["reason"] == "obstacle_during_fluent_forward":
+                        continue
+                    reason = motion_window["reason"]
+                    break
+
                 if stall_count >= 3 and selected_target_world is not None:
+                    if gait_action is not None:
+                        stop_burst(1)
+                        gait_action = None
                     excluded_world.append(selected_target_world)
                     trace.append({"event": "frontier_blacklisted_after_stall", "target_world": selected_target_world})
                     selected_target_world = None

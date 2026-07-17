@@ -14,6 +14,17 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_consecutive_forward_windows_start_gait_only_once(self):
+        commands = []
+        with patch.object(bridge, "motor_send", side_effect=lambda action, step=None: commands.append((action, step))):
+            action, first_started = bridge.start_or_continue_fluent_forward(None, 20)
+            action, second_started = bridge.start_or_continue_fluent_forward(action, 20)
+
+        self.assertTrue(first_started)
+        self.assertFalse(second_started)
+        self.assertEqual(action, "forward")
+        self.assertEqual(commands, [("forward", 20)])
+
     def test_bounded_frontier_loop_plans_motion_and_finishes_stopped(self):
         width = height = 15
         data = [-1] * (width * height)
