@@ -54,6 +54,8 @@ From the repository root, if Jupyter is reachable on port `8888`:
 
 ```bash
 python3 scripts/jupyter_deploy_bridge.py
+python3 scripts/jupyter_reset_slam.py     # discard corrupted/current trajectory and restart cleanly
+python3 scripts/jupyter_save_slam.py      # finish and export the active trajectory/map
 ```
 
 Useful environment overrides:

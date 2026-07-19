@@ -14,6 +14,11 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_coverage_plateau_requires_full_window_and_low_map_growth(self):
+        self.assertFalse(bridge.coverage_has_plateaued([(0, 100), (20, 110)], 20, 45, 150))
+        self.assertTrue(bridge.coverage_has_plateaued([(1, 1000), (23, 1040), (46, 1070)], 46, 45, 150))
+        self.assertFalse(bridge.coverage_has_plateaued([(1, 1000), (23, 1120), (46, 1300)], 46, 45, 150))
+
     def test_sdk_curve_combines_forward_and_yaw_then_straightens_without_stop(self):
         dog = MagicMock()
         original = dict(bridge.state)

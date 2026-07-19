@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.13.0-fluent-arcs",
+    "version": "0.14.1-coverage-pose-cadence",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1156,15 +1156,29 @@ def supervise_lidar_forward(duration, poll_s=0.08):
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
 
 
-def lidar_walk(max_duration=60.0, save=True):
-    """Presentation-safe local walk: fluent forward motion, fresh LiDAR, no SLAM claims."""
+def coverage_has_plateaued(samples, now, window_s, min_growth_cells):
+    recent = [(float(t), int(c)) for t, c in samples if float(t) >= float(now) - float(window_s)]
+    if len(recent) < 2 or recent[-1][0] - recent[0][0] < float(window_s) * 0.90:
+        return False
+    return max(c for _, c in recent) - min(c for _, c in recent) < int(min_growth_cells)
+
+
+def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=60.0,
+               coverage_window=45.0, min_growth_cells=150):
+    """Fluent local walk, optionally stopped by guarded-SLAM coverage plateau."""
     global active_explore, last_run
-    max_duration = min(max(float(max_duration), 0.0), 180.0)
+    max_duration = min(max(float(max_duration), 0.0), 600.0 if coverage_goal else 180.0)
+    min_duration = min(max(float(min_duration), 0.0), max_duration)
+    coverage_window = min(max(float(coverage_window), 10.0), 180.0)
+    min_growth_cells = max(1, int(min_growth_cells))
     started = time.time()
     trace = []
     reason = "max_duration"
     current_action = None
-    active_explore = {"active": True, "started_at": started, "name": "lidar_walk"}
+    coverage_samples = deque()
+    initial_known_cells = None
+    final_known_cells = None
+    active_explore = {"active": True, "started_at": started, "name": "coverage_explore" if coverage_goal else "lidar_walk"}
     with motion_lock:
         try:
             initial = snapshot()
@@ -1175,6 +1189,26 @@ def lidar_walk(max_duration=60.0, save=True):
                 if not scan_ok(st):
                     reason = "scan_stale_or_missing"
                     break
+                if coverage_goal:
+                    slam = st.get("slam") or {}
+                    pose_age = slam.get("pose_age_s")
+                    map_age = slam.get("map_age_s")
+                    if (slam.get("pose_valid") is False or pose_age is None or float(pose_age) > 6.0 or
+                            map_age is None or float(map_age) > 2.5):
+                        reason = "slam_invalid_during_coverage"
+                        break
+                    known_cells = int(slam.get("known_cells") or 0)
+                    if initial_known_cells is None:
+                        initial_known_cells = known_cells
+                    final_known_cells = known_cells
+                    now = time.time()
+                    coverage_samples.append((now, known_cells))
+                    while coverage_samples and coverage_samples[0][0] < now - coverage_window:
+                        coverage_samples.popleft()
+                    if (now - started >= min_duration and
+                            coverage_has_plateaued(coverage_samples, now, coverage_window, min_growth_cells)):
+                        reason = "coverage_plateau"
+                        break
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
                 remaining = max_duration - (time.time() - started)
@@ -1239,12 +1273,19 @@ def lidar_walk(max_duration=60.0, save=True):
             stop_burst(3)
             active_explore = None
     result = {
-        "ok": not reason.startswith("exception") and not reason.startswith("scan_stale"),
-        "mode": "lidar_walk",
-        "localization": "local_lidar_reactive_no_global_slam",
+        "ok": not reason.startswith("exception") and not reason.startswith("scan_stale") and reason != "slam_invalid_during_coverage",
+        "mode": "coverage_explore" if coverage_goal else "lidar_walk",
+        "localization": "guarded_slam_coverage_with_local_lidar_motion" if coverage_goal else "local_lidar_reactive_no_global_slam",
         "reason": reason,
         "elapsed_s": round(time.time() - started, 2),
         "trace": trace,
+        "coverage": {
+            "initial_known_cells": initial_known_cells,
+            "final_known_cells": final_known_cells,
+            "growth_cells": None if initial_known_cells is None or final_known_cells is None else final_known_cells - initial_known_cells,
+            "window_s": coverage_window,
+            "minimum_growth_cells": min_growth_cells,
+        },
         "status": snapshot(),
     }
     last_run = result
@@ -1811,6 +1852,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(lidar_walk(
                     max_duration=float((qs.get("max_duration") or ["60"])[0]),
                     save=(qs.get("save") or ["1"])[0] != "0",
+                ))
+            elif p.path in ("/coverage_explore", "/explore_coverage"):
+                self.send_json(lidar_walk(
+                    max_duration=float((qs.get("max_duration") or ["600"])[0]),
+                    save=(qs.get("save") or ["1"])[0] != "0",
+                    coverage_goal=True,
+                    min_duration=float((qs.get("min_duration") or ["60"])[0]),
+                    coverage_window=float((qs.get("coverage_window") or ["45"])[0]),
+                    min_growth_cells=int((qs.get("min_growth_cells") or ["150"])[0]),
                 ))
             elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
                 seed_value = (qs.get("seed") or [None])[0]
