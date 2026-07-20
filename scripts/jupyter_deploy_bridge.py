@@ -7,6 +7,9 @@ Environment variables:
   BEEP_HOST                 default: 192.168.8.88
   BEEP_JUPYTER_PASSWORD     default: yahboom
   BEEP_BRIDGE_SRC           default: beep_bridge/beep_bridge.py
+  BEEP_PLANNER_SRC          default: beep_bridge/frontier_planner.py
+  BEEP_SLAM_CONFIG_SRC      default: config/beep_2d.lua
+  BEEP_SAVE_SLAM_SRC        default: scripts/save_slam_map.sh
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ PASSWORD = os.environ.get("BEEP_JUPYTER_PASSWORD", "yahboom")
 BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"))
 PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
 SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
+SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map.sh"))
 BASE = f"http://{HOST}:8888"
 
 
@@ -91,6 +95,15 @@ def put_bridge(session: requests.Session, xsrf: str) -> None:
         )
         slam_config.raise_for_status()
         print("uploaded: Cartographer beep_2d.lua")
+    if SAVE_SLAM_SRC.exists():
+        save_script = session.put(
+            f"{BASE}/api/contents/beep_bridge/save_slam_map.sh",
+            headers=headers,
+            json={"type": "file", "format": "text", "content": SAVE_SLAM_SRC.read_text()},
+            timeout=10,
+        )
+        save_script.raise_for_status()
+        print("uploaded: /home/pi/beep_bridge/save_slam_map.sh")
 
 
 async def restart_bridge(session: requests.Session, xsrf: str) -> None:
@@ -104,6 +117,8 @@ import subprocess, os, time, pathlib, signal
 base = pathlib.Path('/home/pi/beep_bridge')
 (base/'logs').mkdir(parents=True, exist_ok=True)
 (base/'maps').mkdir(parents=True, exist_ok=True)
+if (base/'save_slam_map.sh').exists():
+    (base/'save_slam_map.sh').chmod(0o755)
 p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(base/'frontier_planner.py')], text=True, capture_output=True, timeout=10)
 print('py_compile', p.returncode, p.stderr)
 if p.returncode:

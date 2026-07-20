@@ -54,6 +54,14 @@ def main() -> int:
     session, xsrf = login()
     remote = f"beep_bridge/audio/{args.audio.name}"
     headers = {"X-XSRFToken": xsrf, "Content-Type": "application/json"}
+    directory = session.put(
+        f"{BASE}/api/contents/beep_bridge/audio",
+        headers=headers,
+        json={"type": "directory"},
+        timeout=15,
+    )
+    if directory.status_code not in (200, 201, 409):
+        directory.raise_for_status()
     response = session.put(
         f"{BASE}/api/contents/{remote}",
         headers=headers,

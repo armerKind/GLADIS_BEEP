@@ -12,7 +12,7 @@ Normal robot computation runs on BEEP's Raspberry Pi:
 - Cartographer and occupancy-grid publication
 - HTTP bridge and sensor monitoring
 - local collision checks and motor commands
-- camera and analog speaker access
+- camera access; analog speaker playback is provided separately by a Jupyter maintenance helper
 
 A browser connected to JupyterLab on port `8888` controls a Python kernel running on the Pi. It does not move SLAM computation to the browser's PC unless notebook code explicitly calls a remote service. Jupyter is used for deployment, diagnostics, maintenance, and experiments; it is not the production autonomy loop.
 
@@ -36,13 +36,13 @@ JupyterLab :8888 on Pi
    `-- deploy / reset SLAM / save map / play audio / diagnostics
 ```
 
-The remote HTTP request may cross Tailscale, but the movement supervision loop stays on BEEP. Network latency is therefore not the primary collision-avoidance mechanism.
+The remote HTTP request may cross Tailscale, but autonomous movement supervision stays on BEEP. Generic `/move` and vendor preset `/action` bypass the autonomous LiDAR/map guards and must be treated as supervised low-level interfaces.
 
 ## Perception and mapping layers
 
 ### 1. Local LiDAR safety
 
-The latest `/scan` is reduced to front, front-left, front-right, left, right, and rear clearances. This is the authoritative layer for immediate movement safety.
+The latest `/scan` is reduced to front, front-left, front-right, left, right, and rear clearances. This is the authoritative layer for immediate movement safety inside LiDAR-aware approach and autonomy controllers.
 
 ```text
 GET /scan
@@ -54,7 +54,7 @@ The local map is robot-frame diagnostic geometry. It does not require trustworth
 
 ### 2. Raw Cartographer SLAM
 
-Cartographer consumes the MS200 LiDAR and publishes TF plus a ROS occupancy grid. The current configuration:
+Cartographer consumes the ROS 2D LiDAR `/scan` stream and publishes TF plus a ROS occupancy grid. The current configuration:
 
 - does not use wheel odometry,
 - does not use IMU data,
@@ -89,6 +89,15 @@ Dead reckoning remains available only as a legacy/fallback estimate and must not
 
 ## Autonomy modes
 
+### Legacy bridge exploration
+
+```text
+GET /explore_room
+GET /explore
+```
+
+This compatibility mode checks fresh LiDAR and `slam.active` before starting, then drives the legacy bridge mapper. Unlike frontier and coverage modes, it does not continuously enforce guarded-pose validity or map/pose freshness during the loop. Prefer the newer modes for map-directed claims.
+
 ### Local LiDAR walk
 
 ```text
@@ -101,7 +110,7 @@ GET /demo_walk
 - forward-plus-yaw arcs when geometry permits,
 - in-place turns and lateral escapes when blocked,
 - approximately 80 ms local safety polling,
-- hard timeout and unconditional final SDK stop.
+- hard timeout and final SDK stop attempts.
 
 ### Frontier exploration
 
@@ -124,7 +133,7 @@ Frontiers can disappear as the live map changes during a scan or turn. A return 
 GET /coverage_explore
 ```
 
-Coverage mode combines local fluent LiDAR motion with guarded-SLAM map-growth measurement. It stops when known occupancy-grid cells fail to grow by the configured threshold for a full time window. A maximum duration is only a safety ceiling.
+Coverage mode combines local fluent LiDAR motion with guarded-SLAM map-growth measurement. It aborts when `pose_valid` is false, pose age exceeds 6.0 s, or map age exceeds 2.5 s. Plateau requires samples spanning at least 90% of the configured window and `max(known_cells) - min(known_cells) < min_growth_cells`. A maximum duration is only a safety ceiling.
 
 This is a more honest room-completion heuristic than elapsed time, but it is not mathematical proof that every occluded corner or inaccessible area was visited.
 
@@ -143,7 +152,7 @@ The current target is generic frontal LiDAR geometry. Human-leg detection, perso
 
 ## Stop semantics
 
-All autonomy paths execute unconditional SDK stop cleanup. `stop_burst` also attempts the Yahboom app-socket stop, but SDK stop success is the authoritative motor-safety result. An app-socket timeout is recorded separately and must not convert a successful SDK stop into a reported motor failure.
+Autonomy paths execute repeated SDK stop attempts during cleanup. `stop_burst` also attempts the Yahboom app-socket stop, but at least one successful SDK attempt is the authoritative reported motor-safety result. All SDK calls can still fail, so software cleanup is not a physical-stop guarantee. An app-socket timeout is recorded separately and must not convert a successful SDK stop into a reported motor failure.
 
 ## Known limitations
 

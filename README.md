@@ -2,20 +2,20 @@
 
 Software, deployment helpers, and operational notes for **BEEP** — a Yahboom DogZilla S2 quadruped used as an embodied sibling-agent experiment for GLADIS.
 
-BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, microphone, speaker, and a local HTTP bridge. Safety-critical sensor polling and motor stopping run on BEEP's Raspberry Pi; GLADIS sends high-level requests over the network.
+BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a local HTTP bridge. Jupyter maintenance helpers can also drive the Pi's analog speaker. Autonomous sensor polling and stop cleanup run on BEEP's Raspberry Pi; GLADIS sends high-level requests over the network.
 
 ## Current state
 
-Current bridge source/deployment line:
+Current bridge source line (the last physically verified deployment was `0.14.1-coverage-pose-cadence`):
 
 ```text
-0.14.1-coverage-pose-cadence
+0.14.2-bounded-manual-move
 ```
 
-Implemented and physically exercised:
+Current source implements the following. The main locomotion, mapping, coverage, camera, and speaker paths have also been exercised on BEEP; unit tests alone are not presented as physical verification.
 
 - SDK-backed locomotion through `DOGZILLALib`
-- fresh-LiDAR movement gates and unconditional final SDK stops
+- fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers
 - fluent forward gait, forward-plus-yaw walking arcs, bounded turns, and lateral escapes
 - camera frame capture from the Yahboom MJPEG service
 - named vendor actions such as stretch, pray, and the right-leg `pee` preset
@@ -72,8 +72,8 @@ maps/              placeholder for ignored generated bridge maps
 ## Primary endpoints
 
 ```text
-GET /health                     runtime, LiDAR, pose, map, and motion health
-GET /stop                       unconditional stop burst
+GET /health                     liveness plus nested runtime status snapshot
+GET /stop                       repeated SDK stop attempts plus app-stop telemetry
 GET /lidar_walk                 local LiDAR-reactive fluent navigation
 GET /frontier_explore           guarded-SLAM frontier planning/navigation
 GET /coverage_explore           explore until guarded map growth plateaus
@@ -94,11 +94,11 @@ scripts/jupyter_deploy_bridge.py        # Upload bridge/planner/config and resta
 scripts/jupyter_reset_slam.py           # Start a clean Cartographer trajectory
 scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
-scripts/install_systemd_service.py      # Install persistent Pi services
+scripts/install_systemd_service.py      # Install the bridge systemd service
 scripts/save_slam_map.sh                # Pi-side Cartographer exporter
 ```
 
-Jupyter helpers default to `192.168.8.88`; set `BEEP_HOST=beep.tailb08b32.ts.net` for the Tailscale path. Do not store alternate passwords or tokens in the repository.
+Jupyter helpers default to `192.168.8.88`; set `BEEP_HOST=beep.tailb08b32.ts.net` for the Tailscale path. The source retains Yahboom's vendor-default Jupyter password for the stock image; use `BEEP_JUPYTER_PASSWORD` for any changed credential and never commit private alternatives or tokens.
 
 ## Networking
 
@@ -109,7 +109,7 @@ wlan0  original DOGZILLA_WIFI access point / robot network
 wlan1  external 2.4 GHz Wi-Fi uplink
 ```
 
-Known addresses:
+Addresses last physically verified on 2026-07-19:
 
 ```text
 192.168.8.88                    local DogZilla address
@@ -131,11 +131,11 @@ Tailscale can use a high-latency DERP relay or disappear with the external Wi-Fi
 
 ## Safety model
 
-- Never move without a fresh LiDAR scan.
-- Local LiDAR sectors govern immediate obstacle stops.
+- Autonomous navigation and approach routines require a fresh LiDAR scan; generic `/move` and vendor `/action` are lower-level interfaces and are not scan-gated.
+- Local LiDAR sectors govern immediate obstacle stops inside LiDAR-aware controllers.
 - Guarded SLAM is required for map-directed frontier/coverage claims.
 - Reject stale map/pose, impossible relocation, repeated turn non-progress, and unsafe clearances.
-- Every routine ends with an SDK stop, including timeout and exception paths.
+- Autonomous movement routines attempt final SDK stops on completion, timeout, and exception; a hardware/SDK failure can still prevent a physical stop.
 - SDK stop success is authoritative; the optional Yahboom app-socket stop is best-effort telemetry.
 - No battery telemetry is available; use charged batteries and supervised bounded runs.
 - Do not infer “whole room” solely from elapsed time. Coverage mode uses map-growth saturation and still cannot prove access beneath or behind every obstacle.
@@ -150,7 +150,7 @@ python3 -m unittest discover -s tests -v
 git diff --check
 ```
 
-At the time of this documentation update, the discovered suite contains 18 passing tests.
+At the time of this documentation update, the discovered suite contains 19 passing tests.
 
 ## Further documentation
 

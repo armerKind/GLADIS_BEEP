@@ -14,6 +14,10 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def test_manual_non_stop_move_rejects_zero_duration(self):
+        with self.assertRaisesRegex(ValueError, "positive bounded duration"):
+            bridge.run_action("forward", 0)
+
     def test_coverage_plateau_requires_full_window_and_low_map_growth(self):
         self.assertFalse(bridge.coverage_has_plateaued([(0, 100), (20, 110)], 20, 45, 150))
         self.assertTrue(bridge.coverage_has_plateaued([(1, 1000), (23, 1040), (46, 1070)], 46, 45, 150))

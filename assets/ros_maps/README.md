@@ -11,7 +11,7 @@ Formats:
 - `.pbstream` — serialized Cartographer trajectory/submap state
 - `.pgm` — rendered occupancy-grid image
 - `.yaml` — map metadata and resolution
-- `inventory.json` — synchronization inventory from `scripts/sync_from_pi.py`
+- `inventory.json` — historical top-level synchronization inventory; it predates the selected `current_slam_tuned/` subdirectory and is not a complete current catalog
 
 The top-level `barf_*` and `gladis_room_*` artifacts are historical experiments from before the project was renamed BEEP. They are retained for regression/comparison, not as trustworthy navigation maps.
 

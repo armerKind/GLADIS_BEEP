@@ -3,7 +3,7 @@
 Current bridge line:
 
 ```text
-0.14.1-coverage-pose-cadence
+0.14.2-bounded-manual-move
 ```
 
 Base URLs:
@@ -13,7 +13,7 @@ http://192.168.8.88:8766                   direct DOGZILLA_WIFI path
 http://beep.tailb08b32.ts.net:8766         Tailscale path when online
 ```
 
-Most motion endpoints are synchronous: the HTTP response arrives after bounded execution and cleanup. Client timeouts must exceed the requested duration. Never infer success from a request that timed out before returning; query `/health` and issue `/stop`.
+Autonomous navigation and positive-duration primitive endpoints are synchronous: the HTTP response arrives after bounded execution and cleanup attempts. Vendor presets have their own finite action/settle behavior and do not call `stop_burst()`. Client timeouts must exceed the requested duration. Never infer success from a request that timed out before returning; query `/health` and issue `/stop`.
 
 ## Health and state
 
@@ -31,12 +31,12 @@ Important status fields:
 
 - `moving` and `last_command`
 - `scan_age_s` and `sectors`
-- `pose.source`, normally `guarded_cartographer_slam` when accepted
+- `pose.source`, initially a dead-reckoning fallback and normally `guarded_cartographer_slam` after accepted ROS callbacks
 - `slam.raw_pose`
 - `slam.pose_valid`, `pose_guard_reason`, and `pose_guard_rejections`
 - `slam.pose_age_s`, `map_age_s`, dimensions, resolution, known cells, and occupied cells
 
-Cartographer's five-second stationary motion filter can make the generic `slam.active` flag briefly false between stationary pose updates. Controllers apply mode-specific freshness rules; fresh LiDAR is always mandatory for movement.
+Cartographer's five-second stationary motion filter can make the generic `slam.active` flag briefly false between stationary pose updates. Controllers apply mode-specific freshness rules. Fresh LiDAR is mandatory for LiDAR-aware approach/navigation routines; generic `/move` and vendor `/action` do not perform scan checks.
 
 ## Sensors and observation
 
@@ -58,7 +58,7 @@ GET  /stop
 POST /stop
 ```
 
-`/stop` sends repeated SDK stop commands and also attempts the optional Yahboom app-socket stop. SDK stop success is authoritative. App-socket timeout/failure is recorded separately and must not turn a successful SDK stop into a false motor error.
+`/stop` makes three SDK stop attempts by default and then attempts the optional Yahboom app-socket stop. Reported success means at least one SDK attempt succeeded. App-socket timeout/failure is diagnostic only and must not turn a successful SDK stop into a false motor error; failed SDK calls can still prevent a physical stop.
 
 A redundant `/stop` after every physical routine is intentional.
 
@@ -85,7 +85,7 @@ Supported primitive names:
 forward  back  left  right  turnleft  turnright  stop
 ```
 
-Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Autonomous controllers do not currently use reverse movement. Primitive access is a diagnostic/manual interface, not a substitute for supervised navigation.
+Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A positive non-stop primitive attempts `stop_burst()` after sleeping for the bounded duration. `/move` performs no LiDAR freshness or clearance check. Autonomous controllers do not currently use reverse movement. Primitive access is a supervised diagnostic/manual interface, not a substitute for navigation.
 
 ## Vendor preset actions
 
@@ -96,7 +96,7 @@ Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Autonomous control
 | `GET /action?name=pee` | Execute synchronously |
 | `GET /action?name=pee&wait=0` | Fire-and-forget |
 | `GET /action?id=<1..255>` | Raw vendor action ID |
-| `POST /action` or `/trick` | JSON action request |
+| `GET/POST /action` or `/trick` | Named/raw action request |
 
 Known names include:
 
@@ -104,7 +104,7 @@ Known names include:
 reset  pee  stretch  swing  pray  three_axis  crawl
 ```
 
-`pee` means only preset 11: lift the right leg. It does not perform target detection, approach, or turning.
+`pee` means only preset 11: lift the right leg. It does not perform target detection, approach, turning, LiDAR gating, or `stop_burst()` cleanup.
 
 ## Marking sequence
 
@@ -117,7 +117,7 @@ Default sequence:
 
 1. continuously approach generic frontal LiDAR geometry,
 2. stop at 0.25 m,
-3. turn left approximately 90 degrees,
+3. perform a configurable open-loop left turn (`0.75 s` by default; `90°` is plan/calibration metadata rather than closed-loop measurement),
 4. execute `pee`.
 
 The routine aborts before turning if the approach does not reach its target safely. Human-leg detection and person-relative target selection are not implemented.
@@ -166,7 +166,7 @@ GET/POST /explore_room
 GET/POST /explore
 ```
 
-This older endpoint maintains the bridge's legacy trace map and uses guarded Cartographer pose. It is retained for compatibility; prefer `/frontier_explore`, `/coverage_explore`, or `/lidar_walk` according to the localization objective.
+This older endpoint requires a fresh scan and `slam.active` before starting, then maintains the bridge's legacy map. It does not continuously enforce guarded-pose validity, pose/map freshness, or pose rejection during the loop. `save=1` writes the legacy bridge-map JSON, not the action trace. It is retained for compatibility; prefer `/frontier_explore`, `/coverage_explore`, or `/lidar_walk` according to the localization objective.
 
 ### Frontier exploration
 
@@ -182,6 +182,8 @@ Example dry run:
 GET /frontier_explore?name=living_room&max_duration=90&chaos=0.35&seed=42&dry_run=1
 ```
 
+Dry-run mode still requires fresh LiDAR, pose, and map, executes final stop attempts, and saves its trace by default unless `save=0`.
+
 Behavior:
 
 - uses the authoritative ROS occupancy grid,
@@ -193,7 +195,7 @@ Behavior:
 - uses bounded calibrated turns,
 - aborts repeated turns that do not reduce heading error,
 - refuses stale/rejected SLAM or stale LiDAR,
-- always performs final stop cleanup.
+- attempts final SDK stop cleanup.
 
 `chaos` is clamped to `0..1`; `seed` makes weighted selection repeatable. `max_duration` is clamped to 300 seconds.
 
@@ -215,7 +217,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - retains in-place turns and lateral escapes for blocked geometry,
 - reassesses close obstacles and resumes when safe,
 - clamps duration to 180 seconds,
-- always stops during cleanup.
+- attempts final SDK stop cleanup.
 
 ### Coverage-driven exploration
 
@@ -224,7 +226,7 @@ GET /coverage_explore?max_duration=600&min_duration=60&coverage_window=45&min_gr
 GET /explore_coverage?...same parameters...
 ```
 
-Coverage mode uses the same fluent local LiDAR movement but requires valid guarded SLAM and a fresh occupancy grid. It records Cartographer `known_cells` and stops with `coverage_plateau` when growth stays below `min_growth_cells` for the complete `coverage_window`, after `min_duration` has elapsed.
+Coverage mode uses the same fluent local LiDAR movement but requires `pose_valid` not to be false, pose age `<=6.0 s`, and map age `<=2.5 s`. It records Cartographer `known_cells` and stops with `coverage_plateau` when samples span at least 90% of the requested window and `max(known_cells)-min(known_cells) < min_growth_cells`, after `min_duration` has elapsed.
 
 Defaults and clamps:
 
@@ -273,7 +275,7 @@ These endpoints do **not** restart Cartographer. Use `scripts/jupyter_reset_slam
 - Pose guard rejects implausible localization; it does not repair the missing sensor inputs.
 - Global/map-directed claims require accepted guarded pose and fresh ROS map.
 - Turn-progress watchdogs prevent indefinite tippy-tapping when heading does not converge.
-- Every cleanup path sends SDK stop.
+- Autonomous cleanup paths make SDK stop attempts; software cannot guarantee success if every SDK call fails.
 - No movement authentication is currently implemented; expose only on trusted networks.
 - No battery telemetry is available.
 - If bridge, Jupyter, SSH, Tailscale, and direct DogZilla access all fail, report the action as unexecuted rather than fabricating optimism.

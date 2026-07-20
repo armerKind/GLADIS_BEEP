@@ -98,7 +98,7 @@ motion_lock = threading.RLock()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.14.1-coverage-pose-cadence",
+    "version": "0.14.2-bounded-manual-move",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -577,6 +577,8 @@ def scan_ok(s=None):
 
 def run_action(action: str, duration: float, step=None):
     duration = min(max(float(duration), 0.0), MAX_MOVE_S)
+    if str(action).lower() != "stop" and duration <= 0.0:
+        raise ValueError("non-stop movement requires a positive bounded duration")
     with motion_lock:
         motor_send(action, step=step)
         if duration > 0 and str(action).lower() != "stop":

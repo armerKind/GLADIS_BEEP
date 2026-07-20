@@ -26,6 +26,8 @@ The repository units are in `systemd/`. The bridge service sources ROS 2 Foxy an
 
 JupyterLab listens on port `8888` on BEEP. The browser may run on GLADIS, but notebook kernels and commands execute on BEEP's Raspberry Pi. The helpers use Jupyter because it has sometimes remained easier to authorize than Tailscale SSH.
 
+Host-side Jupyter helpers require Python packages `requests` and `websockets`.
+
 Set the destination explicitly when using Tailscale:
 
 ```bash
@@ -34,9 +36,18 @@ export BEEP_HOST=beep.tailb08b32.ts.net
 
 Local DogZilla access uses the default `192.168.8.88`.
 
-Do not commit alternate passwords, tokens, or generated login material.
+The scripts retain Yahboom's stock-image password as their vendor default. Override changed credentials with `BEEP_JUPYTER_PASSWORD`; do not commit private alternatives, tokens, or generated login material.
 
-## Deploy bridge, planner, and Cartographer config
+Implemented source overrides:
+
+```text
+BEEP_BRIDGE_SRC
+BEEP_PLANNER_SRC
+BEEP_SLAM_CONFIG_SRC
+BEEP_SAVE_SLAM_SRC
+```
+
+## Deploy bridge, planner, Cartographer config, and map exporter
 
 From the repository root:
 
@@ -50,9 +61,10 @@ The deployment helper:
 2. backs up the deployed bridge,
 3. uploads `beep_bridge.py` and `frontier_planner.py`,
 4. uploads `config/beep_2d.lua`,
-5. compiles the Python source on BEEP,
-6. restarts `beep-bridge.service`,
-7. verifies that the service is active.
+5. uploads and makes executable `scripts/save_slam_map.sh`,
+6. compiles the Python source on BEEP,
+7. restarts `beep-bridge.service`,
+8. verifies that the service is active.
 
 Verify afterward:
 
@@ -68,11 +80,18 @@ curl -s http://beep.tailb08b32.ts.net:8766/stop | python3 -m json.tool
 python3 scripts/install_systemd_service.py
 ```
 
-This installer currently targets `beep-bridge.service`. Cartographer and occupancy-grid units must already be installed from:
+This installer currently targets `beep-bridge.service`. Cartographer and occupancy-grid units are prerequisites and must be installed separately from:
 
 ```text
 systemd/beep-cartographer.service
 systemd/beep-occupancy-grid.service
+```
+
+With working SSH, one reproducible installation is:
+
+```bash
+scp systemd/beep-cartographer.service systemd/beep-occupancy-grid.service pi@beep:/tmp/
+ssh pi@beep 'sudo cp /tmp/beep-cartographer.service /tmp/beep-occupancy-grid.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now beep-cartographer beep-occupancy-grid'
 ```
 
 Verify on BEEP:
@@ -119,7 +138,7 @@ BEEP_MAP_BASE=/home/pi/gladis_maps/living_room \
 python3 scripts/jupyter_save_slam.py
 ```
 
-This calls the Pi-side `scripts/save_slam_map.sh`, finishes trajectory `0`, and exports:
+This calls `/home/pi/beep_bridge/save_slam_map.sh` (uploaded by `jupyter_deploy_bridge.py`), finishes trajectory `0`, and exports:
 
 ```text
 <base>.pbstream
@@ -178,6 +197,8 @@ Generate or provide an audio file, then play it through the Pi analog output:
 python3 scripts/jupyter_play_audio.py message.mp3 --gain 3
 ```
 
+The Pi requires `ffmpeg`, `aplay`, and a working `plughw:1,0` device. The helper creates `/home/pi/beep_bridge/audio/` through Jupyter before uploading the file.
+
 Working device:
 
 ```text
@@ -215,6 +236,12 @@ SDK nonzero turn minimum     30
 Frontier in-place turns use step 30 and calibrated longer durations. A controlled 1.3 s right turn produced meaningful physical rotation. Higher arc yaw values are not yet validated.
 
 ## Networking and boot recovery
+
+See [`fair_remote_control_status.md`](fair_remote_control_status.md) for the last verified Tailscale addresses, adapter history, and enrollment state. Initial enrollment uses:
+
+```bash
+sudo tailscale up --ssh --hostname beep
+```
 
 Expected topology:
 

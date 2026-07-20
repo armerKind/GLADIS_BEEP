@@ -2,6 +2,8 @@
 
 This file began as fair-preparation notes. It now records the current dual-network setup and preserves the failed adapter experiment only as historical context.
 
+Network addresses, topology, service observations, and the cold-boot workaround below were last physically verified on **2026-07-19**.
+
 ## Current working topology
 
 BEEP preserves the vendor robot network while using a second adapter for internet/Tailscale:
@@ -43,7 +45,7 @@ Current bridge line:
 0.14.1-coverage-pose-cadence
 ```
 
-Persistent Pi services:
+Pi services observed active during that verification:
 
 ```text
 beep-bridge.service
@@ -52,9 +54,17 @@ beep-occupancy-grid.service
 tailscaled.service
 ```
 
-The bridge rejects stale LiDAR, uses local obstacle thresholds, guards Cartographer pose, watches turn progress, bounds autonomous runs, and performs unconditional SDK stop cleanup. SDK stop success is authoritative; optional Yahboom app-socket stop failure is recorded separately.
+LiDAR-aware autonomous controllers reject stale scans, use local obstacle thresholds, guard Cartographer pose where required, watch turn progress, bound runs, and attempt SDK stop cleanup. Generic `/move` and vendor `/action` bypass those autonomy gates. At least one successful SDK stop attempt is authoritative for reporting; optional Yahboom app-socket stop failure is diagnostic.
 
 Movement authentication is **not** implemented. Keep bridge access on trusted local/Tailscale networks.
+
+Initial or replacement Tailscale enrollment on BEEP is:
+
+```bash
+sudo tailscale up --ssh --hostname beep
+```
+
+Authorize the generated login URL, then verify `tailscale ping beep` and bridge `/health` from GLADIS. Do not expose port `8766` beyond trusted local/Tailscale peers until movement authentication exists.
 
 ## Cold-boot caveat
 
