@@ -1775,7 +1775,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
-                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "dead_reckoning+local_scan_matching", "local_map": True,
+                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S}})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
@@ -1873,7 +1873,7 @@ class Handler(BaseHTTPRequestHandler):
                     dry_run=truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0]),
                 ))
             else:
-                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/frontier_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)

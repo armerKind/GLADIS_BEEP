@@ -1,49 +1,75 @@
-# BEEP Bridge API
+# BEEP Bridge HTTP API
 
-Base URL when BEEP is online:
+Current bridge line:
 
 ```text
-http://192.168.8.88:8766
+0.14.1-coverage-pose-cadence
 ```
+
+Base URLs:
+
+```text
+http://192.168.8.88:8766                   direct DOGZILLA_WIFI path
+http://beep.tailb08b32.ts.net:8766         Tailscale path when online
+```
+
+Most motion endpoints are synchronous: the HTTP response arrives after bounded execution and cleanup. Client timeouts must exceed the requested duration. Never infer success from a request that timed out before returning; query `/health` and issue `/stop`.
 
 ## Health and state
 
-- `GET /health` — bridge liveness plus compact status
-- `GET /status` — compact state, LiDAR sectors, pose, map summary
-- `GET /status?full=1` — status plus full last-run data
-- `GET /last_run` — full trace for the last autonomous routine
-- `GET /config` — runtime configuration
-- `GET /events` — rolling event log
-- `GET /pose` — current pose estimate
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Bridge liveness plus runtime status |
+| `GET /status` | Compact state, LiDAR sectors, guarded pose, and SLAM summary |
+| `GET /status?full=1` | Status plus full last-run data |
+| `GET /last_run` | Full trace from the last autonomous routine |
+| `GET /config` | Runtime configuration and motor backend |
+| `GET /events` | Recent rolling event log |
+| `GET /pose` | Current accepted pose |
 
-## Sensors
+Important status fields:
 
-- `GET /scan` — LiDAR sector minima plus scan age/count
-- `GET /frame.jpg` — one camera JPEG from the Yahboom MJPEG stream
-- `GET /camera.jpg` — alias for `/frame.jpg`
-- `GET /observe` — compact status plus map/camera metadata
+- `moving` and `last_command`
+- `scan_age_s` and `sectors`
+- `pose.source`, normally `guarded_cartographer_slam` when accepted
+- `slam.raw_pose`
+- `slam.pose_valid`, `pose_guard_reason`, and `pose_guard_rejections`
+- `slam.pose_age_s`, `map_age_s`, dimensions, resolution, known cells, and occupied cells
 
-## Motion
+Cartographer's five-second stationary motion filter can make the generic `slam.active` flag briefly false between stationary pose updates. Controllers apply mode-specific freshness rules; fresh LiDAR is always mandatory for movement.
 
-- `GET /stop` / `POST /stop` — stop burst
-- `GET /move?action=<action>&duration=<seconds>&step=<step>` — bounded primitive
-- `POST /move` — JSON movement request
-- `GET /actions` / `/tricks` — list known Yahboom/DOGZILLA preset SDK actions
-- `GET /action?name=<pee|stretch|swing|pray|three_axis|crawl|reset>&dry_run=1` — resolve or run a named preset action
-- `GET /action?name=pee&wait=0` or `GET /action?name=pee&async=1` — trigger a preset action and return immediately; preferred for Telegram/voice demos
-- `GET /action?id=<1..255>` — run a raw vendor preset action ID
-- `POST /action` — JSON action request, e.g. `{ "name": "pee", "dry_run": true }`; use `{ "name": "pee", "wait": false }` for fire-and-forget
-- `GET /mark_object?dry_run=1` / `POST /mark_object` — marking routine: one fluent continuous walk to 0.25m under live LiDAR stop control, calibrated 90° left turn, then `pee` (the preset lifts the right leg, placing it beside the target). It aborts before turning if the approach does not reach its target.
-- `GET /explore_room?max_duration=30&reset=1&rotate_scan=0` — Cartographer-SLAM-localized LiDAR exploration with visible step-20 forward strides, obstacle-driven turns/strafe escapes, map-frame poses, final stop, and optional JSON trace save. The endpoint refuses to move when the Cartographer pose is unavailable or stale.
-- `GET /frontier_explore?max_duration=90&chaos=0.45` — systematic frontier exploration over the authoritative ROS occupancy grid. It clusters free/unknown boundaries, inflates obstacles for BEEP's leg sweep, runs A* through known free space, keeps a selected frontier until reached or stalled, and replans after every supervised gait window. Consecutive forward windows retain one continuous gait command—there are no stop commands between compatible path segments. Stops remain mandatory for hazards, turns, lost paths, reached goals, stale SLAM/LiDAR, completion, and cleanup. `chaos` is clamped to `0..1`; optional `seed=<int>` makes a run reproducible. Add `dry_run=1` to plan without moving.
-- `GET /lidar_walk?max_duration=60` (alias `/demo_walk`) — presentation-safe local LiDAR-reactive walk that makes no global-SLAM claim. It keeps one fluent forward SDK gait active while polling LiDAR every ~80ms. With open forward space, avoidance decisions combine independent SDK `VX` and `VYAW` registers to produce walking arcs, then clear yaw without stopping forward gait. It retains stop-turn/lateral escape for genuinely blocked geometry, reassesses close returns, resumes walking, and always sends a final SDK stop.
-- `GET /coverage_explore?max_duration=600&min_duration=60&coverage_window=45&min_growth_cells=150` — guarded-SLAM room exploration driven by occupancy-map growth rather than an arbitrary walking duration. It uses the fluent local LiDAR motion controller, stops when known-cell growth remains below the threshold for the full window, aborts on invalid guarded pose/freshness, and retains a hard maximum duration.
+## Sensors and observation
 
-Aliases: `/dog_explore` and `/explore_frontiers`.
+| Endpoint | Purpose |
+|---|---|
+| `GET /scan` | LiDAR sector minima, scan age, and scan count |
+| `GET /frame.jpg` | Single JPEG from Yahboom MJPEG stream |
+| `GET /camera.jpg` | Camera alias |
+| `GET /observe` | Status plus legacy map and camera metadata |
+| `GET /local_map` | Robot-frame local safety-map summary |
+| `GET /local_map.svg` | Robot-frame local map rendering |
 
-`/health` and `/status` expose `pose.source=guarded_cartographer_slam` plus a `slam` object containing pose/map freshness, ROS occupancy-grid dimensions, resolution, known cells, occupied cells, raw TF pose, pose-guard validity/reason, and rejection count. The guard anchors stationary pose to a 12cm/0.18rad jitter envelope, rejects impossible moving jumps, and allows two seconds for delayed post-motion scan matching. Frontier navigation refuses to proceed while a pose update is rejected. The authoritative room map is ROS `/map`; the bridge JSON map is only a compact trace/diagnostic rendering.
+Camera success depends on `/dev/video0`, the Yahboom service on port `6500`, and lighting. Camera failure does not weaken movement safety, but it does reduce human supervision.
 
-Example:
+## Stop semantics
+
+```text
+GET  /stop
+POST /stop
+```
+
+`/stop` sends repeated SDK stop commands and also attempts the optional Yahboom app-socket stop. SDK stop success is authoritative. App-socket timeout/failure is recorded separately and must not turn a successful SDK stop into a false motor error.
+
+A redundant `/stop` after every physical routine is intentional.
+
+## Bounded primitive movement
+
+```text
+GET  /move?action=<action>&duration=<seconds>&step=<step>
+POST /move
+```
+
+POST example:
 
 ```json
 {
@@ -53,24 +79,68 @@ Example:
 }
 ```
 
-Supported SDK-backed actions include:
+Supported primitive names:
 
 ```text
-forward
-back
-left
-right
-turnleft
-turnright
-stop
+forward  back  left  right  turnleft  turnright  stop
+```
+
+Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Autonomous controllers do not currently use reverse movement. Primitive access is a diagnostic/manual interface, not a substitute for supervised navigation.
+
+## Vendor preset actions
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /actions` or `/tricks` | List known named actions |
+| `GET /action?name=stretch&dry_run=1` | Resolve without executing |
+| `GET /action?name=pee` | Execute synchronously |
+| `GET /action?name=pee&wait=0` | Fire-and-forget |
+| `GET /action?id=<1..255>` | Raw vendor action ID |
+| `POST /action` or `/trick` | JSON action request |
+
+Known names include:
+
+```text
+reset  pee  stretch  swing  pray  three_axis  crawl
+```
+
+`pee` means only preset 11: lift the right leg. It does not perform target detection, approach, or turning.
+
+## Marking sequence
+
+```text
+GET  /mark_object?dry_run=1
+POST /mark_object
+```
+
+Default sequence:
+
+1. continuously approach generic frontal LiDAR geometry,
+2. stop at 0.25 m,
+3. turn left approximately 90 degrees,
+4. execute `pee`.
+
+The routine aborts before turning if the approach does not reach its target safely. Human-leg detection and person-relative target selection are not implemented.
+
+Example:
+
+```json
+{
+  "target_front": 0.25,
+  "max_duration": 5.0,
+  "turn": "left",
+  "turn_duration": 0.75,
+  "dry_run": true
+}
 ```
 
 ## Approach behavior
 
-- `GET /forward_until`
-- `POST /forward_until`
-- `/learned_forward` — alias
-- `/approach_front` — alias
+```text
+GET/POST /forward_until
+GET/POST /learned_forward
+GET/POST /approach_front
+```
 
 Example:
 
@@ -85,39 +155,125 @@ Example:
 }
 ```
 
-## Mapping
+`max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds). `mark_object` uses the newer continuous forward supervisor rather than visible pulse-by-pulse gait.
 
-- `GET /local_map` — robot-frame local safety map summary
-- `GET /local_map.svg` — robot-frame local LiDAR map SVG
-- `GET /map` — global occupancy-map summary
-- `GET /map?full=1` — full sparse map data
-- `GET /map.svg` — global map SVG
-- `GET /map_reset?name=<room>` — reset pose and map
-- `POST /map_reset` — reset pose and map with JSON body
+## Navigation modes
 
-## Exploration
+### Legacy exploration
 
-- `GET /explore_room`
-- `POST /explore_room`
-- `/explore` — alias
+```text
+GET/POST /explore_room
+GET/POST /explore
+```
 
-Example:
+This older endpoint maintains the bridge's legacy trace map and uses guarded Cartographer pose. It is retained for compatibility; prefer `/frontier_explore`, `/coverage_explore`, or `/lidar_walk` according to the localization objective.
+
+### Frontier exploration
+
+```text
+GET/POST /frontier_explore
+GET/POST /dog_explore
+GET/POST /explore_frontiers
+```
+
+Example dry run:
+
+```text
+GET /frontier_explore?name=living_room&max_duration=90&chaos=0.35&seed=42&dry_run=1
+```
+
+Behavior:
+
+- uses the authoritative ROS occupancy grid,
+- detects and clusters free/unknown boundaries,
+- inflates obstacles for leg sweep,
+- runs A* through known free space,
+- keeps selected frontiers until reached or lost,
+- maintains fluent forward gait across compatible replanning windows,
+- uses bounded calibrated turns,
+- aborts repeated turns that do not reduce heading error,
+- refuses stale/rejected SLAM or stale LiDAR,
+- always performs final stop cleanup.
+
+`chaos` is clamped to `0..1`; `seed` makes weighted selection repeatable. `max_duration` is clamped to 300 seconds.
+
+A completion reason of `coverage_complete_or_no_reachable_frontiers` must be read with the trace. If map updates eliminate routes during turns and no forward motion occurred, it means “no currently reachable planner frontier,” not “the robot traversed the whole room.”
+
+### Local LiDAR walk
+
+```text
+GET /lidar_walk?max_duration=90
+GET /demo_walk?max_duration=90
+```
+
+This presentation-safe fallback makes **no global-SLAM claim**. It:
+
+- keeps one fluent forward SDK gait active across compatible windows,
+- polls local LiDAR approximately every 80 ms,
+- combines forward velocity and yaw for walking arcs,
+- clears yaw to resume straight walking without restarting gait,
+- retains in-place turns and lateral escapes for blocked geometry,
+- reassesses close obstacles and resumes when safe,
+- clamps duration to 180 seconds,
+- always stops during cleanup.
+
+### Coverage-driven exploration
+
+```text
+GET /coverage_explore?max_duration=600&min_duration=60&coverage_window=45&min_growth_cells=150
+GET /explore_coverage?...same parameters...
+```
+
+Coverage mode uses the same fluent local LiDAR movement but requires valid guarded SLAM and a fresh occupancy grid. It records Cartographer `known_cells` and stops with `coverage_plateau` when growth stays below `min_growth_cells` for the complete `coverage_window`, after `min_duration` has elapsed.
+
+Defaults and clamps:
+
+```text
+max_duration       default/max 600 s
+min_duration       default 60 s
+coverage_window    default 45 s; range 10..180 s
+min_growth_cells   default 150
+```
+
+The maximum is a safety backstop, not the exploration objective. Coverage plateau is evidence that the currently observable map stopped expanding; it cannot prove that inaccessible or occluded space was physically visited.
+
+Coverage returns:
 
 ```json
 {
-  "name": "living_room_test",
-  "max_duration": 20,
-  "reset": true,
-  "save": true,
-  "rotate_scan": true
+  "mode": "coverage_explore",
+  "reason": "coverage_plateau",
+  "coverage": {
+    "initial_known_cells": 7333,
+    "final_known_cells": 10659,
+    "growth_cells": 3326,
+    "window_s": 45.0,
+    "minimum_growth_cells": 150
+  }
 }
 ```
 
-## Safety notes
+## Mapping endpoints
 
-- All bounded movements end with stop bursts.
-- Cartographer uses penalized online correlative matching because BEEP has no odometry or ROS IMU feed; the bridge pose guard is the final drift gate.
-- Local map is more trustworthy than global map for immediate safety.
-- Global map quality is marked `low`, `medium`, or `high` based on pose confidence.
-- Current scan matching is local and does not perform loop closure.
-- If bridge/Jupyter/SSH all time out, assume BEEP is powered down or battery-empty and do not issue further movement commands.
+| Endpoint | Purpose |
+|---|---|
+| `GET /map` | Legacy bridge-map summary |
+| `GET /map?full=1` | Full legacy sparse map |
+| `GET /map.svg` | Legacy map rendering |
+| `GET /map_reset?name=<room>` | Reset legacy pose/map only |
+| `POST /map_reset` | Reset legacy pose/map with JSON pose/name |
+
+These endpoints do **not** restart Cartographer. Use `scripts/jupyter_reset_slam.py` for a clean ROS trajectory and `scripts/jupyter_save_slam.py` to export `.pbstream`, `.pgm`, and `.yaml` artifacts.
+
+## Safety and limitations
+
+- Fresh local LiDAR is mandatory for physical autonomy.
+- Immediate collision decisions use local sectors, not network round trips.
+- Cartographer has no trusted odometry or integrated IMU input.
+- Pose guard rejects implausible localization; it does not repair the missing sensor inputs.
+- Global/map-directed claims require accepted guarded pose and fresh ROS map.
+- Turn-progress watchdogs prevent indefinite tippy-tapping when heading does not converge.
+- Every cleanup path sends SDK stop.
+- No movement authentication is currently implemented; expose only on trusted networks.
+- No battery telemetry is available.
+- If bridge, Jupyter, SSH, Tailscale, and direct DogZilla access all fail, report the action as unexecuted rather than fabricating optimism.

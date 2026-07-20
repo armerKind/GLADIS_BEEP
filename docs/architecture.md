@@ -2,89 +2,167 @@
 
 ## Goal
 
-BEEP should become an embodied sibling-agent to GLADIS: a robot body that can perceive, speak, move, map, and act with increasing autonomy.
+BEEP is an embodied sibling-agent platform for GLADIS: a robot body that can perceive, speak, move, map, and execute bounded autonomous behaviors. The bridge is its current local nervous system.
 
-The bridge is the current nervous system. It deliberately avoids browser/Jupyter control loops.
+## Where computation runs
 
-## Current architecture
+Normal robot computation runs on BEEP's Raspberry Pi:
+
+- ROS 2 Foxy and the LiDAR driver
+- Cartographer and occupancy-grid publication
+- HTTP bridge and sensor monitoring
+- local collision checks and motor commands
+- camera and analog speaker access
+
+A browser connected to JupyterLab on port `8888` controls a Python kernel running on the Pi. It does not move SLAM computation to the browser's PC unless notebook code explicitly calls a remote service. Jupyter is used for deployment, diagnostics, maintenance, and experiments; it is not the production autonomy loop.
+
+## Runtime topology
 
 ```text
-GLADIS / host
+GLADIS / operator
    |
-   | HTTP
+   | high-level HTTP request
    v
 BEEP bridge :8766 on Pi
-   |-- DOGZILLALib SDK for locomotion
-   |-- ROS2 /scan for LiDAR
-   |-- Yahboom port :6500 for camera MJPEG
-   |-- Yahboom port :6000 for camera/app Standard mode
-   |-- local + global mapping experiments
+   |-- DOGZILLALib SDK -> gait registers and preset actions
+   |-- ROS 2 /scan -> local LiDAR sectors and safety
+   |-- Cartographer TF -> raw global pose
+   |-- ROS 2 /map -> occupancy grid and coverage metrics
+   |-- pose guard -> accepted navigation pose
+   |-- Yahboom :6500 -> camera MJPEG
+   `-- Yahboom :6000 -> optional app-standard stop path
+
+JupyterLab :8888 on Pi
+   `-- deploy / reset SLAM / save map / play audio / diagnostics
 ```
 
-## Mapping model
+The remote HTTP request may cross Tailscale, but the movement supervision loop stays on BEEP. Network latency is therefore not the primary collision-avoidance mechanism.
 
-There are two map layers:
+## Perception and mapping layers
 
-### Local map
+### 1. Local LiDAR safety
 
-Robot-frame LiDAR map around BEEP.
-
-This is the trustworthy layer for immediate obstacle avoidance.
+The latest `/scan` is reduced to front, front-left, front-right, left, right, and rear clearances. This is the authoritative layer for immediate movement safety.
 
 ```text
+GET /scan
 GET /local_map
 GET /local_map.svg
 ```
 
-### Global map
+The local map is robot-frame diagnostic geometry. It does not require trustworthy global localization.
 
-Sparse occupancy grid over an 8m x 8m area with 5cm cells.
+### 2. Raw Cartographer SLAM
 
-This now uses local scan matching to correct dead-reckoned pose, but it is still not full SLAM.
+Cartographer consumes the MS200 LiDAR and publishes TF plus a ROS occupancy grid. The current configuration:
+
+- does not use wheel odometry,
+- does not use IMU data,
+- keeps online correlative scan matching for quadruped turns,
+- strongly penalizes invented translation and rotation,
+- filters stationary jitter,
+- reduces pose-graph optimization load.
+
+Raw TF is retained under `slam.raw_pose` for diagnosis. Because BEEP is a swaying, slipping quadruped, raw scan matching can still produce fictional movement.
+
+### 3. Guarded navigation pose
+
+The bridge exposes an accepted pose with source:
 
 ```text
-GET /map
-GET /map.svg
+guarded_cartographer_slam
 ```
 
-## Pose model
+The guard:
 
-Current pose source:
+- anchors stationary updates inside a 0.12 m / 0.18 rad envelope,
+- rejects implausible moving translation or yaw jumps,
+- allows a short post-motion scan-matching window,
+- records the raw pose, rejection reason, and rejection count,
+- blocks frontier or coverage claims when localization becomes invalid.
+
+Dead reckoning remains available only as a legacy/fallback estimate and must not overwrite a fresh guarded Cartographer pose.
+
+### 4. Legacy bridge map
+
+`GET /map` and `/map.svg` expose the bridge's older sparse diagnostic map. The authoritative global occupancy grid for navigation is ROS `/map`, summarized under the `slam` object returned by `/health` and `/status`.
+
+## Autonomy modes
+
+### Local LiDAR walk
 
 ```text
-dead_reckoning + local_scan_matching
+GET /lidar_walk
+GET /demo_walk
 ```
 
-Dead reckoning provides a movement prior. LiDAR scan matching corrects local pose drift where possible.
+- no global-localization claim,
+- one fluent forward gait across compatible windows,
+- forward-plus-yaw arcs when geometry permits,
+- in-place turns and lateral escapes when blocked,
+- approximately 80 ms local safety polling,
+- hard timeout and unconditional final SDK stop.
 
-Reported fields:
+### Frontier exploration
 
-```json
-{
-  "x": 0.0,
-  "y": 0.0,
-  "yaw": 0.0,
-  "source": "dead_reckoning+scan_match",
-  "confidence": 0.9,
-  "scan_match_score": 0.0124
-}
+```text
+GET /frontier_explore
 ```
 
-## Limitations
+- clusters known-free/unknown boundaries,
+- inflates obstacles for leg sweep,
+- runs A* through known free space,
+- replans after supervised gait windows,
+- aborts on stale or rejected SLAM,
+- watches repeated turn progress.
 
-- No loop closure yet.
-- No persistent semantic object map yet.
-- No reliable long-range path planning yet.
-- Local map is better than global map for reflex decisions.
+Frontiers can disappear as the live map changes during a scan or turn. A return reason such as `coverage_complete_or_no_reachable_frontiers` must be interpreted together with the trace; a turns-only trace is not proof of physical traversal.
+
+### Coverage exploration
+
+```text
+GET /coverage_explore
+```
+
+Coverage mode combines local fluent LiDAR motion with guarded-SLAM map-growth measurement. It stops when known occupancy-grid cells fail to grow by the configured threshold for a full time window. A maximum duration is only a safety ceiling.
+
+This is a more honest room-completion heuristic than elapsed time, but it is not mathematical proof that every occluded corner or inaccessible area was visited.
+
+### Marking behavior
+
+`pee` is only vendor preset action 11: a right-leg lift.
+
+`mark_object` means:
+
+1. approach a frontal target under LiDAR supervision,
+2. stop at marking distance,
+3. turn sideways,
+4. perform `pee`.
+
+The current target is generic frontal LiDAR geometry. Human-leg detection, person selection, and socially targeted marking remain future work. An oddly specific roadmap, but a roadmap nonetheless.
+
+## Stop semantics
+
+All autonomy paths execute unconditional SDK stop cleanup. `stop_burst` also attempts the Yahboom app-socket stop, but SDK stop success is the authoritative motor-safety result. An app-socket timeout is recorded separately and must not convert a successful SDK stop into a reported motor failure.
+
+## Known limitations
+
+- No trusted wheel odometry.
+- No integrated ROS IMU input for Cartographer.
+- Raw localization can drift under gait vibration or repetitive geometry.
+- Pose guarding rejects bad localization; it cannot manufacture missing odometry.
+- Saved `.pbstream` state exists, but production pure-localization startup/relocalization is not yet implemented.
+- Coverage saturation can miss occluded or physically unreachable space.
 - Camera quality depends heavily on lighting.
-- Battery loss can drop all ports simultaneously.
+- No battery telemetry.
+- The external Wi-Fi adapter and Tailscale path can disappear while local robot services continue.
+- Human-leg detection and semantic object memory are not implemented.
 
 ## Next useful upgrades
 
-1. Persist bridge as a systemd service.
-2. Add a real sync/deploy workflow from this repo to the Pi.
-3. Add map-aware escape maneuvers using `/local_map`.
-4. Add voice endpoints for speaker/microphone.
-5. Add semantic object memory: bin, door, couch, charging spot.
-6. Add a simple behavior layer: observe → decide → bounded action → verify.
-7. Later: integrate proper SLAM / loop closure if available.
+1. Add pure-localization startup against a selected good `.pbstream`.
+2. Integrate a trustworthy odometry or IMU source if hardware permits.
+3. Add semantic targets and human-leg detection as a separate perception layer.
+4. Persist and compare coverage history across runs.
+5. Add authenticated movement control before exposing the bridge beyond trusted networks.
+6. Add battery/voltage telemetry if the hardware provides a reliable source.

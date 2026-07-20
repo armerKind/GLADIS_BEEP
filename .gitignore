@@ -31,6 +31,7 @@ maps/*.svg
 Thumbs.db
 .vscode/
 .idea/
+.hermes/
 
 # Secrets
 *.pem
