@@ -94,6 +94,7 @@ scripts/jupyter_deploy_bridge.py        # Upload bridge/planner/config and resta
 scripts/jupyter_reset_slam.py           # Start a clean Cartographer trajectory
 scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
+scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency, and Pi resources
 scripts/install_systemd_service.py      # Install the bridge systemd service
 scripts/save_slam_map.sh                # Pi-side Cartographer exporter
 ```
@@ -150,7 +151,7 @@ python3 -m unittest discover -s tests -v
 git diff --check
 ```
 
-At the time of this documentation update, the discovered suite contains 19 passing tests.
+At the time of this perception-baseline update, the discovered suite contains 23 passing tests.
 
 ## Further documentation
 
@@ -158,6 +159,7 @@ At the time of this documentation update, the discovered suite contains 19 passi
 - [`docs/bridge_api.md`](docs/bridge_api.md) — HTTP API and safety behavior
 - [`docs/deployment.md`](docs/deployment.md) — deployment, systemd, Jupyter, SLAM reset/export, and verification
 - [`docs/fair_remote_control_status.md`](docs/fair_remote_control_status.md) — current network topology and historical adapter notes
+- [`docs/perception_baseline.md`](docs/perception_baseline.md) — measured camera, microphone, bridge-latency, and Pi-resource baseline
 - [`assets/ros_maps/README.md`](assets/ros_maps/README.md) — retained Cartographer artifacts
 
 ## Version-control policy
