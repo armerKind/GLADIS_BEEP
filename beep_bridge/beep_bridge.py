@@ -46,6 +46,7 @@ FORWARD_UNTIL_MAX_S = float(os.environ.get("BEEP_FORWARD_UNTIL_MAX_S", "12.0"))
 FRONT_STOP_M = float(os.environ.get("BEEP_FRONT_STOP_M", "0.35"))
 SIDE_STOP_M = float(os.environ.get("BEEP_SIDE_STOP_M", "0.22"))
 SCAN_STALE_S = float(os.environ.get("BEEP_SCAN_STALE_S", "0.60"))
+HARD_CLEARANCE_M = max(0.15, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.15")))
 
 CMD_PAYLOAD = {
     "stop": 0x00,
@@ -82,7 +83,7 @@ TRICK_ACTIONS = {
     "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 3.5, "safe_for_fair": True, "aliases": ["leg_lift", "mark", "urinate"]},
     "stretch": {"id": 14, "label": "Stretch", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["show", "startup_show", "lazy"]},
     "swing": {"id": 16, "label": "Swing", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["shake", "wobble"]},
-    "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["beg", "begging", "request_food"]},
+    "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["prey", "beg", "begging", "request_food"]},
 }
 TRICK_ALIASES = {}
 for _trick_name, _trick_meta in TRICK_ACTIONS.items():
@@ -95,10 +96,11 @@ sdk_error = None
 
 state_lock = threading.RLock()
 motion_lock = threading.RLock()
+motion_cancel = threading.Event()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.14.2-bounded-manual-move",
+    "version": "0.15.0-interruptible-presentation",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -109,6 +111,7 @@ state = {
     "scan_count": 0,
     "sectors": {},
     "moving": False,
+    "motion_cancelled": False,
     "last_frame_at": None,
     "last_frame_bytes": None,
     "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0, "source": "dead_reckoning", "confidence": 0.25, "scan_match_score": None},
@@ -127,6 +130,28 @@ def remember(event, **data):
     with state_lock:
         events.append(item)
     return item
+
+
+def begin_motion(source="api"):
+    """Start a newly authorized motion lease after any earlier stop latch."""
+    motion_cancel.clear()
+    with state_lock:
+        state["motion_cancelled"] = False
+    remember("motion_lease_started", source=str(source))
+
+
+def motion_is_cancelled():
+    return motion_cancel.is_set()
+
+
+def wait_motion(duration, poll_s=0.05):
+    """Wait for a bounded motion window, returning early after a stop latch."""
+    deadline = time.time() + max(0.0, float(duration))
+    while time.time() < deadline:
+        if motion_is_cancelled():
+            return False
+        time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
+    return not motion_is_cancelled()
 
 
 def pkt(cmd: int, payload=()):
@@ -277,6 +302,8 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
         remember("sdk_trick_dry_run", trick=trick)
         return {"ok": True, "dry_run": True, "trick": trick}
     with motion_lock:
+        if motion_is_cancelled():
+            return {"ok": False, "dry_run": False, "reason": "motion_cancelled", "trick": trick}
         g = sdk_init()
         with state_lock:
             state["last_command"] = "sdk_action:" + trick["name"]
@@ -285,12 +312,13 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
             state["last_error"] = None
         remember("sdk_trick_start", trick=trick)
         g.action(int(trick["id"]))
-        if settle_s:
-            time.sleep(settle_s)
+        completed = wait_motion(settle_s) if settle_s else not motion_is_cancelled()
+        if not completed:
+            stop_burst(3)
         with state_lock:
             state["moving"] = False
-        remember("sdk_trick_done", trick=trick, settle_s=settle_s)
-    return {"ok": True, "dry_run": False, "trick": trick, "settle_s": settle_s}
+        remember("sdk_trick_done", trick=trick, settle_s=settle_s, cancelled=not completed)
+    return {"ok": completed, "dry_run": False, "reason": None if completed else "motion_cancelled", "trick": trick, "settle_s": settle_s}
 
 
 def sdk_trick_async(name=None, action_id=None, dry_run=False, settle_s=None):
@@ -353,6 +381,15 @@ def stop_burst(n=3):
             state["last_error"] = err
     remember("stop_burst", n=n, error=err, app_error=app_error, sdk_ok=sdk_ok)
     return err
+
+
+def request_stop(source="api", n=3):
+    """Latch cancellation before stopping so autonomous loops cannot resume."""
+    motion_cancel.set()
+    with state_lock:
+        state["motion_cancelled"] = True
+    remember("motion_cancel_requested", source=str(source))
+    return stop_burst(n)
 
 
 def sector_min(msg, deg_a, deg_b):
@@ -576,14 +613,21 @@ def scan_ok(s=None):
 
 
 def run_action(action: str, duration: float, step=None):
+    if str(action).lower() == "stop":
+        err = request_stop("run_action_stop")
+        return {"ok": err is None, "reason": "motion_cancelled", "error": err, "action": "stop", "duration": 0.0, "status": snapshot()}
     duration = min(max(float(duration), 0.0), MAX_MOVE_S)
     if str(action).lower() != "stop" and duration <= 0.0:
         raise ValueError("non-stop movement requires a positive bounded duration")
     with motion_lock:
+        if str(action).lower() != "stop" and motion_is_cancelled():
+            return {"ok": False, "reason": "motion_cancelled", "action": action, "duration": duration, "status": snapshot()}
         motor_send(action, step=step)
         if duration > 0 and str(action).lower() != "stop":
-            time.sleep(duration)
+            completed = wait_motion(duration)
             stop_burst()
+            if not completed:
+                return {"ok": False, "reason": "motion_cancelled", "action": action, "duration": duration, "status": snapshot()}
             update_pose_for_action(action, duration)
             update_map_from_scan(room_map) if room_map is not None else None
         return {"ok": True, "backend": MOTOR_BACKEND, "action": action, "step": SDK_STEP_DEFAULT if step is None else int(step), "duration": duration, "pose": pose_copy(), "map": map_summary(room_map) if room_map is not None else None, "status": snapshot()}
@@ -1044,17 +1088,25 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
             if rotate_scan:
                 # In-place panorama: crude but valuable when odometry is unreliable.
                 for i in range(6):
+                    if motion_is_cancelled():
+                        reason = "motion_cancelled"
+                        break
                     if time.time() - started >= max_duration:
                         break
                     motor_send("turnleft", step=30)
                     dur = 0.45
-                    time.sleep(dur)
+                    if not wait_motion(dur):
+                        reason = "motion_cancelled"
+                        break
                     stop_burst(2)
                     update_pose_for_action("turnleft", dur)
                     time.sleep(0.08)
                     up = update_map_from_scan(m, scan_match=False)
                     trace.append({"phase": "rotate_scan", "i": i + 1, "update": up, "sectors": snapshot().get("sectors", {})})
             while time.time() - started < max_duration:
+                if motion_is_cancelled():
+                    reason = "motion_cancelled"
+                    break
                 st = snapshot()
                 if not scan_ok(st):
                     reason = "scan_stale_or_missing"
@@ -1087,7 +1139,9 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                 action, dur, why = choose_explore_action(sec)
                 step = explore_step_for(action)
                 motor_send(action, step=step)
-                time.sleep(dur)
+                if not wait_motion(dur):
+                    reason = "motion_cancelled"
+                    break
                 stop_burst(2)
                 update_pose_for_action(action, dur)
                 time.sleep(0.05)
@@ -1101,7 +1155,7 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
             stop_burst(3)
             active_explore = None
     saved_path = save_room_map(name) if save else None
-    result = {"ok": not reason.startswith("exception") and not reason.startswith("scan_stale"), "mode": "explore_room", "reason": reason, "elapsed_s": round(time.time() - started, 2), "map": map_summary(m), "saved_path": saved_path, "trace_tail": trace[-30:], "status": snapshot()}
+    result = {"ok": not reason.startswith("exception") and not reason.startswith("scan_stale") and reason != "motion_cancelled", "mode": "explore_room", "reason": reason, "elapsed_s": round(time.time() - started, 2), "map": map_summary(m), "saved_path": saved_path, "trace_tail": trace[-30:], "status": snapshot()}
     last_run = result
     remember("explore_done", reason=reason, elapsed_s=result["elapsed_s"], saved_path=saved_path)
     return result
@@ -1126,6 +1180,8 @@ def supervise_fluent_forward(duration, poll_s=0.08):
     started = time.time()
     deadline = started + max(0.0, float(duration))
     while time.time() < deadline:
+        if motion_is_cancelled():
+            return {"ok": False, "reason": "motion_cancelled", "elapsed_s": time.time() - started}
         st = snapshot()
         slam = st.get("slam") or {}
         if not scan_ok(st):
@@ -1146,6 +1202,8 @@ def supervise_lidar_forward(duration, poll_s=0.08):
     started = time.time()
     deadline = started + max(0.0, float(duration))
     while time.time() < deadline:
+        if motion_is_cancelled():
+            return {"ok": False, "reason": "motion_cancelled", "elapsed_s": time.time() - started}
         st = snapshot()
         if not scan_ok(st):
             return {"ok": False, "reason": "scan_stale_during_lidar_walk", "elapsed_s": time.time() - started}
@@ -1187,6 +1245,9 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
             if not scan_ok(initial):
                 reason = "scan_stale_or_missing_before_start"
             while reason == "max_duration" and time.time() - started < max_duration:
+                if motion_is_cancelled():
+                    reason = "motion_cancelled"
+                    break
                 st = snapshot()
                 if not scan_ok(st):
                     reason = "scan_stale_or_missing"
@@ -1264,7 +1325,9 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     duration *= 2.0
                 duration = min(duration, remaining)
                 motor_send(action, step=explore_step_for(action))
-                time.sleep(duration)
+                if not wait_motion(duration):
+                    reason = "motion_cancelled"
+                    break
                 stop_burst(2)
                 trace.append({"action": action, "duration": round(duration, 3), "why": why, "sectors": sec})
         except Exception as exc:
@@ -1275,7 +1338,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
             stop_burst(3)
             active_explore = None
     result = {
-        "ok": not reason.startswith("exception") and not reason.startswith("scan_stale") and reason != "slam_invalid_during_coverage",
+        "ok": not reason.startswith("exception") and not reason.startswith("scan_stale") and reason not in ("slam_invalid_during_coverage", "motion_cancelled"),
         "mode": "coverage_explore" if coverage_goal else "lidar_walk",
         "localization": "guarded_slam_coverage_with_local_lidar_motion" if coverage_goal else "local_lidar_reactive_no_global_slam",
         "reason": reason,
@@ -1326,6 +1389,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     with motion_lock:
         try:
             while time.time() - started < max_duration:
+                if motion_is_cancelled():
+                    reason = "motion_cancelled"
+                    break
                 st = snapshot()
                 slam = st.get("slam") or {}
                 if not scan_ok(st):
@@ -1348,9 +1414,11 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 pose = pose_copy()
                 pose_tuple = (float(pose["x"]), float(pose["y"]), float(pose["yaw"]))
                 sec = st.get("sectors") or {}
-                if (float(sec.get("front") or 99) < 0.20 or
-                        float(sec.get("front_left") or 99) < 0.14 or
-                        float(sec.get("front_right") or 99) < 0.14):
+                if (float(sec.get("front") or 99) < max(0.20, HARD_CLEARANCE_M) or
+                        float(sec.get("front_left") or 99) < HARD_CLEARANCE_M or
+                        float(sec.get("front_right") or 99) < HARD_CLEARANCE_M or
+                        float(sec.get("left") or 99) < HARD_CLEARANCE_M or
+                        float(sec.get("right") or 99) < HARD_CLEARANCE_M):
                     reason = "hard_obstacle_stop"
                     break
 
@@ -1447,7 +1515,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                         turn_streak_count = 1
                         turn_streak_start_yaw = float(before_pose[2])
                     motor_send(decision["action"], step=decision["step"])
-                    time.sleep(float(decision["duration"]))
+                    if not wait_motion(float(decision["duration"])):
+                        reason = "motion_cancelled"
+                        break
                     stop_burst(1)
                     time.sleep(rng.uniform(0.04, 0.10))
                 after_pose_dict = pose_copy()
@@ -1519,7 +1589,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
             active_explore = None
 
     result = {
-        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_pose_guard_rejected_drift", "slam_map_unavailable_or_stale", "slam_grid_not_received", "turn_progress_stalled"),
+        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_pose_guard_rejected_drift", "slam_map_unavailable_or_stale", "slam_grid_not_received", "turn_progress_stalled", "motion_cancelled"),
         "mode": "frontier_explore",
         "reason": reason,
         "elapsed_s": round(time.time() - started, 2),
@@ -1567,6 +1637,9 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
 
         try:
             while total < max_duration:
+                if motion_is_cancelled():
+                    reason = "motion_cancelled"
+                    break
                 s = snapshot()
                 before = front_distance(s)
                 if not scan_ok(s):
@@ -1578,7 +1651,9 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
 
                 run_for = min(pulse, max_duration - total)
                 motor_send("forward")
-                time.sleep(run_for)
+                if not wait_motion(run_for):
+                    reason = "motion_cancelled"
+                    break
                 stop_burst(2)
                 total += run_for
                 time.sleep(0.08)
@@ -1667,6 +1742,9 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
         try:
             motor_send("forward", step=step)
             while time.time() - started < max_duration:
+                if motion_is_cancelled():
+                    reason = "motion_cancelled"
+                    break
                 final_state = snapshot()
                 elapsed = time.time() - started
                 front = front_distance(final_state)
@@ -1680,8 +1758,12 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
                 if front is not None and front <= target_front:
                     reason = f"target_reached:{front:.3f}"
                     break
-                close_side = min(sectors.get("front_left") or 99, sectors.get("front_right") or 99)
-                if close_side < min_target:
+                clearance_samples = [
+                    float(sectors.get(name) or 99)
+                    for name in ("front_left", "front_right", "left", "right")
+                ]
+                close_side = min(clearance_samples)
+                if close_side < max(float(min_target), HARD_CLEARANCE_M):
                     reason = f"side_too_close:{close_side:.3f}"
                     break
                 time.sleep(poll_interval)
@@ -1721,18 +1803,40 @@ def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TU
     approach = forward_continuous_until(target_front=target_front, max_duration=max_duration, min_target=MARK_MIN_FRONT_M)
     steps.append({"step": "approach", "result": approach})
     snap = snapshot()
-    front = (snap.get("sectors") or {}).get("front")
-    if not approach.get("ok") or front is None or front < MARK_MIN_FRONT_M:
+    sectors = snap.get("sectors") or {}
+    front = sectors.get("front")
+    side_clearance = min(float(sectors.get(name) or 99) for name in ("front_left", "front_right", "left", "right"))
+    if motion_is_cancelled():
         stop_burst(3)
-        reason = "approach_failed:" + str(approach.get("reason")) if not approach.get("ok") else "unsafe_after_approach"
-        result = {"ok": False, "mode": "mark_object", "reason": reason, "steps": steps, "status": snap}
+        result = {"ok": False, "mode": "mark_object", "reason": "motion_cancelled", "steps": steps, "status": snap}
         remember("mark_object_abort", reason=result["reason"], front=front)
         return result
+    if not approach.get("ok") or front is None or front < MARK_MIN_FRONT_M or side_clearance < HARD_CLEARANCE_M:
+        stop_burst(3)
+        if not approach.get("ok"):
+            reason = "approach_failed:" + str(approach.get("reason"))
+        elif side_clearance < HARD_CLEARANCE_M:
+            reason = f"unsafe_side_clearance:{side_clearance:.3f}"
+        else:
+            reason = "unsafe_after_approach"
+        result = {"ok": False, "mode": "mark_object", "reason": reason, "steps": steps, "status": snap}
+        remember("mark_object_abort", reason=result["reason"], front=front, side_clearance=side_clearance)
+        return result
     turn_action = "turnright" if turn == "right" else "turnleft"
-    steps.append({"step": "turn", "result": run_action(turn_action, turn_duration)})
-    steps.append({"step": "pee", "result": sdk_trick(name="pee")})
-    result = {"ok": True, "mode": "mark_object", "steps": steps, "status": snapshot()}
-    remember("mark_object_done", ok=True)
+    turn_result = run_action(turn_action, turn_duration)
+    steps.append({"step": "turn", "result": turn_result})
+    if not turn_result.get("ok") or motion_is_cancelled():
+        stop_burst(3)
+        result = {"ok": False, "mode": "mark_object", "reason": "motion_cancelled" if motion_is_cancelled() else "turn_failed", "steps": steps, "status": snapshot()}
+        remember("mark_object_abort", reason=result["reason"])
+        return result
+    pee_result = sdk_trick(name="pee")
+    steps.append({"step": "pee", "result": pee_result})
+    reset_result = sdk_trick(name="reset") if pee_result.get("ok") and not motion_is_cancelled() else {"ok": False, "reason": "skipped"}
+    steps.append({"step": "reset", "result": reset_result})
+    ok = bool(pee_result.get("ok") and reset_result.get("ok") and not motion_is_cancelled())
+    result = {"ok": ok, "mode": "mark_object", "reason": None if ok else "gesture_failed_or_cancelled", "steps": steps, "status": snapshot()}
+    remember("mark_object_done", ok=ok)
     return result
 
 
@@ -1777,7 +1881,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
-                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
+                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S}})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
@@ -1809,12 +1913,14 @@ class Handler(BaseHTTPRequestHandler):
                 jpg = capture_frame(timeout=float((qs.get("timeout") or ["4"])[0]))
                 self.send_bytes(jpg, "image/jpeg")
             elif p.path == "/stop":
-                err = stop_burst()
+                err = request_stop("http_get")
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
             elif p.path == "/move":
                 action = (qs.get("action") or ["stop"])[0]
                 duration = float((qs.get("duration") or ["0.2"])[0])
                 step = (qs.get("step") or [None])[0]
+                if str(action).lower() != "stop":
+                    begin_motion("http_get_move")
                 self.send_json(run_action(action, duration, step=step))
             elif p.path in ("/action", "/trick"):
                 name = (qs.get("name") or qs.get("action") or qs.get("trick") or [None])[0]
@@ -1823,9 +1929,13 @@ class Handler(BaseHTTPRequestHandler):
                 settle = (qs.get("settle_s") or qs.get("duration") or [None])[0]
                 async_requested = truthy((qs.get("async") or ["0"])[0]) or not truthy((qs.get("wait") or ["1"])[0])
                 runner = sdk_trick_async if async_requested else sdk_trick
+                if not dry:
+                    begin_motion("http_get_trick")
                 self.send_json(runner(name=name, action_id=action_id, dry_run=dry, settle_s=settle))
             elif p.path == "/mark_object":
                 dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
+                if not dry:
+                    begin_motion("http_get_mark_object")
                 self.send_json(mark_object(
                     target_front=float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0]),
                     max_duration=float((qs.get("max_duration") or ["5.0"])[0]),
@@ -1834,6 +1944,7 @@ class Handler(BaseHTTPRequestHandler):
                     dry_run=dry,
                 ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
+                begin_motion("http_get_forward_until")
                 self.send_json(forward_until(
                     target_front=float((qs.get("target_front") or qs.get("target") or ["0.10"])[0]),
                     max_duration=float((qs.get("max_duration") or ["8.0"])[0]),
@@ -1843,6 +1954,7 @@ class Handler(BaseHTTPRequestHandler):
                     reorient=(qs.get("reorient") or ["1"])[0] != "0",
                 ))
             elif p.path in ("/explore_room", "/explore"):
+                begin_motion("http_get_explore_room")
                 self.send_json(explore_room(
                     name=(qs.get("name") or ["room"])[0],
                     max_duration=float((qs.get("max_duration") or ["30"])[0]),
@@ -1851,11 +1963,13 @@ class Handler(BaseHTTPRequestHandler):
                     rotate_scan=(qs.get("rotate_scan") or ["1"])[0] != "0",
                 ))
             elif p.path in ("/lidar_walk", "/demo_walk"):
+                begin_motion("http_get_lidar_walk")
                 self.send_json(lidar_walk(
                     max_duration=float((qs.get("max_duration") or ["60"])[0]),
                     save=(qs.get("save") or ["1"])[0] != "0",
                 ))
             elif p.path in ("/coverage_explore", "/explore_coverage"):
+                begin_motion("http_get_coverage_explore")
                 self.send_json(lidar_walk(
                     max_duration=float((qs.get("max_duration") or ["600"])[0]),
                     save=(qs.get("save") or ["1"])[0] != "0",
@@ -1866,13 +1980,16 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
                 seed_value = (qs.get("seed") or [None])[0]
+                dry = truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0])
+                if not dry:
+                    begin_motion("http_get_frontier_explore")
                 self.send_json(frontier_explore(
                     name=(qs.get("name") or ["dog_frontier"])[0],
                     max_duration=float((qs.get("max_duration") or ["60"])[0]),
                     chaos=float((qs.get("chaos") or ["0.45"])[0]),
                     seed=None if seed_value in (None, "") else int(seed_value),
                     save=(qs.get("save") or ["1"])[0] != "0",
-                    dry_run=truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0]),
+                    dry_run=dry,
                 ))
             else:
                 self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
@@ -1880,7 +1997,7 @@ class Handler(BaseHTTPRequestHandler):
             with state_lock:
                 state["last_error"] = repr(e)
             try:
-                stop_burst()
+                request_stop("handler_exception")
             except Exception:
                 pass
             self.send_json({"ok": False, "error": repr(e), "status": snapshot()}, 500)
@@ -1890,20 +2007,29 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self.read_json()
             if p.path == "/stop":
-                err = stop_burst()
+                err = request_stop("http_post")
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
             elif p.path == "/move":
-                self.send_json(run_action(body.get("action", "stop"), float(body.get("duration", 0.2)), step=body.get("step")))
+                action = body.get("action", "stop")
+                if str(action).lower() != "stop":
+                    begin_motion("http_post_move")
+                self.send_json(run_action(action, float(body.get("duration", 0.2)), step=body.get("step")))
             elif p.path in ("/action", "/trick"):
                 async_requested = bool(body.get("async", False)) or body.get("wait", True) is False
                 runner = sdk_trick_async if async_requested else sdk_trick
+                dry = bool(body.get("dry_run", body.get("dry", False)))
+                if not dry:
+                    begin_motion("http_post_trick")
                 self.send_json(runner(
                     name=body.get("name", body.get("action", body.get("trick"))),
                     action_id=body.get("id", body.get("action_id")),
-                    dry_run=bool(body.get("dry_run", body.get("dry", False))),
+                    dry_run=dry,
                     settle_s=body.get("settle_s", body.get("duration")),
                 ))
             elif p.path == "/mark_object":
+                dry = bool(body.get("dry_run", body.get("dry", False)))
+                if not dry:
+                    begin_motion("http_post_mark_object")
                 self.send_json(mark_object(
                     target_front=float(body.get("target_front", MARK_TARGET_FRONT_M)),
                     max_duration=float(body.get("max_duration", 5.0)),
@@ -1912,6 +2038,7 @@ class Handler(BaseHTTPRequestHandler):
                     dry_run=bool(body.get("dry_run", body.get("dry", False))),
                 ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
+                begin_motion("http_post_forward_until")
                 self.send_json(forward_until(
                     target_front=float(body.get("target_front", body.get("target", 0.10))),
                     max_duration=float(body.get("max_duration", 8.0)),
@@ -1922,6 +2049,7 @@ class Handler(BaseHTTPRequestHandler):
                     reorient=bool(body.get("reorient", True)),
                 ))
             elif p.path in ("/explore_room", "/explore"):
+                begin_motion("http_post_explore_room")
                 self.send_json(explore_room(
                     name=body.get("name", "room"),
                     max_duration=float(body.get("max_duration", 30.0)),
@@ -1930,13 +2058,16 @@ class Handler(BaseHTTPRequestHandler):
                     rotate_scan=bool(body.get("rotate_scan", True)),
                 ))
             elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
+                dry = bool(body.get("dry_run", body.get("dry", False)))
+                if not dry:
+                    begin_motion("http_post_frontier_explore")
                 self.send_json(frontier_explore(
                     name=body.get("name", "dog_frontier"),
                     max_duration=float(body.get("max_duration", 60.0)),
                     chaos=float(body.get("chaos", 0.45)),
                     seed=body.get("seed"),
                     save=bool(body.get("save", True)),
-                    dry_run=bool(body.get("dry_run", body.get("dry", False))),
+                    dry_run=dry,
                 ))
             elif p.path == "/map_reset":
                 reset_pose(float(body.get("x", 0.0)), float(body.get("y", 0.0)), float(body.get("yaw", 0.0)))
@@ -1949,7 +2080,7 @@ class Handler(BaseHTTPRequestHandler):
             with state_lock:
                 state["last_error"] = repr(e)
             try:
-                stop_burst()
+                request_stop("handler_exception")
             except Exception:
                 pass
             self.send_json({"ok": False, "error": repr(e), "status": snapshot()}, 500)

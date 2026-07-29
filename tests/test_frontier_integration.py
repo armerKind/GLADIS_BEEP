@@ -14,9 +14,54 @@ SPEC.loader.exec_module(bridge)
 
 
 class FrontierIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        bridge.motion_cancel.clear()
+        bridge.state["motion_cancelled"] = False
+
+    def tearDown(self):
+        bridge.motion_cancel.clear()
+        bridge.state["motion_cancelled"] = False
+
+    def test_request_stop_latches_cancellation_before_motor_stop(self):
+        observations = []
+
+        def fake_stop(n=3):
+            observations.append((bridge.motion_cancel.is_set(), n))
+            return None
+
+        with patch.object(bridge, "stop_burst", side_effect=fake_stop):
+            error = bridge.request_stop("unit_test")
+
+        self.assertIsNone(error)
+        self.assertTrue(bridge.motion_cancel.is_set())
+        self.assertTrue(bridge.state["motion_cancelled"])
+        self.assertEqual(observations, [(True, 3)])
+
+    def test_lidar_forward_supervisor_honors_persistent_cancellation(self):
+        clear = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {"front": 1.2, "front_left": 0.8, "front_right": 0.8},
+        }
+        bridge.motion_cancel.set()
+        with patch.object(bridge, "snapshot", return_value=clear):
+            result = bridge.supervise_lidar_forward(1.0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "motion_cancelled")
+
     def test_manual_non_stop_move_rejects_zero_duration(self):
         with self.assertRaisesRegex(ValueError, "positive bounded duration"):
-            bridge.run_action("forward", 0)
+            bridge.run_action("forward", 0.0)
+
+    def test_move_stop_alias_latches_cancellation(self):
+        with patch.object(bridge, "stop_burst", return_value=None) as stop:
+            result = bridge.run_action("stop", 0.2)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "motion_cancelled")
+        self.assertTrue(bridge.motion_cancel.is_set())
+        stop.assert_called_once_with(3)
 
     def test_coverage_plateau_requires_full_window_and_low_map_growth(self):
         self.assertFalse(bridge.coverage_has_plateaued([(0, 100), (20, 110)], 20, 45, 150))
