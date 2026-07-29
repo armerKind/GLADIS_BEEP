@@ -13,6 +13,12 @@ SPEC.loader.exec_module(bridge)
 
 
 class MarkObjectPlanTests(unittest.TestCase):
+    def setUp(self):
+        bridge.motion_cancel.clear()
+
+    def tearDown(self):
+        bridge.motion_cancel.clear()
+
     def test_dead_reckoning_does_not_overwrite_fresh_guarded_slam_pose(self):
         original_pose = dict(bridge.state["pose"])
         original_slam = dict(bridge.state["slam"])
@@ -34,9 +40,90 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertEqual(plan["approach_mode"], "continuous")
         self.assertEqual(plan["turn"], "left")
         self.assertEqual(plan["turn_degrees"], 90.0)
+        self.assertEqual(plan["turn_control"], "guarded_slam_yaw")
         self.assertEqual(plan["marking_side"], "right")
         self.assertEqual(plan["trick"]["name"], "pee")
         self.assertEqual(plan["trick"]["id"], 11)
+        self.assertEqual(plan["trick"]["duration_s"], 8.0)
+
+    def test_guarded_slam_turn_stops_at_measured_90_degrees(self):
+        yaws = iter([0.0, 0.0, 0.45, 0.95, 1.50, 1.50])
+        commands = []
+        stops = []
+
+        def fake_snapshot(*args, **kwargs):
+            try:
+                yaw = next(yaws)
+            except StopIteration:
+                yaw = 1.50
+            return {
+                "scan_seen": True,
+                "scan_age_s": 0.01,
+                "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
+                "slam": {"active": True, "pose_valid": True},
+                "pose": {"yaw": yaw},
+            }
+
+        original_snapshot = bridge.snapshot
+        original_motor_send = bridge.motor_send
+        original_stop_burst = bridge.stop_burst
+        original_sleep = bridge.time.sleep
+        try:
+            setattr(bridge, "snapshot", fake_snapshot)
+            setattr(bridge, "motor_send", lambda action, step=None: commands.append((action, step)))
+            setattr(bridge, "stop_burst", lambda n=3: stops.append(n))
+            bridge.time.sleep = lambda seconds: None
+            result = bridge.guarded_slam_turn(turn="left", degrees=90, max_duration=2)
+        finally:
+            setattr(bridge, "snapshot", original_snapshot)
+            setattr(bridge, "motor_send", original_motor_send)
+            setattr(bridge, "stop_burst", original_stop_burst)
+            bridge.time.sleep = original_sleep
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["reason"].startswith("target_reached"))
+        self.assertEqual(commands, [("turnleft", None)])
+        self.assertEqual(stops, [3])
+        self.assertGreaterEqual(result["trace_tail"][-1]["progress_degrees"], 85.0)
+
+    def test_guarded_slam_turn_rejects_wrong_direction(self):
+        yaws = iter([0.0, -0.25, -0.25])
+        commands = []
+        stops = []
+
+        def fake_snapshot(*args, **kwargs):
+            try:
+                yaw = next(yaws)
+            except StopIteration:
+                yaw = -0.25
+            return {
+                "scan_seen": True,
+                "scan_age_s": 0.01,
+                "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
+                "slam": {"active": True, "pose_valid": True},
+                "pose": {"yaw": yaw},
+            }
+
+        original_snapshot = bridge.snapshot
+        original_motor_send = bridge.motor_send
+        original_stop_burst = bridge.stop_burst
+        original_sleep = bridge.time.sleep
+        try:
+            setattr(bridge, "snapshot", fake_snapshot)
+            setattr(bridge, "motor_send", lambda action, step=None: commands.append((action, step)))
+            setattr(bridge, "stop_burst", lambda n=3: stops.append(n))
+            bridge.time.sleep = lambda seconds: None
+            result = bridge.guarded_slam_turn(turn="left", degrees=90, max_duration=2)
+        finally:
+            setattr(bridge, "snapshot", original_snapshot)
+            setattr(bridge, "motor_send", original_motor_send)
+            setattr(bridge, "stop_burst", original_stop_burst)
+            bridge.time.sleep = original_sleep
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["reason"].startswith("wrong_direction"))
+        self.assertEqual(commands, [("turnleft", None)])
+        self.assertEqual(stops, [3])
 
     def test_continuous_approach_starts_forward_once_and_stops_at_target(self):
         readings = iter([1.20, 0.80, 0.24])

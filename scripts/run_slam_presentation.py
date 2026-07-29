@@ -72,9 +72,8 @@ class BridgeClient:
                 "target_front": f"{TARGET_MARK_CLEARANCE_M:.2f}",
                 "max_duration": "5.0",
                 "turn": "left",
-                "turn_duration": "0.75",
             },
-            timeout=18.0,
+            timeout=30.0,
         )
 
 

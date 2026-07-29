@@ -7,6 +7,8 @@
 - Opportunistic corner marking with the pee/right-leg gesture (action 11).
 - Camera and microphone are not queried.
 - Hard wall clearance: 0.15 m. Marking approach target: 0.20 m.
+- Marking turns use guarded Cartographer yaw and stop at approximately 90°; they are not duration-based.
+- Pee action 11 receives an 8-second completion window so the vendor leg shake is not truncated.
 - A human supervisor remains within immediate reach.
 
 ## Preconditions

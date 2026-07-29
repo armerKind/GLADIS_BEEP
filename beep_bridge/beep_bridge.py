@@ -73,14 +73,14 @@ SDK_TURN_RAD_PER_S = float(os.environ.get("BEEP_SDK_TURN_RAD_PER_S", "0.45"))
 TRICK_SETTLE_S = float(os.environ.get("BEEP_TRICK_SETTLE_S", "2.0"))
 MARK_TURN_DIRECTION = os.environ.get("BEEP_MARK_TURN_DIRECTION", "left").strip().lower()
 MARK_TURN_DEGREES = float(os.environ.get("BEEP_MARK_TURN_DEGREES", "90.0"))
-MARK_TURN_DURATION_S = float(os.environ.get("BEEP_MARK_TURN_90_S", "0.75"))
+MARK_TURN_TIMEOUT_S = float(os.environ.get("BEEP_MARK_TURN_TIMEOUT_S", "5.0"))
 MARK_TARGET_FRONT_M = float(os.environ.get("BEEP_MARK_TARGET_FRONT_M", "0.25"))
 MARK_MIN_FRONT_M = float(os.environ.get("BEEP_MARK_MIN_FRONT_M", "0.16"))
 TRICK_ACTIONS = {
     "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
     "three_axis": {"id": 10, "label": "3-axis body motion", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["3axis", "axis", "body_demo"]},
-    "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 3.5, "safe_for_fair": True, "aliases": ["leg_lift", "mark", "urinate"]},
+    "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 8.0, "safe_for_fair": True, "aliases": ["leg_lift", "mark", "urinate"]},
     "stretch": {"id": 14, "label": "Stretch", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["show", "startup_show", "lazy"]},
     "swing": {"id": 16, "label": "Swing", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["shake", "wobble"]},
     "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["prey", "beg", "begging", "request_food"]},
@@ -100,7 +100,7 @@ motion_cancel = threading.Event()
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.15.0-interruptible-presentation",
+    "version": "0.15.1-slam-yaw-marking",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1784,22 +1784,107 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
     return result
 
 
+def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_S,
+                      tolerance_degrees=5.0, poll_interval=0.05, step=None):
+    """Turn in place until guarded Cartographer yaw reaches the requested delta."""
+    global last_run
+    turn = str(turn).lower()
+    if turn not in ("left", "right"):
+        raise ValueError("turn must be 'left' or 'right'")
+    degrees = max(10.0, min(float(degrees), 180.0))
+    tolerance_degrees = max(2.0, min(float(tolerance_degrees), 15.0))
+    max_duration = max(1.0, min(float(max_duration), 8.0))
+    poll_interval = max(0.02, min(float(poll_interval), 0.20))
+    target_rad = math.radians(degrees)
+    tolerance_rad = math.radians(tolerance_degrees)
+    started = time.time()
+    reason = "max_duration"
+    trace = []
+    final_state = snapshot()
+
+    with motion_lock:
+        slam = final_state.get("slam") or {}
+        pose = final_state.get("pose") or {}
+        if motion_is_cancelled():
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "motion_cancelled", "status": final_state, "trace_tail": []}
+        if not scan_ok(final_state):
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "scan_stale_or_missing_before_start", "status": final_state, "trace_tail": []}
+        if not slam.get("active") or not slam.get("pose_valid") or pose.get("yaw") is None:
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "slam_invalid_before_start", "status": final_state, "trace_tail": []}
+        start_yaw = float(pose["yaw"])
+        action = "turnleft" if turn == "left" else "turnright"
+        try:
+            motor_send(action, step=step)
+            while time.time() - started < max_duration:
+                if motion_is_cancelled():
+                    reason = "motion_cancelled"
+                    break
+                final_state = snapshot()
+                slam = final_state.get("slam") or {}
+                pose = final_state.get("pose") or {}
+                sectors = final_state.get("sectors") or {}
+                if not scan_ok(final_state):
+                    reason = "scan_stale_or_missing"
+                    break
+                if not slam.get("active") or not slam.get("pose_valid") or pose.get("yaw") is None:
+                    reason = "slam_invalid_during_turn"
+                    break
+                clearances = [float(sectors.get(name) or 99) for name in
+                              ("front", "front_left", "front_right", "left", "right", "rear")]
+                nearest = min(clearances)
+                if nearest < HARD_CLEARANCE_M:
+                    reason = f"clearance_too_close:{nearest:.3f}"
+                    break
+                yaw = float(pose["yaw"])
+                signed_delta = math.atan2(math.sin(yaw - start_yaw), math.cos(yaw - start_yaw))
+                progress = signed_delta if turn == "left" else -signed_delta
+                trace.append({"elapsed_s": round(time.time() - started, 3), "yaw": round(yaw, 4),
+                              "progress_degrees": round(math.degrees(progress), 2), "nearest_m": round(nearest, 3)})
+                if progress >= target_rad - tolerance_rad:
+                    reason = f"target_reached:{math.degrees(progress):.1f}deg"
+                    break
+                if progress < -math.radians(12.0):
+                    reason = f"wrong_direction:{math.degrees(progress):.1f}deg"
+                    break
+                time.sleep(poll_interval)
+        except Exception as e:
+            reason = "exception:" + repr(e)
+            with state_lock:
+                state["last_error"] = repr(e)
+        finally:
+            stop_burst(3)
+
+    elapsed = time.time() - started
+    reached = reason.startswith("target_reached")
+    result = {"ok": reached, "mode": "guarded_slam_turn", "turn": turn, "target_degrees": degrees,
+              "reason": reason, "elapsed_s": round(elapsed, 2), "trace_tail": trace[-60:], "status": snapshot()}
+    last_run = result
+    remember("guarded_slam_turn_done", turn=turn, target_degrees=degrees, reason=reason, elapsed_s=round(elapsed, 2))
+    return result
+
+
 def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TURN_DIRECTION,
-                turn_duration=MARK_TURN_DURATION_S, dry_run=False):
+                turn_duration=MARK_TURN_TIMEOUT_S, dry_run=False):
     """Approach a target, turn left 90 degrees, then lift the right leg."""
     target_front = max(0.20, min(float(target_front), 1.0))
     max_duration = max(0.0, min(float(max_duration), 8.0))
-    turn_duration = max(0.0, min(float(turn_duration), 2.0))
+    turn_timeout = max(1.0, min(float(turn_duration), 8.0))
     turn = str(turn).lower()
     if turn not in ("left", "right"):
         raise ValueError("turn must be 'left' or 'right'")
     plan = {"mode": "mark_object", "approach_mode": "continuous", "target_front_m": target_front, "max_duration_s": max_duration,
-            "turn": turn, "turn_degrees": MARK_TURN_DEGREES, "turn_duration_s": turn_duration,
+            "turn": turn, "turn_degrees": MARK_TURN_DEGREES, "turn_control": "guarded_slam_yaw", "turn_timeout_s": turn_timeout,
             "marking_side": "right", "trick": resolve_trick(name="pee")}
     if dry_run:
         remember("mark_object_dry_run", plan=plan)
         return {"ok": True, "dry_run": True, "plan": plan, "status": snapshot()}
     steps = []
+    initial = snapshot()
+    initial_slam = initial.get("slam") or {}
+    if not initial_slam.get("active") or not initial_slam.get("pose_valid"):
+        result = {"ok": False, "mode": "mark_object", "reason": "slam_invalid_before_approach", "steps": steps, "status": initial}
+        remember("mark_object_abort", reason=result["reason"])
+        return result
     approach = forward_continuous_until(target_front=target_front, max_duration=max_duration, min_target=MARK_MIN_FRONT_M)
     steps.append({"step": "approach", "result": approach})
     snap = snapshot()
@@ -1822,12 +1907,11 @@ def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TU
         result = {"ok": False, "mode": "mark_object", "reason": reason, "steps": steps, "status": snap}
         remember("mark_object_abort", reason=result["reason"], front=front, side_clearance=side_clearance)
         return result
-    turn_action = "turnright" if turn == "right" else "turnleft"
-    turn_result = run_action(turn_action, turn_duration)
+    turn_result = guarded_slam_turn(turn=turn, degrees=MARK_TURN_DEGREES, max_duration=turn_timeout)
     steps.append({"step": "turn", "result": turn_result})
     if not turn_result.get("ok") or motion_is_cancelled():
         stop_burst(3)
-        result = {"ok": False, "mode": "mark_object", "reason": "motion_cancelled" if motion_is_cancelled() else "turn_failed", "steps": steps, "status": snapshot()}
+        result = {"ok": False, "mode": "mark_object", "reason": "motion_cancelled" if motion_is_cancelled() else "turn_failed:" + str(turn_result.get("reason")), "steps": steps, "status": snapshot()}
         remember("mark_object_abort", reason=result["reason"])
         return result
     pee_result = sdk_trick(name="pee")
@@ -1940,7 +2024,7 @@ class Handler(BaseHTTPRequestHandler):
                     target_front=float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0]),
                     max_duration=float((qs.get("max_duration") or ["5.0"])[0]),
                     turn=(qs.get("turn") or [MARK_TURN_DIRECTION])[0],
-                    turn_duration=float((qs.get("turn_duration") or [str(MARK_TURN_DURATION_S)])[0]),
+                    turn_duration=float((qs.get("turn_duration") or [str(MARK_TURN_TIMEOUT_S)])[0]),
                     dry_run=dry,
                 ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
@@ -2034,7 +2118,7 @@ class Handler(BaseHTTPRequestHandler):
                     target_front=float(body.get("target_front", MARK_TARGET_FRONT_M)),
                     max_duration=float(body.get("max_duration", 5.0)),
                     turn=body.get("turn", MARK_TURN_DIRECTION),
-                    turn_duration=float(body.get("turn_duration", MARK_TURN_DURATION_S)),
+                    turn_duration=float(body.get("turn_duration", MARK_TURN_TIMEOUT_S)),
                     dry_run=bool(body.get("dry_run", body.get("dry", False))),
                 ))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
