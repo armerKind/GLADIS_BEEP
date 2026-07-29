@@ -6,7 +6,10 @@ options = {
   trajectory_builder = TRAJECTORY_BUILDER,
   map_frame = "map",
   tracking_frame = "base_link",
-  published_frame = "base_link",
+  -- The robot model owns base_footprint -> base_link. Publishing base_link here
+  -- gives that child two parents (odom and base_footprint), intermittently
+  -- splitting the TF tree. Publish the model root instead.
+  published_frame = "base_footprint",
   odom_frame = "odom",
   provide_odom_frame = true,
   publish_frame_projected_to_2d = true,
