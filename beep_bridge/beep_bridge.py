@@ -103,7 +103,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.16.1-measured-turn-timeout",
+    "version": "0.16.2-neutralized-motion-axes",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -305,8 +305,25 @@ def sdk_send(action: str, step=None):
     aliases = {"backward": "back", "turn_left": "turnleft", "turn_right": "turnright", "rotate_left": "turnleft", "rotate_right": "turnright"}
     action = aliases.get(action, action)
     if action == "stop":
-        g.stop()
-    elif action in ("forward", "back", "left", "right", "turnleft", "turnright"):
+        errors = []
+        for method, value in ((g.stop, None), (g.move_x, 0), (g.move_y, 0), (g.turn, 0)):
+            try:
+                method() if value is None else method(value)
+            except Exception as exc:
+                errors.append(repr(exc))
+        if errors:
+            raise RuntimeError("SDK stop/axis neutralization failed: " + "; ".join(errors))
+    elif action in ("forward", "back"):
+        g.move_y(0)
+        g.turn(0)
+        getattr(g, action)(step)
+    elif action in ("left", "right"):
+        g.move_x(0)
+        g.turn(0)
+        getattr(g, action)(step)
+    elif action in ("turnleft", "turnright"):
+        g.move_x(0)
+        g.move_y(0)
         getattr(g, action)(step)
     else:
         raise ValueError(f"unknown sdk action {action!r}")
@@ -1826,12 +1843,13 @@ def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=
 
 
 def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.16,
-                             poll_interval=0.05, step=None):
-    """Walk forward continuously and stop from live LiDAR feedback."""
+                             poll_interval=0.05, step=None, max_heading_drift_degrees=15.0):
+    """Walk forward continuously with live LiDAR, SLAM and heading guards."""
     global last_run
     target_front = max(float(target_front), float(min_target))
     max_duration = min(max(float(max_duration), 0.0), FORWARD_UNTIL_MAX_S)
     poll_interval = min(max(float(poll_interval), 0.02), 0.20)
+    max_heading_drift = math.radians(max(5.0, min(float(max_heading_drift_degrees), 30.0)))
     started = time.time()
     reason = "max_duration"
     trace = []
@@ -1843,6 +1861,12 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
                       "reason": "scan_stale_or_missing_before_start", "status": final_state, "trace_tail": []}
             last_run = result
             return result
+        if not slam_ok(final_state) or (final_state.get("pose") or {}).get("yaw") is None:
+            result = {"ok": False, "mode": "forward_continuous_until",
+                      "reason": "slam_invalid_before_start", "status": final_state, "trace_tail": []}
+            last_run = result
+            return result
+        start_yaw = float(final_state["pose"]["yaw"])
         initial_sectors = sector_values(final_state, ("front", "front_left", "front_right", "left", "right"))
         if initial_sectors is None:
             result = {"ok": False, "mode": "forward_continuous_until",
@@ -1866,11 +1890,21 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
                 elapsed = time.time() - started
                 front = front_distance(final_state)
                 sectors = final_state.get("sectors") or {}
+                pose = final_state.get("pose") or {}
+                yaw = pose.get("yaw")
+                heading_drift = None if yaw is None else abs(norm_angle(float(yaw) - start_yaw))
                 trace.append({"elapsed_s": round(elapsed, 3), "front": front,
                               "front_left": sectors.get("front_left"),
-                              "front_right": sectors.get("front_right")})
+                              "front_right": sectors.get("front_right"),
+                              "heading_drift_degrees": None if heading_drift is None else round(math.degrees(heading_drift), 2)})
                 if not scan_ok(final_state):
                     reason = "scan_stale_or_missing"
+                    break
+                if not slam_ok(final_state) or heading_drift is None:
+                    reason = "slam_invalid_during_straight_approach"
+                    break
+                if heading_drift > max_heading_drift:
+                    reason = f"heading_drift:{math.degrees(heading_drift):.1f}deg"
                     break
                 if front is not None and front <= target_front:
                     reason = f"target_reached:{front:.3f}"

@@ -158,6 +158,45 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertFalse(bridge.state["moving"])
         stop.assert_called_once_with(3)
 
+    def test_continuous_approach_aborts_on_heading_drift(self):
+        snapshots = iter([
+            {"scan_seen": True, "scan_age_s": 0.01,
+             "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right")},
+             "slam": {"usable": True}, "pose": {"yaw": 0.0}},
+            {"scan_seen": True, "scan_age_s": 0.01,
+             "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right")},
+             "slam": {"usable": True}, "pose": {"yaw": math.radians(18.0)}},
+        ])
+        commands = []
+        with patch.object(bridge, "snapshot", side_effect=lambda: next(snapshots)), \
+             patch.object(bridge, "motor_send", side_effect=lambda action, step=None: commands.append((action, step))), \
+             patch.object(bridge, "stop_burst", return_value=None), \
+             patch.object(bridge.time, "sleep", return_value=None):
+            result = bridge.forward_continuous_until(target_front=0.2, max_duration=1.0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "heading_drift:18.0deg")
+        self.assertEqual(commands, [("forward", None)])
+
+    def test_sdk_forward_neutralizes_lateral_and_yaw_axes(self):
+        calls = []
+
+        class FakeDog:
+            def move_x(self, value): calls.append(("move_x", value))
+            def move_y(self, value): calls.append(("move_y", value))
+            def turn(self, value): calls.append(("turn", value))
+            def forward(self, value): calls.append(("forward", value))
+            def turnleft(self, value): calls.append(("turnleft", value))
+
+        with patch.object(bridge, "sdk_init", return_value=FakeDog()):
+            bridge.sdk_send("forward", step=10)
+            bridge.sdk_send("turnleft", step=10)
+
+        self.assertEqual(calls, [
+            ("move_y", 0), ("turn", 0), ("forward", 10),
+            ("move_x", 0), ("move_y", 0), ("turnleft", 10),
+        ])
+
     def test_continuous_approach_starts_forward_once_and_stops_at_target(self):
         readings = iter([1.20, 0.80, 0.24])
         commands = []
@@ -168,6 +207,8 @@ class MarkObjectPlanTests(unittest.TestCase):
                 "scan_seen": True,
                 "scan_age_s": 0.01,
                 "sectors": {"front": next(readings), "front_left": 0.8, "front_right": 0.8, "left": 0.8, "right": 0.8},
+                "slam": {"active": True, "pose_valid": True, "usable": True},
+                "pose": {"yaw": 0.0},
             }
 
         original_snapshot = getattr(bridge, "snapshot")
