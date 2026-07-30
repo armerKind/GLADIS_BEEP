@@ -39,6 +39,22 @@ curl -fsS http://192.168.8.88:8766/stop
 
 A stop cancels the exact active motion lease. Its cancellation token is never cleared, and overlapping motion requests receive HTTP 409 instead of waiting to execute later.
 
+## Prepared fast voice start
+
+After final placement and before visitors arrive, run:
+
+```bash
+./scripts/prepare_fair_run.sh
+```
+
+This stops BEEP, resets SLAM, verifies a stationary stability window, and writes a one-run readiness marker. Once prepared and not subsequently moved, the voice trigger launches:
+
+```bash
+./scripts/start_fair_run_fast.sh
+```
+
+The fast path performs one current stopped/SLAM/LiDAR/map/clearance/pose check, consumes the marker, and starts the ten-minute no-pee routine without another reset, dry run, or interactive confirmation. Re-run preparation after relocation or each completed run. Live check-only timing on the control LAN measured 0.33 seconds for the fast gate and 0.51 seconds for the coordinator preflight; voice upload/transcription remains external latency.
+
 ## Staged rehearsal
 
 Do not skip stages after a software or SLAM configuration change.
