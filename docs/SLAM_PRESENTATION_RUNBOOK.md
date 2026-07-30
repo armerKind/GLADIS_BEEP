@@ -10,6 +10,7 @@
 - Marking turns use guarded Cartographer yaw and stop at approximately 90°; an 8-second timeout accommodates the measured slow-gait turn rate.
 - Straight approaches clear any residual yaw/lateral SDK registers before moving and abort if guarded SLAM heading drifts more than 15 degrees.
 - Pee action 11 receives an 8-second completion window so the vendor leg shake is not truncated.
+- Supervised physical validation: when manually pre-positioned at 0.248 m LiDAR range, BEEP completed a guarded 90.6-degree turn, the full eight-second pee gesture, neutral reset, and final stop. Autonomous wall acquisition remains disabled because straight approach testing exceeded the 15-degree heading-drift guard.
 - A human supervisor remains within immediate reach.
 
 ## Preconditions
