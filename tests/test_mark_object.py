@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import math
 import unittest
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).parents[1] / "beep_bridge" / "beep_bridge.py"
@@ -14,10 +15,10 @@ SPEC.loader.exec_module(bridge)
 
 class MarkObjectPlanTests(unittest.TestCase):
     def setUp(self):
-        bridge.motion_cancel.clear()
+        bridge._reset_motion_state_for_tests()
 
     def tearDown(self):
-        bridge.motion_cancel.clear()
+        bridge._reset_motion_state_for_tests()
 
     def test_dead_reckoning_does_not_overwrite_fresh_guarded_slam_pose(self):
         original_pose = dict(bridge.state["pose"])
@@ -60,7 +61,7 @@ class MarkObjectPlanTests(unittest.TestCase):
                 "scan_seen": True,
                 "scan_age_s": 0.01,
                 "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
-                "slam": {"active": True, "pose_valid": True},
+                "slam": {"active": True, "pose_valid": True, "usable": True},
                 "pose": {"yaw": yaw},
             }
 
@@ -100,7 +101,7 @@ class MarkObjectPlanTests(unittest.TestCase):
                 "scan_seen": True,
                 "scan_age_s": 0.01,
                 "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
-                "slam": {"active": True, "pose_valid": True},
+                "slam": {"active": True, "pose_valid": True, "usable": True},
                 "pose": {"yaw": yaw},
             }
 
@@ -125,6 +126,38 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertEqual(commands, [("turnleft", None)])
         self.assertEqual(stops, [3])
 
+    def test_guarded_slam_turn_rejects_missing_sector_before_motor_command(self):
+        status = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right")},
+            "slam": {"active": True, "pose_valid": True, "usable": True},
+            "pose": {"yaw": 0.0},
+        }
+        commands = []
+        with patch.object(bridge, "snapshot", return_value=status), \
+             patch.object(bridge, "motor_send", side_effect=lambda action, step=None: commands.append((action, step))):
+            result = bridge.guarded_slam_turn(turn="left", degrees=90, max_duration=2)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "lidar_sector_missing_before_start")
+        self.assertEqual(commands, [])
+
+    def test_gesture_exception_attempts_stop_and_clears_moving_state(self):
+        class BrokenDog:
+            def action(self, action_id):
+                raise RuntimeError("vendor action failure")
+
+        with patch.object(bridge, "sdk_init", return_value=BrokenDog()), \
+             patch.object(bridge, "stop_burst", return_value=None) as stop:
+            result = bridge.sdk_trick(name="prey")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "gesture_exception")
+        self.assertIn("vendor action failure", result["error"])
+        self.assertFalse(bridge.state["moving"])
+        stop.assert_called_once_with(3)
+
     def test_continuous_approach_starts_forward_once_and_stops_at_target(self):
         readings = iter([1.20, 0.80, 0.24])
         commands = []
@@ -134,7 +167,7 @@ class MarkObjectPlanTests(unittest.TestCase):
             return {
                 "scan_seen": True,
                 "scan_age_s": 0.01,
-                "sectors": {"front": next(readings)},
+                "sectors": {"front": next(readings), "front_left": 0.8, "front_right": 0.8, "left": 0.8, "right": 0.8},
             }
 
         original_snapshot = getattr(bridge, "snapshot")

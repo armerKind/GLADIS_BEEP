@@ -15,27 +15,68 @@ SPEC.loader.exec_module(bridge)
 
 class FrontierIntegrationTests(unittest.TestCase):
     def setUp(self):
-        bridge.motion_cancel.clear()
-        bridge.state["motion_cancelled"] = False
+        bridge._reset_motion_state_for_tests()
 
     def tearDown(self):
-        bridge.motion_cancel.clear()
-        bridge.state["motion_cancelled"] = False
+        bridge._reset_motion_state_for_tests()
 
-    def test_request_stop_latches_cancellation_before_motor_stop(self):
+    def test_request_stop_cancels_owned_lease_before_motor_stop(self):
         observations = []
+        lease = bridge.begin_motion("unit_test")
 
         def fake_stop(n=3):
-            observations.append((bridge.motion_cancel.is_set(), n))
+            observations.append((lease.cancel_event.is_set(), n))
             return None
 
         with patch.object(bridge, "stop_burst", side_effect=fake_stop):
             error = bridge.request_stop("unit_test")
 
         self.assertIsNone(error)
-        self.assertTrue(bridge.motion_cancel.is_set())
+        self.assertTrue(lease.cancel_event.is_set())
         self.assertTrue(bridge.state["motion_cancelled"])
         self.assertEqual(observations, [(True, 3)])
+
+    def test_cancelled_lease_cannot_be_revived_by_new_lease(self):
+        first = bridge.begin_motion("first")
+        with patch.object(bridge, "stop_burst", return_value=None):
+            bridge.request_stop("unit_test")
+        bridge.end_motion(first)
+
+        second = bridge.begin_motion("second")
+
+        self.assertTrue(first.cancel_event.is_set())
+        self.assertFalse(second.cancel_event.is_set())
+        self.assertFalse(bridge.motion_is_cancelled())
+
+    def test_overlapping_motion_is_rejected_instead_of_queued(self):
+        first = bridge.begin_motion("first")
+
+        with self.assertRaises(bridge.MotionBusy):
+            bridge.begin_motion("second")
+
+        self.assertIs(bridge.active_motion_lease(), first)
+
+    def test_fresh_pose_without_fresh_map_is_not_usable_slam(self):
+        original = dict(bridge.state["slam"])
+        try:
+            now = bridge.time.time()
+            bridge.state["slam"] = {
+                "pose_at": now,
+                "pose_valid": True,
+                "map_at": None,
+                "map_width": None,
+                "map_height": None,
+                "resolution_m": None,
+            }
+            missing_map = bridge.snapshot()["slam"]
+            self.assertTrue(missing_map["active"])
+            self.assertFalse(missing_map["usable"])
+            self.assertEqual(missing_map["usable_reason"], "map_missing_stale_or_empty")
+
+            bridge.state["slam"].update({"map_at": now, "map_width": 20, "map_height": 20, "resolution_m": 0.05})
+            self.assertTrue(bridge.snapshot()["slam"]["usable"])
+        finally:
+            bridge.state["slam"] = original
 
     def test_lidar_forward_supervisor_honors_persistent_cancellation(self):
         clear = {
@@ -43,7 +84,8 @@ class FrontierIntegrationTests(unittest.TestCase):
             "scan_age_s": 0.01,
             "sectors": {"front": 1.2, "front_left": 0.8, "front_right": 0.8},
         }
-        bridge.motion_cancel.set()
+        lease = bridge.begin_motion("unit_test")
+        lease.cancel_event.set()
         with patch.object(bridge, "snapshot", return_value=clear):
             result = bridge.supervise_lidar_forward(1.0)
 
@@ -54,13 +96,14 @@ class FrontierIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive bounded duration"):
             bridge.run_action("forward", 0.0)
 
-    def test_move_stop_alias_latches_cancellation(self):
+    def test_run_action_stop_latches_cancellation(self):
+        lease = bridge.begin_motion("unit_test")
         with patch.object(bridge, "stop_burst", return_value=None) as stop:
             result = bridge.run_action("stop", 0.2)
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["reason"], "motion_cancelled")
-        self.assertTrue(bridge.motion_cancel.is_set())
+        self.assertTrue(lease.cancel_event.is_set())
         stop.assert_called_once_with(3)
 
     def test_coverage_plateau_requires_full_window_and_low_map_growth(self):
@@ -161,7 +204,7 @@ class FrontierIntegrationTests(unittest.TestCase):
         status = {
             "scan_seen": True,
             "scan_age_s": 0.01,
-            "slam": {"active": True, "pose_age_s": 0.02, "map_age_s": 0.05},
+            "slam": {"active": True, "pose_valid": True, "usable": True, "pose_age_s": 0.02, "map_age_s": 0.05},
             "sectors": {"front": 1.4, "front_left": 1.0, "front_right": 1.0, "left": 1.2, "right": 1.1},
         }
         pose = {"x": 0.7, "y": 0.7, "yaw": 0.0, "source": "cartographer_slam", "confidence": 0.95, "scan_match_score": None}

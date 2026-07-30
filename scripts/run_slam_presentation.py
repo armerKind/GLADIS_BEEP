@@ -90,6 +90,8 @@ def validate_stationary_state(status: dict[str, Any], hard_min_m: float = HARD_M
     slam = status.get("slam") or {}
     if not slam.get("active"):
         raise PresentationAbort("SLAM is inactive")
+    if slam.get("usable") is False:
+        raise PresentationAbort(f"SLAM is unusable: {slam.get('usable_reason') or 'unknown reason'}")
     if slam.get("pose_valid") is not True:
         raise PresentationAbort("guarded SLAM pose is invalid")
     if slam.get("pose_age_s") is None or float(slam["pose_age_s"]) > 1.0:
@@ -249,7 +251,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prey-interval", type=float, default=150.0)
     parser.add_argument("--pee-interval", type=float, default=210.0)
     parser.add_argument("--no-prey", action="store_true")
-    parser.add_argument("--no-pee", action="store_true")
+    parser.add_argument("--enable-pee", action="store_true", help="opt in to experimental corner marking; disabled by default")
     parser.add_argument("--armed", action="store_true", help="required for physical execution")
     parser.add_argument("--dry-run", action="store_true", help="validate current state and print the plan without movement")
     return parser.parse_args()
@@ -281,7 +283,7 @@ def main() -> int:
                 "duration_s": max(30.0, min(args.duration, 600.0)),
                 "segment_s": max(10.0, min(args.segment, 60.0)),
                 "prey": not args.no_prey,
-                "pee": not args.no_pee,
+                "pee": args.enable_pee,
                 "hard_min_clearance_m": HARD_MIN_CLEARANCE_M,
                 "mark_target_clearance_m": TARGET_MARK_CLEARANCE_M,
                 "corner_candidate_now": corner_mark_candidate(status),
@@ -299,7 +301,7 @@ def main() -> int:
             prey_interval_s=args.prey_interval,
             pee_interval_s=args.pee_interval,
             enable_prey=not args.no_prey,
-            enable_pee=not args.no_pee,
+            enable_pee=args.enable_pee,
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0

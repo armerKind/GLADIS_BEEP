@@ -4,7 +4,7 @@
 
 - Up to 10 minutes of autonomous LiDAR + guarded Cartographer SLAM walking.
 - Optional stationary `prey`/beg gesture (Yahboom action 17).
-- Opportunistic corner marking with the pee/right-leg gesture (action 11).
+- Experimental opt-in corner marking with the pee/right-leg gesture (action 11); disabled by default.
 - Camera and microphone are not queried.
 - Hard wall clearance: 0.15 m. Marking approach target: 0.20 m.
 - Marking turns use guarded Cartographer yaw and stop at approximately 90°; they are not duration-based.
@@ -35,7 +35,7 @@ Independent bridge stop:
 curl -fsS http://192.168.8.88:8766/stop
 ```
 
-A stop is persistent: the active autonomous loop exits and cannot resume itself.
+A stop cancels the exact active motion lease. Its cancellation token is never cleared, and overlapping motion requests receive HTTP 409 instead of waiting to execute later.
 
 ## Staged rehearsal
 
@@ -63,13 +63,13 @@ Confirm clearances, gait, turning and stop behavior.
 ### 3. Thirty-second coordinator run, gestures disabled
 
 ```bash
-python3 scripts/run_slam_presentation.py --armed --duration 30 --segment 10 --no-prey --no-pee
+python3 scripts/run_slam_presentation.py --armed --duration 30 --segment 10 --no-prey
 ```
 
 ### 4. Two-minute coordinator run with prey only
 
 ```bash
-python3 scripts/run_slam_presentation.py --armed --duration 120 --segment 30 --prey-interval 60 --no-pee
+python3 scripts/run_slam_presentation.py --armed --duration 120 --segment 30 --prey-interval 60
 ```
 
 ### 5. Marking test
@@ -85,8 +85,10 @@ For the live test, remove `&dry_run=1`. Keep one hand near BEEP and stop immedia
 ### 6. Full presentation rehearsal
 
 ```bash
-python3 scripts/run_slam_presentation.py --armed --duration 600 --segment 45 --prey-interval 150 --pee-interval 210
+python3 scripts/run_slam_presentation.py --armed --duration 600 --segment 45 --prey-interval 150
 ```
+
+Add `--enable-pee --pee-interval 210` only after the isolated guarded-turn and complete marking tests pass in the presentation area.
 
 ## Runtime behavior
 

@@ -96,11 +96,14 @@ sdk_error = None
 
 state_lock = threading.RLock()
 motion_lock = threading.RLock()
-motion_cancel = threading.Event()
+motion_owner_lock = threading.RLock()
+motion_context = threading.local()
+_active_motion_lease = None
+_motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.15.1-slam-yaw-marking",
+    "version": "0.16.0-owned-motion-slam-health",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -112,6 +115,8 @@ state = {
     "sectors": {},
     "moving": False,
     "motion_cancelled": False,
+    "motion_lease_id": None,
+    "motion_lease_source": None,
     "last_frame_at": None,
     "last_frame_bytes": None,
     "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0, "source": "dead_reckoning", "confidence": 0.25, "scan_match_score": None},
@@ -132,25 +137,112 @@ def remember(event, **data):
     return item
 
 
-def begin_motion(source="api"):
-    """Start a newly authorized motion lease after any earlier stop latch."""
-    motion_cancel.clear()
+class MotionBusy(RuntimeError):
+    pass
+
+
+class MotionLease:
+    def __init__(self, lease_id, source, deadline):
+        self.lease_id = lease_id
+        self.source = str(source)
+        self.deadline = float(deadline)
+        self.cancel_event = threading.Event()
+        self.started_at = time.monotonic()
+        self.ended_at = None
+
+
+def active_motion_lease():
+    with motion_owner_lock:
+        return _active_motion_lease
+
+
+def begin_motion(source="api", max_duration=600.0):
+    """Acquire exclusive motion ownership immediately; never queue behind another run."""
+    global _active_motion_lease, _motion_lease_sequence
+    now = time.monotonic()
+    max_duration = max(0.1, min(float(max_duration), 600.0))
+    with motion_owner_lock:
+        if _active_motion_lease is not None:
+            current = _active_motion_lease
+            raise MotionBusy(f"motion busy: lease {current.lease_id} from {current.source}")
+        _motion_lease_sequence += 1
+        lease = MotionLease(f"motion-{_motion_lease_sequence}", source, now + max_duration)
+        _active_motion_lease = lease
+        motion_context.lease = lease
     with state_lock:
         state["motion_cancelled"] = False
-    remember("motion_lease_started", source=str(source))
+        state["motion_lease_id"] = lease.lease_id
+        state["motion_lease_source"] = lease.source
+    remember("motion_lease_started", source=lease.source, lease_id=lease.lease_id, max_duration_s=max_duration)
+    return lease
+
+
+def end_motion(lease):
+    """Release ownership only for the exact lease that acquired it."""
+    global _active_motion_lease
+    if lease is None:
+        return
+    lease.ended_at = time.monotonic()
+    with motion_owner_lock:
+        if _active_motion_lease is lease:
+            _active_motion_lease = None
+    if getattr(motion_context, "lease", None) is lease:
+        del motion_context.lease
+    with state_lock:
+        if state.get("motion_lease_id") == lease.lease_id:
+            state["motion_lease_id"] = None
+            state["motion_lease_source"] = None
+    remember("motion_lease_ended", source=lease.source, lease_id=lease.lease_id,
+             cancelled=lease.cancel_event.is_set(), elapsed_s=round(lease.ended_at - lease.started_at, 3))
+
+
+def run_owned_motion(source, callback, max_duration=600.0):
+    lease = begin_motion(source, max_duration=max_duration)
+    try:
+        return callback()
+    finally:
+        end_motion(lease)
 
 
 def motion_is_cancelled():
-    return motion_cancel.is_set()
+    lease = getattr(motion_context, "lease", None)
+    if lease is None:
+        return bool(state.get("motion_cancelled"))
+    if time.monotonic() >= lease.deadline and not lease.cancel_event.is_set():
+        lease.cancel_event.set()
+        with state_lock:
+            state["motion_cancelled"] = True
+        remember("motion_lease_deadline", lease_id=lease.lease_id, source=lease.source)
+    return lease.cancel_event.is_set()
+
+
+def _reset_motion_state_for_tests():
+    """Test isolation helper; never used by HTTP or physical control paths."""
+    global _active_motion_lease
+    with motion_owner_lock:
+        if _active_motion_lease is not None:
+            _active_motion_lease.cancel_event.set()
+        _active_motion_lease = None
+    if hasattr(motion_context, "lease"):
+        del motion_context.lease
+    with state_lock:
+        state["motion_cancelled"] = False
+        state["motion_lease_id"] = None
+        state["motion_lease_source"] = None
 
 
 def wait_motion(duration, poll_s=0.05):
     """Wait for a bounded motion window, returning early after a stop latch."""
-    deadline = time.time() + max(0.0, float(duration))
-    while time.time() < deadline:
+    deadline = time.monotonic() + max(0.0, float(duration))
+    while time.monotonic() < deadline:
         if motion_is_cancelled():
             return False
-        time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
+        lease = getattr(motion_context, "lease", None)
+        delay = min(float(poll_s), max(0.0, deadline - time.monotonic()))
+        if lease is not None:
+            lease.cancel_event.wait(delay)
+        else:
+            time.sleep(delay)
     return not motion_is_cancelled()
 
 
@@ -311,41 +403,23 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
             state["moving"] = True
             state["last_error"] = None
         remember("sdk_trick_start", trick=trick)
-        g.action(int(trick["id"]))
-        completed = wait_motion(settle_s) if settle_s else not motion_is_cancelled()
-        if not completed:
-            stop_burst(3)
-        with state_lock:
-            state["moving"] = False
-        remember("sdk_trick_done", trick=trick, settle_s=settle_s, cancelled=not completed)
-    return {"ok": completed, "dry_run": False, "reason": None if completed else "motion_cancelled", "trick": trick, "settle_s": settle_s}
-
-
-def sdk_trick_async(name=None, action_id=None, dry_run=False, settle_s=None):
-    trick = resolve_trick(name=name, action_id=action_id)
-    settle_s = trick.get("duration_s", TRICK_SETTLE_S) if settle_s is None else float(settle_s)
-    settle_s = max(0.0, min(settle_s, 8.0))
-    if dry_run:
-        remember("sdk_trick_async_dry_run", trick=trick, settle_s=settle_s)
-        return {"ok": True, "accepted": False, "async": True, "dry_run": True, "trick": trick, "settle_s": settle_s}
-
-    def _runner():
+        completed = False
+        error = None
         try:
-            sdk_trick(action_id=trick["id"], settle_s=settle_s)
+            g.action(int(trick["id"]))
+            completed = wait_motion(settle_s) if settle_s else not motion_is_cancelled()
         except Exception as exc:
+            error = repr(exc)
+            with state_lock:
+                state["last_error"] = error
+        finally:
+            if not completed:
+                stop_burst(3)
             with state_lock:
                 state["moving"] = False
-                state["last_error"] = repr(exc)
-            remember("sdk_trick_async_error", trick=trick, error=repr(exc))
-
-    with state_lock:
-        state["last_command"] = "sdk_action_queued:" + trick["name"]
-        state["last_command_at"] = time.time()
-        state["last_error"] = None
-    remember("sdk_trick_async_accepted", trick=trick, settle_s=settle_s)
-    thread = threading.Thread(target=_runner, name="beep-trick-" + trick["name"], daemon=True)
-    thread.start()
-    return {"ok": True, "accepted": True, "async": True, "dry_run": False, "trick": trick, "settle_s": settle_s}
+            remember("sdk_trick_done", trick=trick, settle_s=settle_s, cancelled=not completed, error=error)
+    reason = None if completed else ("gesture_exception" if error else "motion_cancelled")
+    return {"ok": completed, "dry_run": False, "reason": reason, "error": error, "trick": trick, "settle_s": settle_s}
 
 
 def motor_send(action: str, step=None):
@@ -384,11 +458,13 @@ def stop_burst(n=3):
 
 
 def request_stop(source="api", n=3):
-    """Latch cancellation before stopping so autonomous loops cannot resume."""
-    motion_cancel.set()
+    """Cancel the exact active lease before stopping; its token can never be revived."""
+    lease = active_motion_lease()
+    if lease is not None:
+        lease.cancel_event.set()
     with state_lock:
         state["motion_cancelled"] = True
-    remember("motion_cancel_requested", source=str(source))
+    remember("motion_cancel_requested", source=str(source), lease_id=None if lease is None else lease.lease_id)
     return stop_burst(n)
 
 
@@ -588,6 +664,19 @@ def snapshot(full=False):
         slam["map_age_s"] = None if not slam.get("map_at") else round(time.time() - float(slam["map_at"]), 3)
         pose_age = slam.get("pose_age_s")
         slam["active"] = bool(slam.get("pose_at") and pose_age is not None and float(pose_age) <= 1.0)
+        map_age = slam.get("map_age_s")
+        map_valid = bool(slam.get("map_at") and map_age is not None and float(map_age) <= 2.5 and
+                         int(slam.get("map_width") or 0) > 0 and int(slam.get("map_height") or 0) > 0 and
+                         float(slam.get("resolution_m") or 0.0) > 0.0)
+        slam["usable"] = bool(slam["active"] and slam.get("pose_valid") is True and map_valid)
+        if not slam["active"]:
+            slam["usable_reason"] = "pose_missing_or_stale"
+        elif slam.get("pose_valid") is not True:
+            slam["usable_reason"] = "pose_guard_invalid"
+        elif not map_valid:
+            slam["usable_reason"] = "map_missing_stale_or_empty"
+        else:
+            slam["usable_reason"] = "ok"
         out["slam"] = slam
         if full:
             out["last_run"] = last_run
@@ -610,6 +699,28 @@ def front_distance(s=None):
 def scan_ok(s=None):
     s = s or snapshot()
     return bool(s.get("scan_seen")) and (s.get("scan_age_s") is not None) and float(s.get("scan_age_s")) <= SCAN_STALE_S
+
+
+def sector_values(s, names):
+    sectors = (s or {}).get("sectors") or {}
+    values = {}
+    for name in names:
+        value = sectors.get(name)
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        values[name] = value
+    return values
+
+
+def slam_ok(s=None):
+    s = s or snapshot()
+    return bool((s.get("slam") or {}).get("usable"))
 
 
 def run_action(action: str, duration: float, step=None):
@@ -1186,12 +1297,12 @@ def supervise_fluent_forward(duration, poll_s=0.08):
         slam = st.get("slam") or {}
         if not scan_ok(st):
             return {"ok": False, "reason": "scan_stale_during_fluent_forward", "elapsed_s": time.time() - started}
-        if not slam.get("active") or slam.get("pose_age_s") is None or float(slam["pose_age_s"]) > 1.0:
-            return {"ok": False, "reason": "slam_stale_during_fluent_forward", "elapsed_s": time.time() - started}
-        sec = st.get("sectors") or {}
-        if (float(sec.get("front") or 99) < 0.38 or
-                float(sec.get("front_left") or 99) < 0.22 or
-                float(sec.get("front_right") or 99) < 0.22):
+        if not slam_ok(st):
+            return {"ok": False, "reason": "slam_unusable_during_fluent_forward", "elapsed_s": time.time() - started}
+        sec = sector_values(st, ("front", "front_left", "front_right"))
+        if sec is None:
+            return {"ok": False, "reason": "lidar_sector_missing_during_fluent_forward", "elapsed_s": time.time() - started}
+        if (sec["front"] < 0.38 or sec["front_left"] < 0.22 or sec["front_right"] < 0.22):
             return {"ok": False, "reason": "obstacle_during_fluent_forward", "elapsed_s": time.time() - started}
         time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
@@ -1207,10 +1318,10 @@ def supervise_lidar_forward(duration, poll_s=0.08):
         st = snapshot()
         if not scan_ok(st):
             return {"ok": False, "reason": "scan_stale_during_lidar_walk", "elapsed_s": time.time() - started}
-        sec = st.get("sectors") or {}
-        if (float(sec.get("front") or 99) < 0.38 or
-                float(sec.get("front_left") or 99) < 0.22 or
-                float(sec.get("front_right") or 99) < 0.22):
+        sec = sector_values(st, ("front", "front_left", "front_right"))
+        if sec is None:
+            return {"ok": False, "reason": "lidar_sector_missing_during_lidar_walk", "elapsed_s": time.time() - started}
+        if (sec["front"] < 0.38 or sec["front_left"] < 0.22 or sec["front_right"] < 0.22):
             return {"ok": False, "reason": "obstacle_during_lidar_walk", "elapsed_s": time.time() - started}
         time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
@@ -1397,11 +1508,8 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 if not scan_ok(st):
                     reason = "scan_stale_or_missing"
                     break
-                if not slam.get("active") or slam.get("pose_age_s") is None or float(slam["pose_age_s"]) > 1.0:
-                    reason = "slam_pose_unavailable_or_stale"
-                    break
-                if slam.get("pose_valid") is False:
-                    reason = "slam_pose_guard_rejected_drift"
+                if not slam_ok(st):
+                    reason = "slam_unusable"
                     break
                 if slam.get("map_age_s") is None or float(slam["map_age_s"]) > 2.5:
                     reason = "slam_map_unavailable_or_stale"
@@ -1413,12 +1521,15 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
 
                 pose = pose_copy()
                 pose_tuple = (float(pose["x"]), float(pose["y"]), float(pose["yaw"]))
-                sec = st.get("sectors") or {}
-                if (float(sec.get("front") or 99) < max(0.20, HARD_CLEARANCE_M) or
-                        float(sec.get("front_left") or 99) < HARD_CLEARANCE_M or
-                        float(sec.get("front_right") or 99) < HARD_CLEARANCE_M or
-                        float(sec.get("left") or 99) < HARD_CLEARANCE_M or
-                        float(sec.get("right") or 99) < HARD_CLEARANCE_M):
+                sec = sector_values(st, ("front", "front_left", "front_right", "left", "right"))
+                if sec is None:
+                    reason = "lidar_sector_missing"
+                    break
+                if (sec["front"] < max(0.20, HARD_CLEARANCE_M) or
+                        sec["front_left"] < HARD_CLEARANCE_M or
+                        sec["front_right"] < HARD_CLEARANCE_M or
+                        sec["left"] < HARD_CLEARANCE_M or
+                        sec["right"] < HARD_CLEARANCE_M):
                     reason = "hard_obstacle_stop"
                     break
 
@@ -1732,7 +1843,13 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
                       "reason": "scan_stale_or_missing_before_start", "status": final_state, "trace_tail": []}
             last_run = result
             return result
-        initial_front = front_distance(final_state)
+        initial_sectors = sector_values(final_state, ("front", "front_left", "front_right", "left", "right"))
+        if initial_sectors is None:
+            result = {"ok": False, "mode": "forward_continuous_until",
+                      "reason": "lidar_sector_missing_before_start", "status": final_state, "trace_tail": []}
+            last_run = result
+            return result
+        initial_front = initial_sectors["front"]
         if initial_front is not None and initial_front <= target_front:
             result = {"ok": True, "mode": "forward_continuous_until",
                       "reason": f"already_at_target:{initial_front:.3f}", "status": final_state, "trace_tail": []}
@@ -1758,11 +1875,11 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
                 if front is not None and front <= target_front:
                     reason = f"target_reached:{front:.3f}"
                     break
-                clearance_samples = [
-                    float(sectors.get(name) or 99)
-                    for name in ("front_left", "front_right", "left", "right")
-                ]
-                close_side = min(clearance_samples)
+                required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right"))
+                if required is None:
+                    reason = "lidar_sector_missing"
+                    break
+                close_side = min(required[name] for name in ("front_left", "front_right", "left", "right"))
                 if close_side < max(float(min_target), HARD_CLEARANCE_M):
                     reason = f"side_too_close:{close_side:.3f}"
                     break
@@ -1809,8 +1926,13 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
             return {"ok": False, "mode": "guarded_slam_turn", "reason": "motion_cancelled", "status": final_state, "trace_tail": []}
         if not scan_ok(final_state):
             return {"ok": False, "mode": "guarded_slam_turn", "reason": "scan_stale_or_missing_before_start", "status": final_state, "trace_tail": []}
-        if not slam.get("active") or not slam.get("pose_valid") or pose.get("yaw") is None:
+        if not slam_ok(final_state) or pose.get("yaw") is None:
             return {"ok": False, "mode": "guarded_slam_turn", "reason": "slam_invalid_before_start", "status": final_state, "trace_tail": []}
+        required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
+        if required is None:
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "lidar_sector_missing_before_start", "status": final_state, "trace_tail": []}
+        if min(required.values()) < HARD_CLEARANCE_M:
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "clearance_breach_before_start", "status": final_state, "trace_tail": []}
         start_yaw = float(pose["yaw"])
         action = "turnleft" if turn == "left" else "turnright"
         try:
@@ -1826,12 +1948,14 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
                 if not scan_ok(final_state):
                     reason = "scan_stale_or_missing"
                     break
-                if not slam.get("active") or not slam.get("pose_valid") or pose.get("yaw") is None:
+                if not slam_ok(final_state) or pose.get("yaw") is None:
                     reason = "slam_invalid_during_turn"
                     break
-                clearances = [float(sectors.get(name) or 99) for name in
-                              ("front", "front_left", "front_right", "left", "right", "rear")]
-                nearest = min(clearances)
+                required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
+                if required is None:
+                    reason = "lidar_sector_missing"
+                    break
+                nearest = min(required.values())
                 if nearest < HARD_CLEARANCE_M:
                     reason = f"clearance_too_close:{nearest:.3f}"
                     break
@@ -1881,16 +2005,20 @@ def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TU
     steps = []
     initial = snapshot()
     initial_slam = initial.get("slam") or {}
-    if not initial_slam.get("active") or not initial_slam.get("pose_valid"):
+    if not slam_ok(initial):
         result = {"ok": False, "mode": "mark_object", "reason": "slam_invalid_before_approach", "steps": steps, "status": initial}
         remember("mark_object_abort", reason=result["reason"])
         return result
     approach = forward_continuous_until(target_front=target_front, max_duration=max_duration, min_target=MARK_MIN_FRONT_M)
     steps.append({"step": "approach", "result": approach})
     snap = snapshot()
-    sectors = snap.get("sectors") or {}
-    front = sectors.get("front")
-    side_clearance = min(float(sectors.get(name) or 99) for name in ("front_left", "front_right", "left", "right"))
+    required = sector_values(snap, ("front", "front_left", "front_right", "left", "right"))
+    if required is None:
+        result = {"ok": False, "mode": "mark_object", "reason": "lidar_sector_missing_after_approach", "steps": steps, "status": snap}
+        remember("mark_object_abort", reason=result["reason"])
+        return result
+    front = required["front"]
+    side_clearance = min(required[name] for name in ("front_left", "front_right", "left", "right"))
     if motion_is_cancelled():
         stop_burst(3)
         result = {"ok": False, "mode": "mark_object", "reason": "motion_cancelled", "steps": steps, "status": snap}
@@ -1966,7 +2094,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
                                 "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
-                                "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S}})
+                                "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
+                                "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
+                                "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
             elif p.path in ("/actions", "/tricks"):
@@ -2003,80 +2133,80 @@ class Handler(BaseHTTPRequestHandler):
                 action = (qs.get("action") or ["stop"])[0]
                 duration = float((qs.get("duration") or ["0.2"])[0])
                 step = (qs.get("step") or [None])[0]
-                if str(action).lower() != "stop":
-                    begin_motion("http_get_move")
-                self.send_json(run_action(action, duration, step=step))
+                if str(action).lower() == "stop":
+                    self.send_json(run_action(action, duration, step=step))
+                else:
+                    self.send_json(run_owned_motion("http_get_move", lambda: run_action(action, duration, step=step), max_duration=duration + 1.0))
             elif p.path in ("/action", "/trick"):
                 name = (qs.get("name") or qs.get("action") or qs.get("trick") or [None])[0]
                 action_id = (qs.get("id") or qs.get("action_id") or [None])[0]
                 dry = truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0])
                 settle = (qs.get("settle_s") or qs.get("duration") or [None])[0]
                 async_requested = truthy((qs.get("async") or ["0"])[0]) or not truthy((qs.get("wait") or ["1"])[0])
-                runner = sdk_trick_async if async_requested else sdk_trick
-                if not dry:
-                    begin_motion("http_get_trick")
-                self.send_json(runner(name=name, action_id=action_id, dry_run=dry, settle_s=settle))
+                if async_requested and not dry:
+                    self.send_json({"ok": False, "error": "asynchronous gestures are disabled; use a synchronous owned motion lease"}, 400)
+                elif dry:
+                    self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=True, settle_s=settle))
+                else:
+                    settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
+                    self.send_json(run_owned_motion("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle), max_duration=settle_limit + 2.0))
             elif p.path == "/mark_object":
                 dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
-                if not dry:
-                    begin_motion("http_get_mark_object")
-                self.send_json(mark_object(
-                    target_front=float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0]),
-                    max_duration=float((qs.get("max_duration") or ["5.0"])[0]),
-                    turn=(qs.get("turn") or [MARK_TURN_DIRECTION])[0],
-                    turn_duration=float((qs.get("turn_duration") or [str(MARK_TURN_TIMEOUT_S)])[0]),
-                    dry_run=dry,
-                ))
+                target_front = float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0])
+                approach_s = float((qs.get("max_duration") or ["5.0"])[0])
+                turn = (qs.get("turn") or [MARK_TURN_DIRECTION])[0]
+                turn_timeout = float((qs.get("turn_duration") or [str(MARK_TURN_TIMEOUT_S)])[0])
+                callback = lambda: mark_object(target_front=target_front, max_duration=approach_s, turn=turn, turn_duration=turn_timeout, dry_run=dry)
+                if dry:
+                    self.send_json(callback())
+                else:
+                    self.send_json(run_owned_motion("http_get_mark_object", callback, max_duration=approach_s + turn_timeout + 12.0))
+            elif p.path in ("/slam_turn", "/guarded_turn"):
+                dry = truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0])
+                turn = (qs.get("turn") or ["left"])[0]
+                degrees = float((qs.get("degrees") or ["90"])[0])
+                timeout_s = float((qs.get("max_duration") or [str(MARK_TURN_TIMEOUT_S)])[0])
+                if dry:
+                    self.send_json({"ok": True, "dry_run": True, "plan": {"mode": "guarded_slam_turn", "turn": turn, "degrees": degrees, "max_duration_s": timeout_s}, "status": snapshot()})
+                else:
+                    self.send_json(run_owned_motion("http_get_guarded_slam_turn", lambda: guarded_slam_turn(turn=turn, degrees=degrees, max_duration=timeout_s), max_duration=timeout_s + 1.0))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
-                begin_motion("http_get_forward_until")
-                self.send_json(forward_until(
-                    target_front=float((qs.get("target_front") or qs.get("target") or ["0.10"])[0]),
-                    max_duration=float((qs.get("max_duration") or ["8.0"])[0]),
-                    pulse=float((qs.get("pulse") or ["0.45"])[0]),
-                    stall_window=int((qs.get("stall_window") or ["5"])[0]),
-                    stall_delta=float((qs.get("stall_delta") or ["0.03"])[0]),
-                    reorient=(qs.get("reorient") or ["1"])[0] != "0",
-                ))
+                duration = float((qs.get("max_duration") or ["8.0"])[0])
+                callback = lambda: forward_until(
+                    target_front=float((qs.get("target_front") or qs.get("target") or ["0.10"])[0]), max_duration=duration,
+                    pulse=float((qs.get("pulse") or ["0.45"])[0]), stall_window=int((qs.get("stall_window") or ["5"])[0]),
+                    stall_delta=float((qs.get("stall_delta") or ["0.03"])[0]), reorient=(qs.get("reorient") or ["1"])[0] != "0")
+                self.send_json(run_owned_motion("http_get_forward_until", callback, max_duration=duration + 2.0))
             elif p.path in ("/explore_room", "/explore"):
-                begin_motion("http_get_explore_room")
-                self.send_json(explore_room(
-                    name=(qs.get("name") or ["room"])[0],
-                    max_duration=float((qs.get("max_duration") or ["30"])[0]),
-                    reset_map=(qs.get("reset") or ["0"])[0] == "1",
-                    save=(qs.get("save") or ["1"])[0] != "0",
-                    rotate_scan=(qs.get("rotate_scan") or ["1"])[0] != "0",
-                ))
+                duration = float((qs.get("max_duration") or ["30"])[0])
+                callback = lambda: explore_room(name=(qs.get("name") or ["room"])[0], max_duration=duration,
+                    reset_map=(qs.get("reset") or ["0"])[0] == "1", save=(qs.get("save") or ["1"])[0] != "0",
+                    rotate_scan=(qs.get("rotate_scan") or ["1"])[0] != "0")
+                self.send_json(run_owned_motion("http_get_explore_room", callback, max_duration=duration + 5.0))
             elif p.path in ("/lidar_walk", "/demo_walk"):
-                begin_motion("http_get_lidar_walk")
-                self.send_json(lidar_walk(
-                    max_duration=float((qs.get("max_duration") or ["60"])[0]),
-                    save=(qs.get("save") or ["1"])[0] != "0",
-                ))
+                duration = float((qs.get("max_duration") or ["60"])[0])
+                callback = lambda: lidar_walk(max_duration=duration, save=(qs.get("save") or ["1"])[0] != "0")
+                self.send_json(run_owned_motion("http_get_lidar_walk", callback, max_duration=duration + 2.0))
             elif p.path in ("/coverage_explore", "/explore_coverage"):
-                begin_motion("http_get_coverage_explore")
-                self.send_json(lidar_walk(
-                    max_duration=float((qs.get("max_duration") or ["600"])[0]),
-                    save=(qs.get("save") or ["1"])[0] != "0",
-                    coverage_goal=True,
-                    min_duration=float((qs.get("min_duration") or ["60"])[0]),
-                    coverage_window=float((qs.get("coverage_window") or ["45"])[0]),
-                    min_growth_cells=int((qs.get("min_growth_cells") or ["150"])[0]),
-                ))
+                duration = float((qs.get("max_duration") or ["600"])[0])
+                callback = lambda: lidar_walk(max_duration=duration, save=(qs.get("save") or ["1"])[0] != "0", coverage_goal=True,
+                    min_duration=float((qs.get("min_duration") or ["60"])[0]), coverage_window=float((qs.get("coverage_window") or ["45"])[0]),
+                    min_growth_cells=int((qs.get("min_growth_cells") or ["150"])[0]))
+                self.send_json(run_owned_motion("http_get_coverage_explore", callback, max_duration=min(duration + 2.0, 600.0)))
             elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
                 seed_value = (qs.get("seed") or [None])[0]
                 dry = truthy((qs.get("dry_run") or qs.get("dry") or ["0"])[0])
-                if not dry:
-                    begin_motion("http_get_frontier_explore")
-                self.send_json(frontier_explore(
-                    name=(qs.get("name") or ["dog_frontier"])[0],
-                    max_duration=float((qs.get("max_duration") or ["60"])[0]),
-                    chaos=float((qs.get("chaos") or ["0.45"])[0]),
-                    seed=None if seed_value in (None, "") else int(seed_value),
-                    save=(qs.get("save") or ["1"])[0] != "0",
-                    dry_run=dry,
-                ))
+                duration = float((qs.get("max_duration") or ["60"])[0])
+                callback = lambda: frontier_explore(name=(qs.get("name") or ["dog_frontier"])[0], max_duration=duration,
+                    chaos=float((qs.get("chaos") or ["0.45"])[0]), seed=None if seed_value in (None, "") else int(seed_value),
+                    save=(qs.get("save") or ["1"])[0] != "0", dry_run=dry)
+                self.send_json(callback() if dry else run_owned_motion("http_get_frontier_explore", callback, max_duration=duration + 2.0))
             else:
-                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/slam_turn", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+        except MotionBusy as e:
+            lease = active_motion_lease()
+            self.send_json({"ok": False, "error": str(e), "busy": True,
+                            "active_lease": None if lease is None else {"id": lease.lease_id, "source": lease.source}}, 409)
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)
@@ -2095,64 +2225,56 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
             elif p.path == "/move":
                 action = body.get("action", "stop")
-                if str(action).lower() != "stop":
-                    begin_motion("http_post_move")
-                self.send_json(run_action(action, float(body.get("duration", 0.2)), step=body.get("step")))
+                duration = float(body.get("duration", 0.2))
+                callback = lambda: run_action(action, duration, step=body.get("step"))
+                self.send_json(callback() if str(action).lower() == "stop" else run_owned_motion("http_post_move", callback, max_duration=duration + 1.0))
             elif p.path in ("/action", "/trick"):
                 async_requested = bool(body.get("async", False)) or body.get("wait", True) is False
-                runner = sdk_trick_async if async_requested else sdk_trick
                 dry = bool(body.get("dry_run", body.get("dry", False)))
-                if not dry:
-                    begin_motion("http_post_trick")
-                self.send_json(runner(
-                    name=body.get("name", body.get("action", body.get("trick"))),
-                    action_id=body.get("id", body.get("action_id")),
-                    dry_run=dry,
-                    settle_s=body.get("settle_s", body.get("duration")),
-                ))
+                settle = body.get("settle_s", body.get("duration"))
+                callback = lambda: sdk_trick(name=body.get("name", body.get("action", body.get("trick"))),
+                    action_id=body.get("id", body.get("action_id")), dry_run=dry, settle_s=settle)
+                if async_requested and not dry:
+                    self.send_json({"ok": False, "error": "asynchronous gestures are disabled; use a synchronous owned motion lease"}, 400)
+                elif dry:
+                    self.send_json(callback())
+                else:
+                    settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
+                    self.send_json(run_owned_motion("http_post_trick", callback, max_duration=settle_limit + 2.0))
             elif p.path == "/mark_object":
                 dry = bool(body.get("dry_run", body.get("dry", False)))
-                if not dry:
-                    begin_motion("http_post_mark_object")
-                self.send_json(mark_object(
-                    target_front=float(body.get("target_front", MARK_TARGET_FRONT_M)),
-                    max_duration=float(body.get("max_duration", 5.0)),
-                    turn=body.get("turn", MARK_TURN_DIRECTION),
-                    turn_duration=float(body.get("turn_duration", MARK_TURN_TIMEOUT_S)),
-                    dry_run=bool(body.get("dry_run", body.get("dry", False))),
-                ))
+                approach_s = float(body.get("max_duration", 5.0))
+                turn_timeout = float(body.get("turn_duration", MARK_TURN_TIMEOUT_S))
+                callback = lambda: mark_object(target_front=float(body.get("target_front", MARK_TARGET_FRONT_M)), max_duration=approach_s,
+                    turn=body.get("turn", MARK_TURN_DIRECTION), turn_duration=turn_timeout, dry_run=dry)
+                self.send_json(callback() if dry else run_owned_motion("http_post_mark_object", callback, max_duration=approach_s + turn_timeout + 12.0))
+            elif p.path in ("/slam_turn", "/guarded_turn"):
+                dry = bool(body.get("dry_run", body.get("dry", False)))
+                turn = body.get("turn", "left")
+                degrees = float(body.get("degrees", 90.0))
+                timeout_s = float(body.get("max_duration", MARK_TURN_TIMEOUT_S))
+                callback = lambda: guarded_slam_turn(turn=turn, degrees=degrees, max_duration=timeout_s)
+                if dry:
+                    self.send_json({"ok": True, "dry_run": True, "plan": {"mode": "guarded_slam_turn", "turn": turn, "degrees": degrees, "max_duration_s": timeout_s}, "status": snapshot()})
+                else:
+                    self.send_json(run_owned_motion("http_post_guarded_slam_turn", callback, max_duration=timeout_s + 1.0))
             elif p.path in ("/forward_until", "/learned_forward", "/approach_front"):
-                begin_motion("http_post_forward_until")
-                self.send_json(forward_until(
-                    target_front=float(body.get("target_front", body.get("target", 0.10))),
-                    max_duration=float(body.get("max_duration", 8.0)),
-                    pulse=float(body.get("pulse", 0.45)),
-                    stall_window=int(body.get("stall_window", 5)),
-                    stall_delta=float(body.get("stall_delta", 0.03)),
-                    min_target=float(body.get("min_target", 0.08)),
-                    reorient=bool(body.get("reorient", True)),
-                ))
+                duration = float(body.get("max_duration", 8.0))
+                callback = lambda: forward_until(target_front=float(body.get("target_front", body.get("target", 0.10))), max_duration=duration,
+                    pulse=float(body.get("pulse", 0.45)), stall_window=int(body.get("stall_window", 5)),
+                    stall_delta=float(body.get("stall_delta", 0.03)), min_target=float(body.get("min_target", 0.08)), reorient=bool(body.get("reorient", True)))
+                self.send_json(run_owned_motion("http_post_forward_until", callback, max_duration=duration + 2.0))
             elif p.path in ("/explore_room", "/explore"):
-                begin_motion("http_post_explore_room")
-                self.send_json(explore_room(
-                    name=body.get("name", "room"),
-                    max_duration=float(body.get("max_duration", 30.0)),
-                    reset_map=bool(body.get("reset", False)),
-                    save=bool(body.get("save", True)),
-                    rotate_scan=bool(body.get("rotate_scan", True)),
-                ))
+                duration = float(body.get("max_duration", 30.0))
+                callback = lambda: explore_room(name=body.get("name", "room"), max_duration=duration, reset_map=bool(body.get("reset", False)),
+                    save=bool(body.get("save", True)), rotate_scan=bool(body.get("rotate_scan", True)))
+                self.send_json(run_owned_motion("http_post_explore_room", callback, max_duration=duration + 5.0))
             elif p.path in ("/frontier_explore", "/dog_explore", "/explore_frontiers"):
                 dry = bool(body.get("dry_run", body.get("dry", False)))
-                if not dry:
-                    begin_motion("http_post_frontier_explore")
-                self.send_json(frontier_explore(
-                    name=body.get("name", "dog_frontier"),
-                    max_duration=float(body.get("max_duration", 60.0)),
-                    chaos=float(body.get("chaos", 0.45)),
-                    seed=body.get("seed"),
-                    save=bool(body.get("save", True)),
-                    dry_run=dry,
-                ))
+                duration = float(body.get("max_duration", 60.0))
+                callback = lambda: frontier_explore(name=body.get("name", "dog_frontier"), max_duration=duration,
+                    chaos=float(body.get("chaos", 0.45)), seed=body.get("seed"), save=bool(body.get("save", True)), dry_run=dry)
+                self.send_json(callback() if dry else run_owned_motion("http_post_frontier_explore", callback, max_duration=duration + 2.0))
             elif p.path == "/map_reset":
                 reset_pose(float(body.get("x", 0.0)), float(body.get("y", 0.0)), float(body.get("yaw", 0.0)))
                 ensure_room_map(name=body.get("name", "room"), reset=True)
@@ -2160,6 +2282,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "summary": map_summary(room_map)})
             else:
                 self.send_json({"error": "not found"}, 404)
+        except MotionBusy as e:
+            lease = active_motion_lease()
+            self.send_json({"ok": False, "error": str(e), "busy": True,
+                            "active_lease": None if lease is None else {"id": lease.lease_id, "source": lease.source}}, 409)
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)
