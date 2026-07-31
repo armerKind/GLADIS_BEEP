@@ -7,7 +7,25 @@ MARKER="${BEEP_FAIR_READY_FILE:-/tmp/beep-fair-ready.json}"
 HTTP_TIMEOUT_S="${BEEP_HTTP_TIMEOUT_S:-3}"
 
 cd "${REPO_DIR}"
-curl -fsS --max-time "${HTTP_TIMEOUT_S}" "${BRIDGE_URL}/stop" >/dev/null
+python3 - "${BRIDGE_URL}" "${HTTP_TIMEOUT_S}" <<'PY'
+import json
+import sys
+import urllib.request
+
+base, timeout_text = sys.argv[1:]
+timeout = float(timeout_text)
+try:
+    with urllib.request.urlopen(base + "/stop", timeout=timeout) as response:
+        json.load(response)
+except Exception as stop_error:
+    try:
+        with urllib.request.urlopen(base + "/status", timeout=timeout) as response:
+            status = json.load(response)
+    except Exception:
+        raise SystemExit(f"Preparation stop unconfirmed: {stop_error}")
+    if status.get("moving") is not False or status.get("motion_lease_id") is not None:
+        raise SystemExit(f"Preparation stop unconfirmed: {stop_error}")
+PY
 python3 scripts/jupyter_reset_slam.py
 
 python3 - "${BRIDGE_URL}" "${MARKER}" "${HTTP_TIMEOUT_S}" <<'PY'
