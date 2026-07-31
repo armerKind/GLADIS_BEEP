@@ -47,7 +47,21 @@ class BridgeClient:
         return self.get("/status")
 
     def stop(self) -> dict[str, Any]:
-        return self.get("/stop", timeout=max(5.0, self.request_timeout_s))
+        try:
+            return self.get("/stop", timeout=max(5.0, self.request_timeout_s))
+        except PresentationAbort as stop_error:
+            # A relayed connection can lose the HTTP response after BEEP has
+            # already executed the stop. Accept that only when a separate,
+            # fresh status request proves there is no movement or lease.
+            status = self.status()
+            if status.get("moving") is False and status.get("motion_lease_id") is None:
+                return {
+                    "ok": True,
+                    "reason": "stop_response_lost_but_state_confirmed",
+                    "status": status,
+                    "transport_error": str(stop_error),
+                }
+            raise stop_error
 
     def coverage_segment(self, duration_s: float) -> dict[str, Any]:
         duration_s = max(5.0, min(float(duration_s), 60.0))

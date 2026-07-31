@@ -68,6 +68,23 @@ class FakeClient:
 
 
 class PresentationTests(unittest.TestCase):
+    def test_stop_accepts_lost_response_only_after_stopped_state_confirmation(self):
+        client = presentation.BridgeClient("http://beep", request_timeout_s=12.0)
+        stopped = healthy_status(motion_lease_id=None)
+        error = presentation.PresentationAbort("lost stop response")
+        with patch.object(client, "get", side_effect=[error, stopped]):
+            result = client.stop()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "stop_response_lost_but_state_confirmed")
+
+    def test_stop_rejects_lost_response_when_motion_is_still_owned(self):
+        client = presentation.BridgeClient("http://beep", request_timeout_s=12.0)
+        moving = healthy_status(moving=True, motion_lease_id="lease-1")
+        error = presentation.PresentationAbort("lost stop response")
+        with patch.object(client, "get", side_effect=[error, moving]):
+            with self.assertRaisesRegex(presentation.PresentationAbort, "lost stop response"):
+                client.stop()
+
     def test_stationary_validation_rejects_invalid_slam(self):
         status = healthy_status()
         status["slam"]["pose_valid"] = False
