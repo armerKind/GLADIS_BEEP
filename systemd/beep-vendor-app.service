@@ -1,0 +1,18 @@
+[Unit]
+Description=BEEP vendor DogZilla camera and control servers
+After=NetworkManager.service network-online.target yahboom_oled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/DOGZILLA/app_dogzilla
+Environment=DOGZILLA_SKIP_STARTUP_ACTION=1
+ExecStart=/usr/bin/python3 /home/pi/DOGZILLA/app_dogzilla/app_dogzilla.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

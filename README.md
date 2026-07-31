@@ -26,7 +26,7 @@ Current source implements the following. The main locomotion, mapping, coverage,
 - local presentation-safe LiDAR walking when global localization is not trustworthy
 - coverage-driven room exploration that stops when mapped known-space growth plateaus
 - Jupyter-based deployment, SLAM reset/export, diagnostics, and speaker playback helpers
-- remote supervision through Tailscale while preserving the original `DOGZILLA_WIFI` network
+- MAC-bound dual Wi-Fi boot configu...[truncated]
 
 ## What “SLAM” means here
 
