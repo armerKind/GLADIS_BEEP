@@ -4,12 +4,13 @@ set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE_URL="${BEEP_BRIDGE_URL:-http://192.168.8.88:8766}"
 MARKER="${BEEP_FAIR_READY_FILE:-/tmp/beep-fair-ready.json}"
+HTTP_TIMEOUT_S="${BEEP_HTTP_TIMEOUT_S:-3}"
 
 cd "${REPO_DIR}"
-curl -fsS --max-time 4 "${BRIDGE_URL}/stop" >/dev/null
+curl -fsS --max-time "${HTTP_TIMEOUT_S}" "${BRIDGE_URL}/stop" >/dev/null
 python3 scripts/jupyter_reset_slam.py
 
-python3 - "${BRIDGE_URL}" "${MARKER}" <<'PY'
+python3 - "${BRIDGE_URL}" "${MARKER}" "${HTTP_TIMEOUT_S}" <<'PY'
 import json
 import math
 import os
@@ -17,11 +18,19 @@ import sys
 import time
 import urllib.request
 
-base, marker = sys.argv[1:]
+base, marker, timeout_text = sys.argv[1:]
+http_timeout = float(timeout_text)
 
 def status():
-    with urllib.request.urlopen(base + "/status", timeout=3) as response:
-        return json.load(response)
+    last_error = None
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(base + "/status", timeout=http_timeout) as response:
+                return json.load(response)
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise last_error
 
 for _ in range(60):
     try:

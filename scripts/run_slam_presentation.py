@@ -31,13 +31,14 @@ class PresentationAbort(RuntimeError):
 @dataclass
 class BridgeClient:
     base_url: str
+    request_timeout_s: float = 5.0
 
-    def get(self, path: str, params: dict[str, Any] | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    def get(self, path: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
         query = urllib.parse.urlencode(params or {})
         url = self.base_url.rstrip("/") + path + (("?" + query) if query else "")
         request = urllib.request.Request(url, headers={"User-Agent": "beep-slam-presentation/1.0"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=self.request_timeout_s if timeout is None else timeout) as response:
                 return json.load(response)
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise PresentationAbort(f"bridge request failed for {path}: {exc}") from exc
@@ -46,7 +47,7 @@ class BridgeClient:
         return self.get("/status")
 
     def stop(self) -> dict[str, Any]:
-        return self.get("/stop", timeout=5.0)
+        return self.get("/stop", timeout=max(5.0, self.request_timeout_s))
 
     def coverage_segment(self, duration_s: float) -> dict[str, Any]:
         duration_s = max(5.0, min(float(duration_s), 60.0))
@@ -59,11 +60,11 @@ class BridgeClient:
                 "min_growth_cells": "1",
                 "save": "0",
             },
-            timeout=duration_s + 12.0,
+            timeout=duration_s + max(12.0, self.request_timeout_s),
         )
 
     def trick(self, name: str) -> dict[str, Any]:
-        return self.get("/action", {"name": name, "wait": "1"}, timeout=12.0)
+        return self.get("/action", {"name": name, "wait": "1"}, timeout=max(12.0, self.request_timeout_s))
 
     def mark_corner(self) -> dict[str, Any]:
         return self.get(
@@ -246,6 +247,7 @@ def run_presentation(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--request-timeout", type=float, default=5.0, help="HTTP timeout for status/stop requests; use 10-15 seconds over relayed Tailscale")
     parser.add_argument("--duration", type=float, default=600.0, help="total routine duration, clamped to 30..600 seconds")
     parser.add_argument("--segment", type=float, default=45.0, help="guarded navigation lease, clamped to 10..60 seconds")
     parser.add_argument("--prey-interval", type=float, default=150.0)
@@ -259,7 +261,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    client = BridgeClient(args.base_url)
+    client = BridgeClient(args.base_url, request_timeout_s=max(5.0, min(args.request_timeout, 20.0)))
     stop_requested = {"value": False}
 
     def on_signal(signum: int, _frame: Any) -> None:

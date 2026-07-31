@@ -7,21 +7,23 @@ MARKER="${BEEP_FAIR_READY_FILE:-/tmp/beep-fair-ready.json}"
 DURATION_S="${BEEP_FAIR_DURATION_S:-600}"
 SEGMENT_S="${BEEP_FAIR_SEGMENT_S:-45}"
 PREY_INTERVAL_S="${BEEP_FAIR_PREY_INTERVAL_S:-150}"
+HTTP_TIMEOUT_S="${BEEP_HTTP_TIMEOUT_S:-3}"
 
 stop_beep() {
-    curl -fsS --max-time 3 "${BRIDGE_URL}/stop" >/dev/null 2>&1 || true
+    curl -fsS --max-time "${HTTP_TIMEOUT_S}" "${BRIDGE_URL}/stop" >/dev/null 2>&1 || true
 }
 trap stop_beep EXIT INT TERM
 cd "${REPO_DIR}"
 
-python3 - "${BRIDGE_URL}" "${MARKER}" <<'PY'
+python3 - "${BRIDGE_URL}" "${MARKER}" "${HTTP_TIMEOUT_S}" <<'PY'
 import json
 import math
 import sys
 import time
 import urllib.request
 
-base, marker = sys.argv[1:]
+base, marker, timeout_text = sys.argv[1:]
+http_timeout = float(timeout_text)
 try:
     with open(marker, encoding="utf-8") as handle:
         prepared = json.load(handle)
@@ -33,8 +35,17 @@ if time.time() - float(prepared["prepared_at"]) > 7200:
 if prepared.get("bridge_url") != base:
     raise SystemExit("Fast start refused: bridge URL differs from preparation")
 
-with urllib.request.urlopen(base + "/status", timeout=3) as response:
-    current = json.load(response)
+last_error = None
+for _ in range(3):
+    try:
+        with urllib.request.urlopen(base + "/status", timeout=http_timeout) as response:
+            current = json.load(response)
+        break
+    except Exception as exc:
+        last_error = exc
+        time.sleep(0.25)
+else:
+    raise SystemExit(f"Fast start refused: bridge status unavailable: {last_error}")
 slam = current.get("slam") or {}
 sectors = current.get("sectors") or {}
 required = ("front", "front_left", "front_right", "left", "right", "rear")
@@ -69,6 +80,7 @@ rm -f -- "${MARKER}"
 
 python3 scripts/run_slam_presentation.py \
     --armed \
+    --request-timeout "${HTTP_TIMEOUT_S}" \
     --duration "${DURATION_S}" \
     --segment "${SEGMENT_S}" \
     --prey-interval "${PREY_INTERVAL_S}"
