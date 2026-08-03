@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "scene": {
+    "summary": "A white rectangular box is centered ahead in the corridor.",
+    "changes": [],
+    "people": [],
+    "objects": [
+      {
+        "id": "box-local-1",
+        "description": "A small white rectangular box with a dark quadruped silhouette.",
+        "position": "center",
+        "proximity": "far",
+        "visible_features": ["front_face", "top"],
+        "confidence": 0.95
+      }
+    ],
+    "hazards": [
+      {
+        "type": "obstacle",
+        "description": "The box occupies the center of the path.",
+        "position": "center",
+        "confidence": 0.9
+      }
+    ]
+  },
+  "attention": {
+    "target_type": "object",
+    "target_id": "box-local-1",
+    "reason": "The box is the current investigation target."
+  },
+  "plan": {
+    "goal": "Approach carefully and inspect the box.",
+    "steps": [
+      {
+        "skill": "advance",
+        "distance_m": 0.15,
+        "reason": "One bounded approach segment."
+      }
+    ]
+  },
+  "confidence": 0.95,
+  "uncertainty": [],
+  "escalate": false,
+  "escalation_reason": null
+}

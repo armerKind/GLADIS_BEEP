@@ -40,7 +40,7 @@ The contact sheet gives temporal context cheaply; the latest frame preserves det
 Canonical output contains:
 
 - scene summary and observed changes;
-- people and objects with stable packet-local IDs, relative position, and confidence;
+- people and objects with stable packet-local IDs, relative position, object proximity/visible geometry, and confidence;
 - visual hazards, including explicit glass/stairs/drop categories;
 - one attention target;
 - a goal and up to three proposed skills;

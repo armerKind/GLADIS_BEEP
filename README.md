@@ -96,6 +96,7 @@ scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
 scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency, and Pi resources
 scripts/run_beep_eyes.py                 # Temporal camera/replay → Gemini → typed shadow policy
+scripts/run_beep_mission.py              # Persistent world → autonomous goal → semantic skill trace
 scripts/install_systemd_service.py      # Install the bridge systemd service
 scripts/save_slam_map.sh                # Pi-side Cartographer exporter
 ```
@@ -162,6 +163,7 @@ The eyes subsystem supports fully offline saved-frame replay. BEEP is required o
 - [`docs/fair_remote_control_status.md`](docs/fair_remote_control_status.md) — current network topology and historical adapter notes
 - [`docs/perception_baseline.md`](docs/perception_baseline.md) — measured camera, microphone, bridge-latency, and Pi-resource baseline
 - [`docs/EYES_ARCHITECTURE.md`](docs/EYES_ARCHITECTURE.md) — multipanel Gemini eyes, typed proposals, offline workflow, and rollout gates
+- [`docs/EMBODIED_MIDDLE_LAYER.md`](docs/EMBODIED_MIDDLE_LAYER.md) — persistent world, personality/drives, autonomous goals, and callable body skills
 - [`assets/ros_maps/README.md`](assets/ros_maps/README.md) — retained Cartographer artifacts
 
 ## Version-control policy

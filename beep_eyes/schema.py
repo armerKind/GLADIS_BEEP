@@ -11,6 +11,8 @@ HAZARD_TYPES = {"glass", "stairs", "drop", "person", "animal", "vehicle", "obsta
 SKILLS = {"observe", "stop", "orient", "advance", "retreat", "explore", "gesture", "speak"}
 GESTURES = {"pray", "stretch", "swing"}
 DIRECTIONS = {"left", "right"}
+PROXIMITIES = {"far", "mid", "near", "unknown"}
+OBJECT_FEATURES = {"front_face", "left_side", "right_side", "left_outward_corner", "right_outward_corner", "top", "unknown"}
 
 
 class PerceptionValidationError(ValueError):
@@ -65,7 +67,8 @@ def _entity(value: Any, path: str, *, person: bool) -> None:
     required = {"id", "description", "position", "confidence"}
     if person:
         required.add("engagement")
-    _exact_keys(item, path, required)
+    optional = set() if person else {"proximity", "visible_features"}
+    _exact_keys(item, path, required, optional)
     _text(item["id"], f"{path}.id", 48)
     _text(item["description"], f"{path}.description", 240)
     if item["position"] not in POSITIONS:
@@ -73,6 +76,15 @@ def _entity(value: Any, path: str, *, person: bool) -> None:
     _number(item["confidence"], f"{path}.confidence", 0.0, 1.0)
     if person and item["engagement"] not in ENGAGEMENTS:
         raise PerceptionValidationError(f"{path}.engagement is invalid")
+    if not person:
+        if ("proximity" in item) != ("visible_features" in item):
+            raise PerceptionValidationError(f"{path} requires proximity and visible_features together")
+        if "proximity" in item and item["proximity"] not in PROXIMITIES:
+            raise PerceptionValidationError(f"{path}.proximity is invalid")
+        if "visible_features" in item:
+            for index, feature in enumerate(_list(item["visible_features"], f"{path}.visible_features", 8)):
+                if feature not in OBJECT_FEATURES:
+                    raise PerceptionValidationError(f"{path}.visible_features[{index}] is invalid")
 
 
 def _hazard(value: Any, path: str) -> None:
@@ -246,6 +258,8 @@ RESPONSE_JSON_SCHEMA: dict[str, Any] = {
             "properties": {
                 "id": {"type": "string", "maxLength": 48}, "description": {"type": "string", "maxLength": 240},
                 "position": {"type": "string", "enum": sorted(POSITIONS)},
+                "proximity": {"type": "string", "enum": sorted(PROXIMITIES)},
+                "visible_features": {"type": "array", "maxItems": 8, "items": {"type": "string", "enum": sorted(OBJECT_FEATURES)}},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             },
         },
@@ -295,12 +309,14 @@ GEMINI_COMPACT_JSON_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["kind", "id", "description", "position", "engagement", "confidence"],
+                "required": ["kind", "id", "description", "position", "engagement", "proximity", "visible_features", "confidence"],
                 "properties": {
                     "kind": {"type": "string", "enum": ["person", "object"]},
                     "id": {"type": "string"}, "description": {"type": "string"},
                     "position": {"type": "string", "enum": sorted(POSITIONS)},
                     "engagement": {"type": "string", "enum": sorted(ENGAGEMENTS)},
+                    "proximity": {"type": "string", "enum": sorted(PROXIMITIES)},
+                    "visible_features": {"type": "array", "items": {"type": "string", "enum": sorted(OBJECT_FEATURES)}},
                     "confidence": {"type": "number"},
                 },
             },
@@ -353,14 +369,14 @@ def normalize_gemini_response(value: Any) -> dict[str, Any]:
     objects: list[dict[str, Any]] = []
     for entity in entities:
         item = _mapping(entity, "gemini_response.entity")
-        _exact_keys(item, "gemini_response.entity", {"kind", "id", "description", "position", "engagement", "confidence"})
+        _exact_keys(item, "gemini_response.entity", {"kind", "id", "description", "position", "engagement", "proximity", "visible_features", "confidence"})
         if item.get("kind") not in {"person", "object"}:
             raise PerceptionValidationError("gemini_response.entity.kind is invalid")
         base = {key: item.get(key) for key in ("id", "description", "position", "confidence")}
         if item.get("kind") == "person":
             people.append({**base, "engagement": item.get("engagement")})
         else:
-            objects.append(base)
+            objects.append({**base, "proximity": item.get("proximity"), "visible_features": item.get("visible_features")})
 
     steps = []
     for item in _list(wire.get("steps"), "gemini_response.steps", 3):
