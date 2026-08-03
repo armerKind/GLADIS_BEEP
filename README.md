@@ -99,6 +99,7 @@ scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
 scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency, and Pi resources
 scripts/run_beep_eyes.py                 # Temporal camera/replay → Gemini → typed shadow policy
+scripts/run_moving_eyes.py               # Continuous 4/6/9-frame moving vision → world-model planning
 scripts/run_beep_mission.py              # Persistent world → autonomous goal → optional typed dispatch
 scripts/install_systemd_service.py      # Install the bridge systemd service
 scripts/save_slam_map.sh                # Pi-side Cartographer exporter
@@ -144,6 +145,7 @@ Tailscale can use a high-latency DERP relay or disappear with the external Wi-Fi
 - Autonomous movement routines attempt final SDK stops on completion, timeout, and exception; a hardware/SDK failure can still prevent a physical stop.
 - Every motion lease has an independent onboard deadline watchdog; it attempts repeated stops even if the owning worker or remote HTTP client stalls.
 - Asynchronous missions keep `/status`, `/mission`, and cancellation responsive while the local controller maintains fluent gait.
+- Moving vision captures into a bounded ring without touching app motor control; 4/6/9-frame panels tolerate individual blurred frames while locomotion continues.
 - SDK stop success is authoritative; the optional Yahboom app-socket stop is best-effort telemetry.
 - No battery telemetry is available; use charged batteries and supervised bounded runs.
 - Do not infer “whole room” solely from elapsed time. Coverage mode uses map-growth saturation and still cannot prove access beneath or behind every obstacle.

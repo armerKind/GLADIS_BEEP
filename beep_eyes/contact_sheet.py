@@ -59,18 +59,20 @@ def _fetch_jpeg_with_retry(base_url: str, timeout_s: float, attempts: int = 3) -
     raise last_error
 
 
-def capture_sequence(base_url: str, count: int = 4, interval_s: float = 1.5, timeout_s: float = 10.0) -> tuple[list[CapturedFrame], dict[str, Any]]:
-    """Capture stationary frames and return the latest bridge status.
+def capture_sequence(base_url: str, count: int = 4, interval_s: float = 1.5, timeout_s: float = 10.0,
+                     allow_moving: bool = False) -> tuple[list[CapturedFrame], dict[str, Any]]:
+    """Capture frames and return the latest bridge status.
 
-    This function never invokes movement. It refuses capture if BEEP reports an
-    active movement or lease, keeping the first eyes milestone observation-only.
+    This function never invokes movement. Stationary capture remains the default;
+    moving callers must opt in explicitly and use a bridge camera path that does
+    not alter the active motor lease.
     """
-    if count < 2 or count > 8:
-        raise ValueError("count must be within [2, 8]")
+    if count < 2 or count > 9:
+        raise ValueError("count must be within [2, 9]")
     if interval_s < 0 or interval_s > 10:
         raise ValueError("interval_s must be within [0, 10]")
     status = fetch_json(base_url, "/status", timeout_s)
-    if bool(status.get("moving")) or status.get("motion_lease_id") is not None:
+    if not allow_moving and (bool(status.get("moving")) or status.get("motion_lease_id") is not None):
         raise RuntimeError("BEEP is moving; stationary eyes capture refused")
     # The vendor camera may expose one red/stale frame immediately after its
     # control mode switches. Warm it once and exclude that frame from evidence.
@@ -83,7 +85,7 @@ def capture_sequence(base_url: str, count: int = 4, interval_s: float = 1.5, tim
         if index + 1 < count:
             time.sleep(interval_s)
     final_status = fetch_json(base_url, "/status", timeout_s)
-    if bool(final_status.get("moving")) or final_status.get("motion_lease_id") is not None:
+    if not allow_moving and (bool(final_status.get("moving")) or final_status.get("motion_lease_id") is not None):
         raise RuntimeError("BEEP moved during eyes capture; evidence discarded")
     return frames, final_status
 

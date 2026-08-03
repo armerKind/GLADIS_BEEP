@@ -84,6 +84,9 @@ class GeminiVisionClientTests(unittest.TestCase):
         self.assertIn("responseJsonSchema", config)
         parts = seen["body"]["contents"][0]["parts"]
         self.assertEqual(len([part for part in parts if "inlineData" in part]), 2)
+        prompt = parts[0]["text"]
+        self.assertIn("During moving capture", prompt)
+        self.assertIn("Do not request a stop merely because one panel is blurred", prompt)
 
     def test_rejects_non_json_model_output(self):
         def transport(*_):

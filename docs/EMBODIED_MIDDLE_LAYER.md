@@ -12,8 +12,8 @@ temporal perception
 → one typed semantic skill
 → deterministic safety/lease policy
 → body-specific skill adapter
-→ physical effect
-→ stop and perceive again
+→ bounded physical effect under continuous local and temporal perception
+→ continue, adjust, deliberately inspect, or stop for a real boundary
 ```
 
 Max provides advice, constraints, collaboration, and human authority at genuine physical boundaries. He is not required to choreograph ordinary perception, investigation, interaction, or development.
@@ -119,17 +119,18 @@ BEEP remained stopped because live LiDAR and SLAM were unavailable. That is an a
 - `stop` → exact mission cancellation and repeated onboard stop;
 - `observe` → stationary bridge observation.
 
-Autonomous `explore` defaults to a 90-second fluent mission. Starting it returns immediately, so the middle layer can continue reasoning from persistent world state and live `/mission` plus LiDAR/SLAM telemetry while BEEP moves. Camera temporal capture remains stationary-only; Gemini is not used as a delayed collision reflex. The onboard controller owns approximately 80 ms obstacle supervision, fluent gait, lease enforcement, and final stop.
+Autonomous `explore` defaults to a 90-second fluent mission. Starting it returns immediately, so the middle layer can reason from persistent world state, `/mission` telemetry, and continuous moving-camera windows while BEEP moves. A background ring captures at approximately 3 FPS and supplies chronological 4/6/9-frame panels (default nine) to one Gemini inference at a time; newer evidence supersedes stale pending windows. The onboard controller still owns approximately 80 ms obstacle supervision, fluent gait, lease enforcement, and final stop. Gemini supplies semantics and planning context, not delayed motor reflexes.
+
+`ContinuousMovingCapture` and `run_moving_eyes.py` additionally provide the live perception supervisor. It does not dispatch a semantic skill; it continuously merges moving visual evidence into the world model and prepares the next decision while the current mission remains under deterministic bridge authority.
 
 Remaining adapters are:
 
-1. `observe` → temporal eyes capture/replay loop;
-2. `speak` → stationary TTS through BEEP's analog speaker;
-3. `gesture` → stopped-state whitelisted bridge action;
-4. `orient` → measured guarded heading change;
-5. `approach_target` → one short lease using fresh LiDAR/SLAM and current visual target;
-6. `inspect_target` → bounded viewpoint acquisition, stop, and geometry re-perception;
-7. `mark_target` → bind the stable target/corner to the existing deterministic approach-sideways-mark routine;
-8. richer moving-world updates → merge mission telemetry into persistent state without pretending it is visual evidence.
+1. `speak` → stationary TTS through BEEP's analog speaker;
+2. `gesture` → stopped-state whitelisted bridge action;
+3. `orient` → measured guarded heading change;
+4. `approach_target` → one short lease using fresh LiDAR/SLAM and current visual target;
+5. `inspect_target` → bounded viewpoint acquisition and geometry re-perception;
+6. `mark_target` → bind the stable target/corner to the existing deterministic approach-sideways-mark routine;
+7. semantic course updates → apply a prepared intent at a deterministic navigation boundary without routine gait stops.
 
-The next activation order remains stationary speech, stationary gesture, one supervised orient, one supervised approach, inspection geometry, and only then marking. Agency without staged embodiment is merely a more articulate accident.
+The next hardware activation is moving-camera validation during a short supervised mission, followed by stationary speech/gesture, supervised semantic course adjustment, approach, inspection geometry, and only then marking. Agency without staged embodiment is merely a more articulate accident.

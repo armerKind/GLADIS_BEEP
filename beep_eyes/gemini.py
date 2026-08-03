@@ -106,6 +106,9 @@ class GeminiVisionClient:
         prompt = (
             "You are the visual perception route for BEEP, a quadruped robot. "
             "The first image is a chronological contact sheet; the second is the latest full frame. "
+            "The metadata declares whether the camera was moving. During moving capture, expect viewpoint change, vibration, and occasional blur; "
+            "use agreement across the chronological panels and the sharpest supported evidence rather than rejecting the whole window. "
+            "Do not request a stop merely because one panel is blurred, and do not misclassify normal camera motion as an independently moving hazard. "
             "Describe only visually supported facts, compare panels for change, identify hazards including glass, "
             "and estimate each object's proximity as far, mid, near, or unknown. Report only visible geometry from the schema, "
             "including front/side faces and genuinely visible outward corners; do not infer a hidden corner. "

@@ -69,6 +69,17 @@ class ContactSheetTests(unittest.TestCase):
         self.assertEqual(frames[0].jpeg, jpeg("red"))
         self.assertEqual(frames[1].jpeg, jpeg("blue"))
 
+    def test_explicit_moving_capture_accepts_active_lease_and_nine_frames(self):
+        images = [jpeg("black")] + [jpeg((index * 20, 10, 10)) for index in range(9)]
+        moving = {"moving": True, "motion_lease_id": "motion-1"}
+        with patch("beep_eyes.contact_sheet.fetch_json", return_value=moving), \
+             patch("beep_eyes.contact_sheet.fetch_jpeg", side_effect=images) as fetch, \
+             patch("beep_eyes.contact_sheet.time.sleep"):
+            frames, status = capture_sequence("http://beep", 9, 0, allow_moving=True)
+        self.assertEqual(len(frames), 9)
+        self.assertEqual(fetch.call_count, 10)
+        self.assertTrue(status["moving"])
+
     def test_loads_stationary_replay_without_bridge(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

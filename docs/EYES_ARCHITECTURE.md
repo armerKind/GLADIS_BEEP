@@ -5,35 +5,38 @@
 Give GLADIS a closed perception loop through BEEP's front camera:
 
 ```text
-capture temporal evidence
+continuous camera capture during locomotion
+→ bounded timestamped frame ring
+→ newest chronological 4/6/9-frame panel
 → interpret scene and change
 → select an attention target
 → propose bounded heading, movement, gesture, or speech skills
 → apply deterministic policy and bridge safety gates
-→ act under an exclusive short lease
-→ stop and perceive again
+→ keep the exclusive mission lease moving under local LiDAR/SLAM guards
+→ merge completed semantic evidence into the persistent world model
+→ continue, adjust at a safe boundary, inspect deliberately, or abort for a real hazard
 ```
 
 The model proposes semantic skills. It never emits motor registers, velocities, arbitrary action IDs, or direct bridge commands. The deterministic bridge remains the sole motor and safety authority.
 
-## Current milestone: temporal shadow eyes
+## Current milestone: continuous moving temporal eyes
 
-Implemented in `beep_eyes/` and `scripts/run_beep_eyes.py`:
+Implemented in `beep_eyes/`, `scripts/run_beep_eyes.py`, and `scripts/run_moving_eyes.py`:
 
-1. Refuse capture while BEEP reports movement or an active lease.
-2. Discard one vendor-camera warm-up frame.
-3. Retry transient camera startup failures.
-4. Capture four strictly chronological JPEG frames, normally 1.5 seconds apart, with bounded response sizes.
-5. Record dimensions, brightness, contrast, edge variation, RGB means, and inter-frame difference.
-6. Render a labeled 2×2 contact sheet.
-7. Send the contact sheet and latest full-resolution frame to Gemini 3.5 Flash-Lite.
-8. Request a compact typed wire response and normalize it into the stricter local schema.
-9. Validate scene entities, hazards, attention, confidence, uncertainty, and at most three bounded skill proposals.
-10. Evaluate the proposals against deterministic status, LiDAR, SLAM, visual-hazard, rollout-mode, and confidence gates.
-11. Write observation, model, and policy artifacts under ignored `captures/eyes/` paths.
-12. Perform no action dispatch.
+1. Keep stationary capture fail-closed by default while allowing an explicit moving-evidence path.
+2. During an active motion lease, fetch frames without opening the vendor app-control socket or sending its hidden motor-stop packet.
+3. Capture continuously at approximately 3 FPS into a thread-safe bounded ring independently of Gemini inference.
+4. Build newest chronological panels of exactly 4, 6, or 9 frames; nine is the default for motion-blur redundancy.
+5. Retain blurred frames as uncertainty so useful neighboring panels can still support perception.
+6. Record image quality, timestamps, inter-frame difference, and per-frame motion context.
+7. Render labeled 2×2, 3×2, or 3×3 sheets and include the latest full-resolution frame.
+8. Permit one Gemini request at a time while capture continues; after completion, supersede stale pending evidence with the newest ring window.
+9. Validate the typed response, update the persistent world model, and prepare the next semantic decision while locomotion continues.
+10. Apply deterministic LiDAR, SLAM, visual-hazard, rollout-mode, and confidence policy gates.
+11. Write observation, model, policy, and semantic artifacts under ignored `captures/eyes/` paths.
+12. Perform no direct motor dispatch from the moving-eyes process.
 
-The contact sheet gives temporal context cheaply; the latest frame preserves detail that would otherwise be reduced by panel layout. Minimal model thinking is preferred for low-latency scene routing.
+The panel gives temporal context and blur tolerance cheaply; the latest frame preserves detail that would otherwise be reduced by layout. Ordinary blur or one failed frame is not a stop condition. LiDAR collision response remains local and much faster than model inference.
 
 ## Typed model output
 
@@ -77,9 +80,10 @@ People and objects must have unique IDs. A selected person/object target must re
 
 ### `supervised`
 
-- Policy may mark bounded movement eligible only with fresh complete LiDAR sectors, sufficient clearance, usable SLAM, no active lease, adequate model confidence, and no relevant visual hazard.
+- A stationary proposal may begin a bounded motion lease only with fresh complete LiDAR sectors, sufficient clearance, usable SLAM, no conflicting lease, adequate confidence, and no relevant visual hazard.
+- During an existing autonomous mission, moving visual evidence updates semantic context and plans ahead; it does not inject raw motor commands into the active controller.
 - Policy eligibility is not execution.
-- A future executor must acquire one immutable bridge lease, revalidate immediately, run one skill, stop, and re-perceive.
+- A future course adapter may update semantic intent only at a deterministic safe boundary; ordinary perception continues without stopping the active gait.
 
 ## Glass and visual safety
 
@@ -112,6 +116,20 @@ python3 scripts/run_beep_eyes.py \
   --hermes-home "$HOME/.hermes/profiles/sol" \
   --mode shadow
 ```
+
+Attach continuous nine-frame perception to an already active mission:
+
+```bash
+HERMES_HOME="$HOME/.hermes/profiles/sol" \
+PYTHONPATH="$PWD:$HOME/.hermes/hermes-agent" \
+python3 scripts/run_moving_eyes.py \
+  --base-url http://192.168.8.88:8766 \
+  --panel 9 --fps 3 --duration 190 \
+  --credential-source hermes \
+  --hermes-home "$HOME/.hermes/profiles/sol"
+```
+
+The moving runner requires an active asynchronous mission unless `--allow-no-mission` is supplied for a bench test. It observes and plans but never owns or dispatches the motors.
 
 Fixture-only development needs no robot and no model credential:
 
@@ -159,10 +177,10 @@ At a hardware gate GLADIS should state exactly what must be powered, the expecte
 3. **Persistent scene tracker** — track packet-local entities and attention across cycles.
 4. **Stationary social loop** — supervised speech and one whitelisted gesture while navigation is stopped.
 5. **Visual heading proposals** — compare against LiDAR sectors and SLAM, still shadow-only.
-6. **Single bounded orient skill** — supervised lease, stop, re-perceive.
-7. **Single bounded approach/retreat skill** — supervised and fail-closed.
-8. **Repeated perceive–act loop** — one skill per cycle, immediate stop and revalidation.
-9. **Longer embodied sessions** — only after measured reliability, cancellation, connectivity, and human-stop tests.
+6. **Continuous moving temporal panels** — current offline implementation; verify 4/6/9 quality and latency on hardware.
+7. **Single bounded orient and approach skills** — supervised and fail-closed when a deliberate viewpoint change is required.
+8. **Fluid perceive–plan–move loop** — camera and inference continue during local navigation; routine perception does not stop gait.
+9. **Longer embodied sessions** — only after measured reliability, cancellation, connectivity, moving-camera, and human-stop tests.
 
 ## Proven baseline
 
