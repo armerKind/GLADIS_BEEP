@@ -154,7 +154,7 @@ else:
         'BEEP_MOTOR_BACKEND': 'sdk',
         'BEEP_SDK_STEP': '10',
         'BEEP_SDK_GAIT': 'walk',
-        'BEEP_SDK_PACE': 'slow',
+        'BEEP_SDK_PACE': 'normal',
         'BEEP_MAP_DIR': '/home/pi/beep_bridge/maps',
         'BEEP_SDK_FORWARD_M_PER_S': '0.045',
         'BEEP_SDK_STRAFE_M_PER_S': '0.035',

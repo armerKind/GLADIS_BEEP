@@ -118,6 +118,8 @@ class FrontierIntegrationTests(unittest.TestCase):
             with patch.object(bridge, "sdk_init", return_value=dog):
                 bridge.sdk_curve("right", forward_step=20, yaw_step=30)
                 bridge.sdk_straighten()
+            dog.gait_type.assert_called_once_with(bridge.SDK_GAIT)
+            dog.pace.assert_called_once_with(bridge.SDK_PACE)
             dog.move_x.assert_called_once_with(20)
             self.assertEqual(dog.turn.call_args_list, [call(-30), call(0)])
             self.assertTrue(bridge.state["moving"])

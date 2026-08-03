@@ -182,6 +182,8 @@ class MarkObjectPlanTests(unittest.TestCase):
         calls = []
 
         class FakeDog:
+            def gait_type(self, value): calls.append(("gait_type", value))
+            def pace(self, value): calls.append(("pace", value))
             def move_x(self, value): calls.append(("move_x", value))
             def move_y(self, value): calls.append(("move_y", value))
             def turn(self, value): calls.append(("turn", value))
@@ -193,7 +195,9 @@ class MarkObjectPlanTests(unittest.TestCase):
             bridge.sdk_send("turnleft", step=10)
 
         self.assertEqual(calls, [
+            ("gait_type", bridge.SDK_GAIT), ("pace", bridge.SDK_PACE),
             ("move_y", 0), ("turn", 0), ("forward", 10),
+            ("gait_type", bridge.SDK_GAIT), ("pace", bridge.SDK_PACE),
             ("move_x", 0), ("move_y", 0), ("turnleft", 10),
         ])
 

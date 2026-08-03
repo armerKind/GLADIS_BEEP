@@ -59,7 +59,7 @@ CMD_PAYLOAD = {
 
 SDK_STEP_DEFAULT = int(os.environ.get("BEEP_SDK_STEP", "10"))
 SDK_GAIT = os.environ.get("BEEP_SDK_GAIT", "walk")
-SDK_PACE = os.environ.get("BEEP_SDK_PACE", "slow")
+SDK_PACE = os.environ.get("BEEP_SDK_PACE", "normal")
 MOTOR_BACKEND = os.environ.get("BEEP_MOTOR_BACKEND", "sdk")  # sdk or app
 MAP_DIR = Path(os.environ.get("BEEP_MAP_DIR", "/home/pi/beep_bridge/maps"))
 MAP_RES_M = float(os.environ.get("BEEP_MAP_RES_M", "0.05"))
@@ -103,7 +103,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.16.2-neutralized-motion-axes",
+    "version": "0.16.3-normal-pace",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -273,6 +273,23 @@ def app_send(action: str):
     remember("app_send", action=action)
 
 
+def sdk_apply_motion_profile(g=None):
+    """Reapply configured gait and pace before newly directed motion.
+
+    Vendor actions may overwrite persistent gait/pace registers. Reapplying
+    the profile here makes post-gesture speed deterministic.
+    """
+    if SDK_GAIT not in ("trot", "walk", "high_walk"):
+        raise ValueError(f"unsupported SDK gait {SDK_GAIT!r}")
+    if SDK_PACE not in ("normal", "slow", "high"):
+        raise ValueError(f"unsupported SDK pace {SDK_PACE!r}")
+    g = sdk_init() if g is None else g
+    g.gait_type(SDK_GAIT)
+    g.pace(SDK_PACE)
+    remember("sdk_motion_profile", gait=SDK_GAIT, pace=SDK_PACE)
+    return g
+
+
 def sdk_init():
     global sdk_dog, sdk_error
     if sdk_dog is not None:
@@ -280,14 +297,7 @@ def sdk_init():
     try:
         import DOGZILLALib as dog
         sdk_dog = dog.DOGZILLA()
-        try:
-            sdk_dog.gait_type(SDK_GAIT)
-        except Exception:
-            pass
-        try:
-            sdk_dog.pace(SDK_PACE)
-        except Exception:
-            pass
+        sdk_apply_motion_profile(sdk_dog)
         sdk_error = None
         remember("sdk_init", gait=SDK_GAIT, pace=SDK_PACE)
         return sdk_dog
@@ -314,14 +324,17 @@ def sdk_send(action: str, step=None):
         if errors:
             raise RuntimeError("SDK stop/axis neutralization failed: " + "; ".join(errors))
     elif action in ("forward", "back"):
+        sdk_apply_motion_profile(g)
         g.move_y(0)
         g.turn(0)
         getattr(g, action)(step)
     elif action in ("left", "right"):
+        sdk_apply_motion_profile(g)
         g.move_x(0)
         g.turn(0)
         getattr(g, action)(step)
     elif action in ("turnleft", "turnright"):
+        sdk_apply_motion_profile(g)
         g.move_x(0)
         g.move_y(0)
         getattr(g, action)(step)
@@ -344,6 +357,7 @@ def sdk_curve(direction, forward_step=20, yaw_step=30):
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
     g = sdk_init()
+    sdk_apply_motion_profile(g)
     g.move_x(abs(int(forward_step)))
     signed_yaw = abs(int(yaw_step)) if direction == "left" else -abs(int(yaw_step))
     g.turn(signed_yaw)
