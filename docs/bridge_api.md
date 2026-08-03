@@ -43,7 +43,7 @@ Cartographer's five-second stationary motion filter can make the generic `slam.a
 | Endpoint | Purpose |
 |---|---|
 | `GET /scan` | LiDAR sector minima, scan age, and scan count |
-| `GET /frame.jpg` | Single JPEG from Yahboom MJPEG stream |
+| `GET /frame.jpg` | Single JPEG; active leases bypass app-control preparation so capture cannot inject a motor stop |
 | `GET /camera.jpg` | Camera alias |
 | `GET /observe` | Status plus legacy map and camera metadata |
 | `GET /local_map` | Robot-frame local safety-map summary |

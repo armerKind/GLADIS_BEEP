@@ -44,6 +44,21 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.motion_lease_watchdog(lease)
         stop.assert_not_called()
 
+    def test_camera_capture_during_motion_never_sends_app_stop(self):
+        jpeg = b"\xff\xd8moving-frame\xff\xd9"
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _size): return jpeg
+
+        with patch.object(bridge, "active_motion_lease", return_value=object()), \
+             patch.object(bridge.socket, "create_connection") as control, \
+             patch.object(bridge.urllib.request, "urlopen", return_value=Response()):
+            frame = bridge.capture_frame(timeout=1)
+        self.assertEqual(frame, jpeg)
+        control.assert_not_called()
+
     def test_async_mission_returns_while_worker_moves_and_can_be_cancelled(self):
         entered = threading.Event()
         release = threading.Event()

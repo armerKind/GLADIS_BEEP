@@ -103,7 +103,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.17.0-async-mission",
+    "version": "0.17.1-moving-eyes",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -819,25 +819,30 @@ def capture_frame(timeout=4.0, max_bytes=1_500_000):
     """Return one JPEG from the MJPEG stream.
 
     The Yahboom video server may connect but emit no bytes unless the app
-    control state is Standard/Fullscreen. Keeping the app socket open while
-    reading the first MJPEG frame is more reliable than a one-shot command.
+    control state is Standard/Fullscreen. Stationary capture may prepare that
+    mode, but capture during any active motion lease must never touch the app
+    control socket because its preparation sequence includes a motor stop.
     """
     timeout = float(timeout)
     deadline = time.time() + timeout
     ctrl = None
-    try:
-        ctrl = socket.create_connection((HOST, APP_PORT), timeout=1.2)
-        ctrl.settimeout(0.25)
+    moving_capture = active_motion_lease() is not None
+    if moving_capture:
+        remember("moving_frame_requested")
+    else:
         try:
-            ctrl.recv(256)
-        except Exception:
-            pass
-        ctrl.sendall(pkt(0x0F, [0x01]))  # Standard/control mode
-        time.sleep(0.05)
-        ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
-        time.sleep(0.15)
-    except Exception as e:
-        remember("camera_standard_failed", error=repr(e))
+            ctrl = socket.create_connection((HOST, APP_PORT), timeout=1.2)
+            ctrl.settimeout(0.25)
+            try:
+                ctrl.recv(256)
+            except Exception:
+                pass
+            ctrl.sendall(pkt(0x0F, [0x01]))  # Standard/control mode
+            time.sleep(0.05)
+            ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
+            time.sleep(0.15)
+        except Exception as e:
+            remember("camera_standard_failed", error=repr(e))
 
     try:
         req = urllib.request.Request(CAMERA_URL, headers={"User-Agent": "beep-bridge/0.3"})
@@ -855,7 +860,7 @@ def capture_frame(timeout=4.0, max_bytes=1_500_000):
                     with state_lock:
                         state["last_frame_at"] = time.time()
                         state["last_frame_bytes"] = len(jpg)
-                    remember("frame", bytes=len(jpg))
+                    remember("frame", bytes=len(jpg), moving_capture=moving_capture)
                     return jpg
     finally:
         if ctrl is not None:
