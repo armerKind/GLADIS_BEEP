@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Reset BEEP's active Cartographer trajectory through its local Jupyter kernel."""
+"""Restart BEEP's LiDAR publisher, Cartographer stack, and bridge through Jupyter.
+
+BEEP's vendor image enables both YahboomStart and XGO_Start, which launch
+competing MS200 publishers on /dev/ttyAMA1. Keep YahboomStart authoritative and
+stop the duplicate before rebuilding SLAM state.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -21,16 +26,30 @@ async def reset_slam(session: requests.Session, xsrf: str) -> None:
     cookie = "; ".join(f"{c.name}={c.value}" for c in session.cookies)
     code = r'''
 import subprocess, time
-for services in (['beep-cartographer', 'beep-occupancy-grid'], ['beep-bridge']):
-    result = subprocess.run(['sudo', 'systemctl', 'restart', *services], text=True, capture_output=True, timeout=30)
-    print('restart', services, result.returncode, result.stderr.strip())
+steps = [
+    (['sudo', 'systemctl', 'stop', 'XGO_Start'], 2),
+    (['sudo', 'systemctl', 'restart', 'YahboomStart'], 7),
+    (['sudo', 'systemctl', 'restart', 'beep-cartographer', 'beep-occupancy-grid'], 4),
+    (['sudo', 'systemctl', 'restart', 'beep-bridge'], 3),
+]
+for command, pause_s in steps:
+    result = subprocess.run(command, text=True, capture_output=True, timeout=40)
+    print('step', command, result.returncode, result.stderr.strip())
     if result.returncode:
         raise SystemExit(result.returncode)
-    time.sleep(3)
-for service in ('beep-cartographer', 'beep-occupancy-grid', 'beep-bridge'):
+    time.sleep(pause_s)
+expected = {
+    'XGO_Start': 'inactive',
+    'YahboomStart': 'active',
+    'beep-cartographer': 'active',
+    'beep-occupancy-grid': 'active',
+    'beep-bridge': 'active',
+}
+for service, wanted in expected.items():
     result = subprocess.run(['systemctl', 'is-active', service], text=True, capture_output=True, timeout=5)
-    print(service, result.stdout.strip())
-    if result.stdout.strip() != 'active':
+    actual = result.stdout.strip()
+    print(service, actual)
+    if actual != wanted:
         raise SystemExit(1)
 '''
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"

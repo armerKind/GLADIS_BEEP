@@ -17,10 +17,13 @@ BEEP normally runs:
 beep-bridge.service
 beep-cartographer.service
 beep-occupancy-grid.service
+YahboomStart.service
 tailscaled.service
 ```
 
 The repository units are in `systemd/`. The bridge service sources ROS 2 Foxy and the Cartographer overlay, uses `ROS_DOMAIN_ID=16`, selects the SDK motor backend, and restarts automatically.
+
+`YahboomStart.service` is the authoritative vendor launch for the MS200 LiDAR on `/dev/ttyAMA1`. Keep the redundant `XGO_Start.service` disabled: both vendor units launch `oradar_scan`, and two publishers competing for the same serial port can leave `/scan` advertised but silent.
 
 ## Jupyter is an onboard maintenance path
 
@@ -121,7 +124,7 @@ Use this after moving BEEP to a different room or after raw localization/map cor
 python3 scripts/jupyter_reset_slam.py
 ```
 
-The helper restarts Cartographer, occupancy-grid publication, and the bridge. It discards the active unsaved trajectory. Verify a fresh pose near the new origin and a fresh map before autonomous movement.
+The helper stops the duplicate `XGO_Start` launch, restarts the authoritative `YahboomStart` LiDAR publisher, then restarts Cartographer, occupancy-grid publication, and the bridge. It discards the active unsaved trajectory. Verify numeric LiDAR sectors, a fresh guarded pose near the new origin, and a fresh non-empty map before autonomous movement.
 
 ### Pose freshness nuance
 
