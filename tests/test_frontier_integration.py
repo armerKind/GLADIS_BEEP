@@ -1,6 +1,10 @@
 import importlib.util
+import json
 from pathlib import Path
+import threading
+import time
 import unittest
+import urllib.request
 from unittest.mock import MagicMock, call, patch
 
 from beep_bridge.frontier_planner import OccupancyGrid
@@ -16,9 +20,121 @@ SPEC.loader.exec_module(bridge)
 class FrontierIntegrationTests(unittest.TestCase):
     def setUp(self):
         bridge._reset_motion_state_for_tests()
+        bridge._reset_mission_state_for_tests()
 
     def tearDown(self):
         bridge._reset_motion_state_for_tests()
+        bridge._reset_mission_state_for_tests()
+
+    def test_independent_watchdog_stops_exact_expired_lease(self):
+        lease = bridge.MotionLease("watchdog-1", "unit_test", time.monotonic() - 0.01)
+        with bridge.motion_owner_lock:
+            setattr(bridge, "_active_motion_lease", lease)
+        with patch.object(bridge, "stop_burst", return_value=None) as stop:
+            bridge.motion_lease_watchdog(lease)
+
+        self.assertTrue(lease.cancel_event.is_set())
+        self.assertTrue(bridge.state["motion_cancelled"])
+        stop.assert_called_once_with(3)
+
+    def test_watchdog_never_stops_an_ended_lease(self):
+        lease = bridge.MotionLease("watchdog-old", "unit_test", time.monotonic() - 0.01)
+        lease.ended_event.set()
+        with patch.object(bridge, "stop_burst", return_value=None) as stop:
+            bridge.motion_lease_watchdog(lease)
+        stop.assert_not_called()
+
+    def test_async_mission_returns_while_worker_moves_and_can_be_cancelled(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fake_walk(**_kwargs):
+            entered.set()
+            release.wait(2.0)
+            cancelled = bridge.motion_is_cancelled()
+            return {"ok": not cancelled, "reason": "motion_cancelled" if cancelled else "max_duration", "elapsed_s": 0.1}
+
+        with patch.object(bridge, "snapshot", return_value={"scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True}}), \
+             patch.object(bridge, "scan_ok", return_value=True), \
+             patch.object(bridge, "slam_ok", return_value=True), \
+             patch.object(bridge, "lidar_walk", side_effect=fake_walk), \
+             patch.object(bridge, "stop_burst", return_value=None):
+            accepted = bridge.start_autonomous_mission("coverage", 90, save=False)
+            self.assertTrue(accepted["accepted"])
+            self.assertTrue(entered.wait(0.5))
+            running = bridge.mission_snapshot()
+            self.assertEqual(running["state"], "running")
+            self.assertEqual(running["duration_s"], 90.0)
+            self.assertIsNotNone(bridge.active_motion_lease())
+            with bridge.mission_lock:
+                thread = bridge._active_mission["thread"]
+
+            stale = bridge.cancel_autonomous_mission("mission-stale")
+            self.assertFalse(stale["cancelled"])
+            self.assertEqual(stale["reason"], "mission_id_mismatch")
+            self.assertFalse(bridge.active_motion_lease().cancel_event.is_set())
+            cancelled = bridge.cancel_autonomous_mission(running["id"])
+            self.assertTrue(cancelled["cancelled"])
+            release.set()
+            thread.join(1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(bridge.mission_snapshot()["state"], "cancelled")
+        self.assertIsNone(bridge.active_motion_lease())
+
+    def test_friday_demo_endpoint_remains_available(self):
+        self.assertIn('p.path in ("/lidar_walk", "/demo_walk")', BRIDGE_PATH.read_text())
+
+    def test_http_mission_control_remains_responsive_while_worker_runs(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fake_walk(**_kwargs):
+            entered.set()
+            release.wait(2.0)
+            cancelled = bridge.motion_is_cancelled()
+            return {"ok": not cancelled, "reason": "motion_cancelled" if cancelled else "max_duration", "elapsed_s": 0.1}
+
+        server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def request(path, body=None):
+            data = None if body is None else json.dumps(body).encode()
+            req = urllib.request.Request(base + path, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=1.0) as response:
+                return response.status, json.load(response)
+
+        try:
+            with patch.object(bridge, "snapshot", return_value={"scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True}}), \
+                 patch.object(bridge, "scan_ok", return_value=True), \
+                 patch.object(bridge, "slam_ok", return_value=True), \
+                 patch.object(bridge, "lidar_walk", side_effect=fake_walk), \
+                 patch.object(bridge, "stop_burst", return_value=None):
+                started_at = time.monotonic()
+                code, accepted = request("/mission/start", {"mode": "coverage", "duration_s": 90})
+                self.assertLess(time.monotonic() - started_at, 0.5)
+                self.assertEqual(code, 202)
+                self.assertTrue(accepted["accepted"])
+                self.assertTrue(entered.wait(0.5))
+
+                code, status = request("/mission")
+                self.assertEqual(code, 200)
+                self.assertEqual(status["mission"]["state"], "running")
+                code, cancelled = request("/mission/cancel", {"mission_id": status["mission"]["id"]})
+                self.assertEqual(code, 200)
+                self.assertTrue(cancelled["cancelled"])
+                release.set()
+                with bridge.mission_lock:
+                    worker = bridge._active_mission["thread"]
+                worker.join(1.0)
+                self.assertFalse(worker.is_alive())
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(1.0)
 
     def test_request_stop_cancels_owned_lease_before_motor_stop(self):
         observations = []

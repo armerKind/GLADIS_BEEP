@@ -201,6 +201,38 @@ Behavior:
 
 A completion reason of `coverage_complete_or_no_reachable_frontiers` must be read with the trace. If map updates eliminate routes during turns and no forward motion occurred, it means “no currently reachable planner frontier,” not “the robot traversed the whole room.”
 
+### Asynchronous autonomous mission
+
+```text
+POST /mission/start
+GET  /mission
+POST /mission/cancel
+```
+
+`POST /mission/start` accepts JSON such as:
+
+```json
+{
+  "mode": "coverage",
+  "duration_s": 190,
+  "min_duration": 190,
+  "coverage_window": 45,
+  "min_growth_cells": 150,
+  "save": false
+}
+```
+
+The bridge validates fresh LiDAR and, for `coverage`, usable guarded SLAM before acquiring an immutable exclusive lease. It then returns HTTP `202` with a mission ID while a dedicated onboard worker runs the fluent controller. `GET /mission` and ordinary `/status` requests remain responsive during locomotion, allowing the middle layer to reason, inspect SLAM/LiDAR progress, or cancel without waiting for a long navigation response.
+
+Only one asynchronous or synchronous motion owner may exist. Conflicts return HTTP `409`; they never queue. Cancellation may include the current `mission_id`, preventing a stale planner decision from cancelling a newer mission. Each lease also has an independent deadline watchdog that latches cancellation and attempts repeated SDK stops even if the movement worker stalls.
+
+Modes:
+
+- `coverage`: fluent local LiDAR motion plus guarded-SLAM map/pose and coverage checks, maximum 600 seconds;
+- `local`: fluent local LiDAR motion without a global-map claim, maximum 180 seconds.
+
+The synchronous `/demo_walk`, `/lidar_walk`, `/coverage_explore`, and Friday presentation coordinator remain available unchanged for rehearsal and compatibility.
+
 ### Local LiDAR walk
 
 ```text

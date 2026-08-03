@@ -103,7 +103,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.16.3-normal-pace",
+    "version": "0.17.0-async-mission",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -128,6 +128,10 @@ slam_grid = None
 room_map = None
 active_explore = None
 scan_match_ref = None
+mission_lock = threading.RLock()
+_active_mission = None
+_latest_mission = None
+_mission_sequence = 0
 
 
 def remember(event, **data):
@@ -147,6 +151,7 @@ class MotionLease:
         self.source = str(source)
         self.deadline = float(deadline)
         self.cancel_event = threading.Event()
+        self.ended_event = threading.Event()
         self.started_at = time.monotonic()
         self.ended_at = None
 
@@ -154,6 +159,28 @@ class MotionLease:
 def active_motion_lease():
     with motion_owner_lock:
         return _active_motion_lease
+
+
+def motion_lease_watchdog(lease):
+    """Enforce the exact lease deadline independently of its worker thread."""
+    while not lease.ended_event.is_set() and not lease.cancel_event.is_set():
+        remaining = lease.deadline - time.monotonic()
+        if remaining > 0:
+            lease.ended_event.wait(min(0.10, remaining))
+            continue
+        with motion_owner_lock:
+            owns_motion = _active_motion_lease is lease
+        if not owns_motion or lease.ended_event.is_set():
+            return
+        lease.cancel_event.set()
+        with state_lock:
+            state["motion_cancelled"] = True
+        remember("motion_lease_watchdog_deadline", lease_id=lease.lease_id, source=lease.source)
+        try:
+            stop_burst(3)
+        except Exception as exc:
+            remember("motion_lease_watchdog_stop_failed", lease_id=lease.lease_id, error=repr(exc))
+        return
 
 
 def begin_motion(source="api", max_duration=600.0):
@@ -174,6 +201,8 @@ def begin_motion(source="api", max_duration=600.0):
         state["motion_lease_id"] = lease.lease_id
         state["motion_lease_source"] = lease.source
     remember("motion_lease_started", source=lease.source, lease_id=lease.lease_id, max_duration_s=max_duration)
+    threading.Thread(target=motion_lease_watchdog, args=(lease,), daemon=True,
+                     name=f"beep-motion-watchdog-{lease.lease_id}").start()
     return lease
 
 
@@ -183,6 +212,7 @@ def end_motion(lease):
     if lease is None:
         return
     lease.ended_at = time.monotonic()
+    lease.ended_event.set()
     with motion_owner_lock:
         if _active_motion_lease is lease:
             _active_motion_lease = None
@@ -222,6 +252,7 @@ def _reset_motion_state_for_tests():
     with motion_owner_lock:
         if _active_motion_lease is not None:
             _active_motion_lease.cancel_event.set()
+            _active_motion_lease.ended_event.set()
         _active_motion_lease = None
     if hasattr(motion_context, "lease"):
         del motion_context.lease
@@ -229,6 +260,15 @@ def _reset_motion_state_for_tests():
         state["motion_cancelled"] = False
         state["motion_lease_id"] = None
         state["motion_lease_source"] = None
+
+
+def _reset_mission_state_for_tests():
+    """Test isolation helper for completed mocked mission workers."""
+    global _active_mission, _latest_mission, _mission_sequence
+    with mission_lock:
+        _active_mission = None
+        _latest_mission = None
+        _mission_sequence = 0
 
 
 def wait_motion(duration, poll_s=0.05):
@@ -1500,6 +1540,128 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     return result
 
 
+def mission_snapshot():
+    """Return the active mission, or the most recently completed mission."""
+    with mission_lock:
+        mission = _active_mission or _latest_mission
+        if mission is None:
+            return None
+        value = {key: item for key, item in mission.items() if key not in ("thread", "lease")}
+    now = time.time()
+    started_at = value.get("started_at")
+    finished_at = value.get("finished_at")
+    value["elapsed_s"] = None if started_at is None else round((finished_at or now) - float(started_at), 2)
+    value["remaining_s"] = None if started_at is None or finished_at is not None else round(max(0.0, float(value["duration_s"]) - (now - float(started_at))), 2)
+    with state_lock:
+        value["motion"] = {
+            "moving": bool(state.get("moving")),
+            "last_command": state.get("last_command"),
+            "last_command_at": state.get("last_command_at"),
+        }
+    return value
+
+
+def _autonomous_mission_worker(mission, lease, options):
+    global _active_mission, _latest_mission
+    motion_context.lease = lease
+    with mission_lock:
+        mission["state"] = "running"
+        mission["started_at"] = time.time()
+    remember("autonomous_mission_started", mission_id=mission["id"], mode=mission["mode"], lease_id=lease.lease_id)
+    result = None
+    error = None
+    try:
+        result = lidar_walk(
+            max_duration=mission["duration_s"],
+            save=bool(options.get("save", False)),
+            coverage_goal=mission["mode"] == "coverage",
+            min_duration=float(options.get("min_duration", mission["duration_s"])),
+            coverage_window=float(options.get("coverage_window", 45.0)),
+            min_growth_cells=int(options.get("min_growth_cells", 150)),
+        )
+    except Exception as exc:
+        error = repr(exc)
+        remember("autonomous_mission_exception", mission_id=mission["id"], error=error)
+    finally:
+        try:
+            stop_burst(3)
+        except Exception as exc:
+            error = error or ("final_stop_failed:" + repr(exc))
+        end_motion(lease)
+        if getattr(motion_context, "lease", None) is lease:
+            del motion_context.lease
+        with mission_lock:
+            mission["finished_at"] = time.time()
+            mission["result"] = result
+            mission["error"] = error
+            if lease.cancel_event.is_set() or (result or {}).get("reason") == "motion_cancelled":
+                mission["state"] = "cancelled"
+            elif error is not None or not bool((result or {}).get("ok")):
+                mission["state"] = "failed"
+            else:
+                mission["state"] = "completed"
+            if _active_mission is mission:
+                _active_mission = None
+            _latest_mission = mission
+        remember("autonomous_mission_finished", mission_id=mission["id"], state=mission["state"],
+                 reason=(result or {}).get("reason"), error=error)
+
+
+def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
+    """Start one fluent navigation mission and return without blocking HTTP."""
+    global _active_mission, _mission_sequence
+    mode = str(mode).strip().lower()
+    if mode not in ("coverage", "local"):
+        raise ValueError("mission mode must be coverage or local")
+    duration_s = min(max(float(duration_s), 5.0), 600.0 if mode == "coverage" else 180.0)
+    initial = snapshot()
+    if not scan_ok(initial):
+        return {"ok": False, "reason": "scan_stale_or_missing_before_start", "status": initial}
+    if mode == "coverage" and not slam_ok(initial):
+        return {"ok": False, "reason": "slam_unusable_before_start", "status": initial}
+    with mission_lock:
+        if _active_mission is not None:
+            return {"ok": False, "busy": True, "reason": "autonomous_mission_busy", "mission": mission_snapshot()}
+        lease = begin_motion("autonomous_mission", max_duration=duration_s + 2.0)
+        if getattr(motion_context, "lease", None) is lease:
+            del motion_context.lease
+        _mission_sequence += 1
+        mission = {
+            "id": f"mission-{_mission_sequence}",
+            "mode": mode,
+            "state": "starting",
+            "duration_s": duration_s,
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+            "lease_id": lease.lease_id,
+            "result": None,
+            "error": None,
+            "options": dict(options),
+        }
+        thread = threading.Thread(target=_autonomous_mission_worker, args=(mission, lease, dict(options)),
+                                  daemon=True, name=f"beep-{mission['id']}")
+        mission["thread"] = thread
+        mission["lease"] = lease
+        _active_mission = mission
+        thread.start()
+    return {"ok": True, "accepted": True, "mission": mission_snapshot(), "status": snapshot()}
+
+
+def cancel_autonomous_mission(mission_id=None, source="mission_cancel"):
+    with mission_lock:
+        mission = _active_mission
+        if mission is None:
+            return {"ok": True, "cancelled": False, "reason": "no_active_mission", "mission": mission_snapshot()}
+        if mission_id not in (None, "", mission["id"]):
+            return {"ok": False, "cancelled": False, "reason": "mission_id_mismatch", "mission": mission_snapshot()}
+        lease = active_motion_lease()
+        if lease is None or lease.lease_id != mission["lease_id"]:
+            return {"ok": True, "cancelled": False, "reason": "mission_finishing", "mission": mission_snapshot()}
+    error = request_stop(source)
+    return {"ok": error is None, "cancelled": True, "error": error, "mission": mission_snapshot(), "status": snapshot()}
+
+
 def start_or_continue_fluent_forward(current_action, step):
     """Start the gait once; later planning windows leave it running uninterrupted."""
     if current_action == "forward":
@@ -2137,6 +2299,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(snapshot(full=(qs.get("full") or ["0"])[0] == "1"))
             elif p.path == "/last_run":
                 self.send_json({"last_run": last_run})
+            elif p.path == "/mission":
+                self.send_json({"mission": mission_snapshot(), "status": snapshot()})
             elif p.path == "/config":
                 self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
@@ -2144,6 +2308,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
+                                "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "modes": ["coverage", "local"]},
                                 "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
@@ -2250,7 +2415,7 @@ class Handler(BaseHTTPRequestHandler):
                     save=(qs.get("save") or ["1"])[0] != "0", dry_run=dry)
                 self.send_json(callback() if dry else run_owned_motion("http_get_frontier_explore", callback, max_duration=duration + 2.0))
             else:
-                self.send_json({"error": "not found", "paths": ["/health", "/status", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/slam_turn", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+                self.send_json({"error": "not found", "paths": ["/health", "/status", "/mission", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/slam_turn", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
         except MotionBusy as e:
             lease = active_motion_lease()
             self.send_json({"ok": False, "error": str(e), "busy": True,
@@ -2271,6 +2436,19 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == "/stop":
                 err = request_stop("http_post")
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
+            elif p.path == "/mission/start":
+                result = start_autonomous_mission(
+                    mode=body.get("mode", "coverage"),
+                    duration_s=body.get("duration_s", body.get("duration", 180.0)),
+                    save=bool(body.get("save", False)),
+                    min_duration=body.get("min_duration", body.get("duration_s", body.get("duration", 180.0))),
+                    coverage_window=body.get("coverage_window", 45.0),
+                    min_growth_cells=body.get("min_growth_cells", 150),
+                )
+                self.send_json(result, 202 if result.get("accepted") else (409 if result.get("busy") else 412))
+            elif p.path == "/mission/cancel":
+                result = cancel_autonomous_mission(body.get("mission_id"), source="http_mission_cancel")
+                self.send_json(result, 200 if result.get("ok") else 409)
             elif p.path == "/move":
                 action = body.get("action", "stop")
                 duration = float(body.get("duration", 0.2))
