@@ -111,9 +111,17 @@ The first autonomous live scene contained a centered white box:
 
 BEEP remained stopped because live LiDAR and SLAM were unavailable. That is an autonomous body decision, not a request for Max to decide the experiment.
 
-## Remaining body adapters
+## Body-adapter state
 
-The semantic middle layer intentionally precedes execution. Required adapters are:
+`BridgeBodyAdapter` now implements three deterministic mappings:
+
+- `explore` → asynchronous `POST /mission/start` in guarded coverage mode;
+- `stop` → exact mission cancellation and repeated onboard stop;
+- `observe` → stationary bridge observation.
+
+Autonomous `explore` defaults to a 90-second fluent mission. Starting it returns immediately, so the middle layer can continue reasoning from persistent world state and live `/mission` plus LiDAR/SLAM telemetry while BEEP moves. Camera temporal capture remains stationary-only; Gemini is not used as a delayed collision reflex. The onboard controller owns approximately 80 ms obstacle supervision, fluent gait, lease enforcement, and final stop.
+
+Remaining adapters are:
 
 1. `observe` → temporal eyes capture/replay loop;
 2. `speak` → stationary TTS through BEEP's analog speaker;
@@ -122,7 +130,6 @@ The semantic middle layer intentionally precedes execution. Required adapters ar
 5. `approach_target` → one short lease using fresh LiDAR/SLAM and current visual target;
 6. `inspect_target` → bounded viewpoint acquisition, stop, and geometry re-perception;
 7. `mark_target` → bind the stable target/corner to the existing deterministic approach-sideways-mark routine;
-8. `explore` → existing guarded exploration under a short lease;
-9. `stop` → exact-owner cancellation and repeated motor stop.
+8. richer moving-world updates → merge mission telemetry into persistent state without pretending it is visual evidence.
 
 The next activation order remains stationary speech, stationary gesture, one supervised orient, one supervised approach, inspection geometry, and only then marking. Agency without staged embodiment is merely a more articulate accident.

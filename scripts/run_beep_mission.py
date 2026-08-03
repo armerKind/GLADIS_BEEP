@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay perceptions through the persistent embodied executive without dispatch."""
+"""Run perceptions through the embodied executive with optional typed dispatch."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 
-from beep_agent import EmbodiedExecutive, EmbodiedGoal, GoalArbiter, WorldModel
+from beep_agent import BridgeBodyAdapter, EmbodiedExecutive, EmbodiedGoal, GoalArbiter, WorldModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,17 +17,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target", default="box")
     parser.add_argument("--mark", action="store_true")
     parser.add_argument("--mode", choices=("shadow", "stationary", "supervised"), default="shadow")
+    parser.add_argument("--dispatch", action="store_true", help="dispatch the final typed skill; requires --mode supervised")
+    parser.add_argument("--base-url", default="http://192.168.8.88:8766")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.dispatch and args.mode != "supervised":
+        raise SystemExit("--dispatch requires --mode supervised")
     world = WorldModel()
     fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
     arbiter = GoalArbiter()
     executive = EmbodiedExecutive(world, fixed_goal) if fixed_goal else None
     trace = []
+    final_decision = None
     for sequence, path in enumerate(args.responses, 1):
         perception = json.loads(path.read_text())
         snapshot = world.update(perception, observed_at=time.time(), packet_id=f"replay-{sequence}:{path.name}")
@@ -36,15 +41,21 @@ def main() -> int:
             executive = EmbodiedExecutive(world, selection.goal)
         assert executive is not None
         decision = executive.decide(rollout_mode=args.mode)
+        final_decision = decision
         trace.append({"source": str(path), "world": snapshot, "goal_selection": None if selection is None else {"goal": selection.goal.name, "drive": selection.drive, "rationale": selection.rationale}, "decision": decision.to_dict(), "dispatch_performed": False})
-    result = {"goal": trace[-1]["decision"]["goal"], "target_query": args.target, "mode": args.mode, "trace": trace, "final_world": world.snapshot(), "dispatch_performed": False}
+    dispatch_result = None
+    if args.dispatch:
+        assert final_decision is not None
+        dispatch_result = BridgeBodyAdapter(args.base_url).dispatch(final_decision.skill_call, rollout_mode=args.mode).to_dict()
+    result = {"goal": trace[-1]["decision"]["goal"], "target_query": args.target, "mode": args.mode, "trace": trace, "final_world": world.snapshot(), "dispatch_performed": bool(dispatch_result and dispatch_result["dispatched"]), "dispatch_result": dispatch_result}
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True))
     print(json.dumps({
         "ok": True, "goal": result["goal"], "target_query": args.target,
         "observations": len(trace), "next_skill": trace[-1]["decision"]["skill_call"]["name"],
-        "target_id": trace[-1]["decision"]["target_id"], "dispatch_performed": False,
+        "target_id": trace[-1]["decision"]["target_id"], "dispatch_performed": result["dispatch_performed"],
+        "dispatch_result": dispatch_result,
     }, sort_keys=True))
     return 0
 

@@ -71,6 +71,13 @@ class ExecutiveTests(unittest.TestCase):
         self.assertEqual(decision.skill_call.name, "observe")
         self.assertEqual(decision.rationale, "acquire_initial_world_state")
 
+    def test_explore_goal_starts_longer_continuous_reasoning_window(self):
+        self.world.update(self.response, observed_at=1.0, packet_id="known-scene")
+        decision = EmbodiedExecutive(self.world, EmbodiedGoal("explore", "")).decide(rollout_mode="supervised")
+        self.assertEqual(decision.skill_call.name, "explore")
+        self.assertEqual(decision.skill_call.arguments["duration_s"], 90)
+        self.assertIn("planning ahead", decision.skill_call.arguments["reason"])
+
 
 class SkillTests(unittest.TestCase):
     def test_rejects_raw_motor_function(self):

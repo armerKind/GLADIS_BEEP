@@ -74,6 +74,9 @@ maps/              placeholder for ignored generated bridge maps
 ```text
 GET /health                     liveness plus nested runtime status snapshot
 GET /stop                       repeated SDK stop attempts plus app-stop telemetry
+POST /mission/start             begin asynchronous fluent autonomous navigation
+GET /mission                    inspect active or latest mission without blocking
+POST /mission/cancel            cancel the exact active autonomous mission
 GET /lidar_walk                 local LiDAR-reactive fluent navigation
 GET /frontier_explore           guarded-SLAM frontier planning/navigation
 GET /coverage_explore           explore until guarded map growth plateaus
@@ -96,7 +99,7 @@ scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
 scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency, and Pi resources
 scripts/run_beep_eyes.py                 # Temporal camera/replay → Gemini → typed shadow policy
-scripts/run_beep_mission.py              # Persistent world → autonomous goal → semantic skill trace
+scripts/run_beep_mission.py              # Persistent world → autonomous goal → optional typed dispatch
 scripts/install_systemd_service.py      # Install the bridge systemd service
 scripts/save_slam_map.sh                # Pi-side Cartographer exporter
 ```
@@ -139,6 +142,8 @@ Tailscale can use a high-latency DERP relay or disappear with the external Wi-Fi
 - Guarded SLAM is required for map-directed frontier/coverage claims.
 - Reject stale map/pose, impossible relocation, repeated turn non-progress, and unsafe clearances.
 - Autonomous movement routines attempt final SDK stops on completion, timeout, and exception; a hardware/SDK failure can still prevent a physical stop.
+- Every motion lease has an independent onboard deadline watchdog; it attempts repeated stops even if the owning worker or remote HTTP client stalls.
+- Asynchronous missions keep `/status`, `/mission`, and cancellation responsive while the local controller maintains fluent gait.
 - SDK stop success is authoritative; the optional Yahboom app-socket stop is best-effort telemetry.
 - No battery telemetry is available; use charged batteries and supervised bounded runs.
 - Do not infer “whole room” solely from elapsed time. Coverage mode uses map-growth saturation and still cannot prove access beneath or behind every obstacle.

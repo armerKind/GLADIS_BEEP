@@ -68,7 +68,7 @@ class EmbodiedExecutive:
                 "social_acknowledgement",
             )
         if self.goal.name == "explore":
-            return self._decision(None, skill("explore", duration_s=8, reason="Seek novel safe observations, then stop and re-perceive."), "bounded_curiosity")
+            return self._decision(None, skill("explore", duration_s=90, reason="Keep moving under local guards while seeking novel observations and planning ahead."), "continuous_curiosity")
 
         target = self.world.find_object(self.goal.target_query)
         if target is None:
