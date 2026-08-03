@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from beep_eyes.contact_sheet import CapturedFrame, build_contact_sheet, capture_sequence, load_replay_sequence, write_capture_artifacts
+from beep_eyes.contact_sheet import MAX_FRAME_BYTES, CapturedFrame, build_contact_sheet, capture_sequence, fetch_jpeg, load_replay_sequence, write_capture_artifacts
 
 
 def jpeg(color, size=(160, 120)):
@@ -17,6 +17,16 @@ def jpeg(color, size=(160, 120)):
 
 
 class ContactSheetTests(unittest.TestCase):
+    def test_fetch_rejects_oversized_frame(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _limit=None): return b"x" * (MAX_FRAME_BYTES + 1)
+
+        with patch("urllib.request.urlopen", return_value=Response()):
+            with self.assertRaisesRegex(ValueError, "too large"):
+                fetch_jpeg("http://beep")
+
     def frames(self):
         return [
             CapturedFrame("f00", 100.0, jpeg("red")),
@@ -72,6 +82,19 @@ class ContactSheetTests(unittest.TestCase):
             frames, status = load_replay_sequence(source)
         self.assertEqual([frame.captured_at for frame in frames], [10.0, 11.5])
         self.assertFalse(status["moving"])
+
+    def test_replay_rejects_non_chronological_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "f00.jpg").write_bytes(jpeg("red"))
+            (source / "f01.jpg").write_bytes(jpeg("blue"))
+            packet = {
+                "frames": [{"frame_id": "f00", "captured_at": 11.0}, {"frame_id": "f01", "captured_at": 10.0}],
+                "bridge_status": {"moving": False, "motion_lease_id": None},
+            }
+            (source / "observation_packet.json").write_text(json.dumps(packet))
+            with self.assertRaisesRegex(ValueError, "chronological"):
+                load_replay_sequence(source)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ Implemented in `beep_eyes/` and `scripts/run_beep_eyes.py`:
 1. Refuse capture while BEEP reports movement or an active lease.
 2. Discard one vendor-camera warm-up frame.
 3. Retry transient camera startup failures.
-4. Capture four chronological JPEG frames, normally 1.5 seconds apart.
+4. Capture four strictly chronological JPEG frames, normally 1.5 seconds apart, with bounded response sizes.
 5. Record dimensions, brightness, contrast, edge variation, RGB means, and inter-frame difference.
 6. Render a labeled 2×2 contact sheet.
 7. Send the contact sheet and latest full-resolution frame to Gemini 3.5 Flash-Lite.
@@ -58,6 +58,8 @@ Allowed skills:
 - `speak` — at most 240 characters
 
 Unknown fields and unknown skills fail validation. One contract-repair inference is allowed if Gemini violates a local bound. A second violation fails closed.
+
+People and objects must have unique IDs. A selected person/object target must reference an entity actually reported in the same inference; direction targets are restricted to left, center, or right. Bridge JSON is capped at 512 KiB, each camera/replay JPEG at 2 MiB, and Gemini responses at 2 MiB.
 
 ## Policy modes
 

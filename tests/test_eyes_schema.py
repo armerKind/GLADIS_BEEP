@@ -16,6 +16,20 @@ class EyesSchemaTests(unittest.TestCase):
         result = validate_perception_response(self.response())
         self.assertEqual(result["plan"]["steps"][0]["skill"], "speak")
 
+    def test_rejects_attention_target_missing_from_entities(self):
+        result = self.response()
+        result["attention"] = {"target_type": "person", "target_id": "missing", "reason": "Engage."}
+        with self.assertRaisesRegex(PerceptionValidationError, "does not reference"):
+            validate_perception_response(result)
+
+    def test_rejects_duplicate_entity_ids(self):
+        result = self.response()
+        duplicate = dict(result["scene"]["objects"][0])
+        duplicate["id"] = result["scene"]["people"][0]["id"]
+        result["scene"]["objects"].append(duplicate)
+        with self.assertRaisesRegex(PerceptionValidationError, "duplicate"):
+            validate_perception_response(result)
+
     def test_rejects_raw_or_unknown_motor_skill(self):
         result = self.response()
         result["plan"]["steps"] = [{"skill": "set_velocity", "reason": "faster"}]

@@ -1,11 +1,14 @@
 import io
 import json
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
-from beep_eyes.gemini import GeminiError, GeminiVisionClient
+from beep_eyes.gemini import GeminiError, GeminiVisionClient, MAX_RESPONSE_BYTES, _default_transport
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "eyes_response.json"
@@ -18,6 +21,50 @@ def jpeg():
 
 
 class GeminiVisionClientTests(unittest.TestCase):
+    def test_default_transport_against_local_http_server(self):
+        expected = json.loads(FIXTURE.read_text())
+        seen = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                seen.update(path=self.path, key=self.headers.get("x-goog-api-key"), body=json.loads(body))
+                response = json.dumps({"candidates": [{"content": {"parts": [{"text": json.dumps(expected)}]}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = GeminiVisionClient("local-sentinel", model="gemini-test", api_base=f"http://127.0.0.1:{server.server_port}")
+            result = client.analyze({"packet_id": "p1"}, jpeg(), jpeg())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.assertEqual(result["schema_version"], "1.0")
+        self.assertEqual(seen["path"], "/models/gemini-test:generateContent")
+        self.assertEqual(seen["key"], "local-sentinel")
+        parts = seen["body"]["contents"][0]["parts"]
+        self.assertEqual(len([part for part in parts if "inlineData" in part]), 2)
+
+    def test_default_transport_rejects_oversized_response(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _limit=None): return b"x" * (MAX_RESPONSE_BYTES + 1)
+
+        with mock.patch("urllib.request.urlopen", return_value=Response()):
+            with self.assertRaisesRegex(GeminiError, "too large"):
+                _default_transport("http://local", {}, b"{}", 1)
+
     def test_request_uses_header_key_images_and_json_schema(self):
         expected = json.loads(FIXTURE.read_text())
         seen = {}

@@ -137,9 +137,11 @@ def validate_perception_response(value: Any) -> dict[str, Any]:
     _text(scene["summary"], "scene.summary", 600)
     for index, change in enumerate(_list(scene["changes"], "scene.changes", 8)):
         _text(change, f"scene.changes[{index}]", 240)
-    for index, person in enumerate(_list(scene["people"], "scene.people", 12)):
+    people = _list(scene["people"], "scene.people", 12)
+    objects = _list(scene["objects"], "scene.objects", 20)
+    for index, person in enumerate(people):
         _entity(person, f"scene.people[{index}]", person=True)
-    for index, obj in enumerate(_list(scene["objects"], "scene.objects", 20)):
+    for index, obj in enumerate(objects):
         _entity(obj, f"scene.objects[{index}]", person=False)
     for index, hazard in enumerate(_list(scene["hazards"], "scene.hazards", 10)):
         _hazard(hazard, f"scene.hazards[{index}]")
@@ -154,6 +156,18 @@ def validate_perception_response(value: Any) -> dict[str, Any]:
         raise PerceptionValidationError("attention.target_id must be null when target_type is none")
     if attention["target_type"] != "none" and attention["target_id"] is None:
         raise PerceptionValidationError("attention.target_id is required for a selected target")
+    person_ids = {person["id"] for person in people}
+    object_ids = {obj["id"] for obj in objects}
+    all_ids = [person["id"] for person in people] + [obj["id"] for obj in objects]
+    if len(all_ids) != len(set(all_ids)):
+        raise PerceptionValidationError("scene contains duplicate entity ids")
+    target_type, target_id = attention["target_type"], attention["target_id"]
+    if target_type == "person" and target_id not in person_ids:
+        raise PerceptionValidationError("attention target does not reference a reported person")
+    if target_type == "object" and target_id not in object_ids:
+        raise PerceptionValidationError("attention target does not reference a reported object")
+    if target_type == "direction" and target_id not in {"left", "center", "right"}:
+        raise PerceptionValidationError("attention direction target must be left, center, or right")
     _text(attention["reason"], "attention.reason", 240)
 
     plan = _mapping(root["plan"], "plan")

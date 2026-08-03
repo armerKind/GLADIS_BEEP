@@ -22,6 +22,7 @@ from .schema import (
 
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 Transport = Callable[[str, dict[str, str], bytes, float], dict[str, Any]]
 
 
@@ -33,10 +34,15 @@ def _default_transport(url: str, headers: dict[str, str], body: bytes, timeout_s
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            return json.loads(response.read())
+            data = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise GeminiError("Gemini response is too large")
+            return json.loads(data)
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        detail = exc.read(1000).decode("utf-8", errors="replace")
         raise GeminiError(f"Gemini HTTP {exc.code}: {detail}") from exc
+    except GeminiError:
+        raise
     except Exception as exc:
         raise GeminiError(f"Gemini request failed: {type(exc).__name__}: {exc}") from exc
 

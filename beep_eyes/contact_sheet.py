@@ -12,6 +12,16 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
 
+MAX_STATUS_BYTES = 512 * 1024
+MAX_FRAME_BYTES = 2 * 1024 * 1024
+
+
+def _read_bounded(response: Any, limit: int, label: str) -> bytes:
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{label} is too large")
+    return data
+
 
 @dataclass(frozen=True)
 class CapturedFrame:
@@ -25,12 +35,12 @@ class CapturedFrame:
 
 def fetch_json(base_url: str, path: str, timeout_s: float = 8.0) -> dict[str, Any]:
     with urllib.request.urlopen(base_url.rstrip("/") + path, timeout=timeout_s) as response:
-        return json.loads(response.read())
+        return json.loads(_read_bounded(response, MAX_STATUS_BYTES, "bridge JSON response"))
 
 
 def fetch_jpeg(base_url: str, timeout_s: float = 10.0) -> bytes:
     with urllib.request.urlopen(base_url.rstrip("/") + f"/frame.jpg?timeout={min(timeout_s, 8.0):g}", timeout=timeout_s) as response:
-        data = response.read()
+        data = _read_bounded(response, MAX_FRAME_BYTES, "bridge JPEG")
     if len(data) < 4 or data[:2] != b"\xff\xd8" or data[-2:] != b"\xff\xd9":
         raise ValueError("bridge returned an invalid JPEG")
     return data
@@ -94,10 +104,14 @@ def load_replay_sequence(directory: Path, count: int | None = None) -> tuple[lis
         captured_at = metadata.get(frame_id, {}).get("captured_at")
         if not isinstance(captured_at, (int, float)):
             captured_at = float(index)
+        if path.stat().st_size > MAX_FRAME_BYTES:
+            raise ValueError(f"replay JPEG is too large: {path.name}")
         data = path.read_bytes()
         if data[:2] != b"\xff\xd8" or data[-2:] != b"\xff\xd9":
             raise ValueError(f"invalid replay JPEG: {path.name}")
         frames.append(CapturedFrame(frame_id, float(captured_at), data))
+    if any(current.captured_at <= previous.captured_at for previous, current in zip(frames, frames[1:])):
+        raise ValueError("replay frame timestamps must be strictly chronological")
     status_value = packet.get("bridge_status")
     if isinstance(status_value, dict):
         status: dict[str, Any] = status_value
