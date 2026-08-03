@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "scene": {
+    "summary": "A stationary indoor scene with one person near the center and a glass surface on the right.",
+    "changes": ["The person turns slightly toward the camera."],
+    "people": [
+      {
+        "id": "person-1",
+        "description": "An adult standing several metres ahead.",
+        "position": "center",
+        "engagement": "looking",
+        "confidence": 0.82
+      }
+    ],
+    "objects": [
+      {
+        "id": "table-1",
+        "description": "A table on the left side of the room.",
+        "position": "left",
+        "confidence": 0.88
+      }
+    ],
+    "hazards": [
+      {
+        "type": "glass",
+        "description": "A likely glass door or wall on the right.",
+        "position": "right",
+        "confidence": 0.76
+      }
+    ]
+  },
+  "attention": {
+    "target_type": "person",
+    "target_id": "person-1",
+    "reason": "The person is looking toward BEEP."
+  },
+  "plan": {
+    "goal": "Acknowledge the person without approaching the glass.",
+    "steps": [
+      {
+        "skill": "speak",
+        "text": "I see you. The transparent architecture has also been noted.",
+        "reason": "A stationary acknowledgement is appropriate."
+      },
+      {
+        "skill": "observe",
+        "reason": "Collect another temporal packet before considering movement."
+      }
+    ]
+  },
+  "confidence": 0.79,
+  "uncertainty": ["The transparent surface may be a window rather than a door."],
+  "escalate": false,
+  "escalation_reason": null
+}
