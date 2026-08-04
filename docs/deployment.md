@@ -1,5 +1,9 @@
 # BEEP Deployment and Operations
 
+## Source and deployment state
+
+Repository bridge source is `0.17.1-moving-eyes`. The last physically verified deployment was `0.16.3-normal-pace`; asynchronous missions and moving temporal vision must pass the staged hardware gate below after deployment. Host-side `beep_agent`, `beep_eyes`, and runner scripts execute on GLADIS and are not uploaded by the bridge deployment helper.
+
 ## Pi paths
 
 ```text
@@ -76,6 +80,8 @@ curl -s http://beep.tailb08b32.ts.net:8766/config | python3 -m json.tool
 curl -s http://beep.tailb08b32.ts.net:8766/health | python3 -m json.tool
 curl -s http://beep.tailb08b32.ts.net:8766/stop | python3 -m json.tool
 ```
+
+Require `/health` field `status.version == "0.17.1-moving-eyes"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
 
 ## Install the bridge systemd unit
 
@@ -184,6 +190,8 @@ curl 'http://beep.tailb08b32.ts.net:8766/coverage_explore?max_duration=600&min_d
 
 Coverage mode uses fluent local LiDAR motion while monitoring guarded-SLAM known-cell growth. `coverage_plateau` means map growth stayed below the configured threshold for the complete window. The maximum duration is a safety ceiling, not the completion objective.
 
+The synchronous endpoint remains useful for compatibility and the Friday presentation coordinator. For normal embodied operation prefer the asynchronous mission API below so `/status` and cancellation remain responsive throughout locomotion.
+
 ### 4. Local fallback
 
 ```bash
@@ -191,6 +199,63 @@ curl 'http://beep.tailb08b32.ts.net:8766/lidar_walk?max_duration=90'
 ```
 
 Use this when global SLAM is rejected. It is explicitly local reactive navigation and must not be described as globally mapped coverage.
+
+## Asynchronous mission and moving-eyes hardware gate
+
+Run these stages only with BEEP physically supervised and enough battery/power stability for the requested duration.
+
+### 1. Prime camera while stationary
+
+```bash
+curl -fsS http://192.168.8.88:8766/frame.jpg -o /tmp/beep-prime.jpg
+curl -fsS http://192.168.8.88:8766/status | python3 -m json.tool
+```
+
+Priming allows the vendor MJPEG service to enter its usable state before motion. During an active lease the bridge deliberately bypasses app-control preparation so moving frame capture cannot inject a stop; if the stream is unavailable, capture fails without disturbing locomotion.
+
+### 2. Start a short asynchronous mission
+
+```bash
+HTTP_CODE=$(curl -sS -o /tmp/beep-mission.json -w '%{http_code}' \
+  -X POST http://192.168.8.88:8766/mission/start \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"coverage","duration_s":10,"min_duration":10,"save":false}')
+test "$HTTP_CODE" = 202
+python3 -m json.tool < /tmp/beep-mission.json
+
+curl -fsS http://192.168.8.88:8766/mission | python3 -m json.tool
+curl -fsS http://192.168.8.88:8766/status | python3 -m json.tool
+```
+
+`POST /mission/start` must return HTTP 202 quickly while movement continues onboard. `/mission` and `/status` must remain responsive. Conflicting movement must return HTTP 409 rather than queue.
+
+### 3. Validate exact mission cancellation
+
+```bash
+MISSION_ID=$(python3 -c 'import json; print(json.load(open("/tmp/beep-mission.json"))["mission"]["id"])')
+curl -fsS -X POST http://192.168.8.88:8766/mission/cancel \
+  -H 'Content-Type: application/json' \
+  -d "{\"mission_id\":\"$MISSION_ID\"}" | python3 -m json.tool
+curl -fsS http://192.168.8.88:8766/stop | python3 -m json.tool
+```
+
+Require final `moving: false` and `motion_lease_id: null`. A stale mission ID must not cancel a newer owner.
+
+### 4. Validate moving panels
+
+Start another short mission, then attach moving eyes from GLADIS:
+
+```bash
+HERMES_HOME="$HOME/.hermes/profiles/sol" \
+PYTHONPATH="$PWD:$HOME/.hermes/hermes-agent" \
+python3 scripts/run_moving_eyes.py \
+  --base-url http://192.168.8.88:8766 \
+  --panel 9 --fps 3 --duration 10 \
+  --credential-source hermes \
+  --hermes-home "$HOME/.hermes/profiles/sol"
+```
+
+Compare `--panel 4`, `6`, and `9` on real gait vibration before changing the default. Verify chronological timestamps, usable neighboring frames despite blur, continued capture during Gemini latency, no app-control stop events, responsive mission telemetry, and final stopped/no-lease state. The moving-eyes runner observes and plans but does not dispatch motors.
 
 ## Audio playback
 
@@ -268,5 +333,6 @@ If a cold boot fails with the nano adapter inserted:
 - If Cartographer jumps, reset or use explicitly local navigation; do not relabel dead reckoning as SLAM.
 - If Jupyter and Tailscale disappear, try the direct DogZilla network only when physically in range.
 - If all paths fail, report the action as not executed.
-- Every autonomous request should be followed by verification of `moving=false`; redundant `/stop` is intentional.
+- After mission completion or cancellation, verify `moving=false` and `motion_lease_id=null`; redundant `/stop` is intentional. Do not expect `moving=false` while intentionally polling an active asynchronous mission.
+- If the remote client disappears, the onboard mission remains bounded by its immutable lease and deadline watchdog; restore control and verify final state rather than assuming either continued motion or successful stop.
 - No battery telemetry exists.

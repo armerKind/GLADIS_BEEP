@@ -21,6 +21,8 @@ The model proposes semantic skills. It never emits motor registers, velocities, 
 
 ## Current milestone: continuous moving temporal eyes
 
+Repository implementation is complete through mock/integration validation. The stationary camera/Gemini path has been exercised on BEEP, but bridge `0.17.1-moving-eyes` and moving capture during real gait await the next powered hardware gate. Panel count remains configurable because 4/6/9 must be compared under actual vibration rather than selected through numerology.
+
 Implemented in `beep_eyes/`, `scripts/run_beep_eyes.py`, and `scripts/run_moving_eyes.py`:
 
 1. Keep stationary capture fail-closed by default while allowing an explicit moving-evidence path.
@@ -76,7 +78,7 @@ People and objects must have unique IDs. A selected person/object target must re
 
 - Policy may mark `observe`, `stop`, speech, and stationary gesture proposals eligible.
 - Movement remains prohibited.
-- Dispatch is still absent until a separate stationary executor and supervised test exist.
+- `BridgeBodyAdapter` implements stationary `observe` and `stop`. Speech and gesture dispatch adapters remain pending.
 
 ### `supervised`
 
@@ -177,11 +179,11 @@ At a hardware gate GLADIS should state exactly what must be powered, the expecte
 3. **Persistent scene tracker** — track packet-local entities and attention across cycles.
 4. **Stationary social loop** — supervised speech and one whitelisted gesture while navigation is stopped.
 5. **Visual heading proposals** — compare against LiDAR sectors and SLAM, still shadow-only.
-6. **Continuous moving temporal panels** — current offline implementation; verify 4/6/9 quality and latency on hardware.
+6. **Continuous moving temporal panels** — source and mock integration complete; verify 4/6/9 quality and latency on hardware.
 7. **Single bounded orient and approach skills** — supervised and fail-closed when a deliberate viewpoint change is required.
 8. **Fluid perceive–plan–move loop** — camera and inference continue during local navigation; routine perception does not stop gait.
 9. **Longer embodied sessions** — only after measured reliability, cancellation, connectivity, moving-camera, and human-stop tests.
 
 ## Proven baseline
 
-The initial real-camera shadow run produced a stable four-panel sequence. Gemini correctly described a centered white box as an obstacle, found no person, proposed only `observe`, passed the strict normalized contract, and caused no dispatch. This proves the end-to-end camera → multipanel Gemini → typed response → policy path, not autonomous movement readiness. Civilization remains provisionally intact.
+The initial real-camera shadow run produced a stable four-panel sequence. Gemini correctly described a centered white box as an obstacle, found no person, proposed only `observe`, passed the strict normalized contract, and caused no dispatch. Later offline integration proved that an active mock mission can fill a moving ring, render all 4/6/9 layouts, continue capture during inference, update the world model, and prepare a semantic next action without issuing any motor POST. These prove the stationary real-camera route and moving software architecture respectively; they do not yet prove moving-image quality on physical gait. Civilization remains provisionally intact.

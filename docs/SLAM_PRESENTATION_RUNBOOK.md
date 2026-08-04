@@ -2,10 +2,12 @@
 
 ## Scope
 
+This runbook preserves the synchronous Friday/presentation coordinator. It intentionally stops between bounded coverage segments so stationary gestures and optional marking can run. It is **not** the continuous embodied mission path. For asynchronous fluent navigation with moving 4/6/9-frame perception, use the staged workflow in [`deployment.md`](deployment.md#asynchronous-mission-and-moving-eyes-hardware-gate).
+
 - Up to 10 minutes of autonomous LiDAR + guarded Cartographer SLAM walking.
 - Optional stationary `prey`/beg gesture (Yahboom action 17).
 - Experimental opt-in corner marking with the pee/right-leg gesture (action 11); disabled by default.
-- Camera and microphone are not queried.
+- This legacy coordinator does not query camera or microphone; `run_moving_eyes.py` is a separate concurrent observer for asynchronous missions.
 - Hard wall clearance: 0.15 m. Marking approach target: 0.20 m.
 - Marking turns use guarded Cartographer yaw and stop at approximately 90°; an 8-second timeout accommodates the measured slow-gait turn rate.
 - Straight approaches clear any residual yaw/lateral SDK registers before moving and abort if guarded SLAM heading drifts more than 15 degrees.
@@ -26,6 +28,8 @@
    ```
 
    Continue only if it returns `"ok": true` and reports fresh, valid SLAM.
+
+6. Verify the live bridge version before rehearsing. Repository source is `0.17.1-moving-eyes`, while the last physically verified deployment was `0.16.3-normal-pace`; do not assume deployment from Git state alone.
 
 ## Emergency stop
 
@@ -115,4 +119,4 @@ Add `--enable-pee --pee-interval 210` only after the isolated guarded-turn and c
 - `prey` runs only while stopped and is followed by neutral reset.
 - Pee is attempted only when a front wall, adjacent right wall and clear left turn form a supported corner geometry. Otherwise it is skipped.
 - Any stale scan, stale map, invalid pose, request failure, operator interrupt or latched stop aborts the routine and sends a final stop.
-- Losing the coordinator leaves at most the current bounded bridge lease; the bridge stops at lease end.
+- Losing the coordinator leaves at most the current bounded bridge lease; the independent lease-deadline watchdog latches cancellation and attempts repeated stops at expiry.

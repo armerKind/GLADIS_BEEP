@@ -2,6 +2,8 @@
 
 Measured: 2026-07-21
 
+> **Historical measurement:** this file preserves the original probe and its observed failures. It is not the current camera status. The MJPEG path was subsequently restored and used for real temporal Gemini captures. Repository source now includes bounded moving 4/6/9-frame buffering, although moving-gait image quality still awaits physical validation on `0.17.1-moving-eyes`.
+
 Probe host: GLADIS over direct Tailscale
 
 BEEP bridge: deployed `0.14.1-coverage-pose-cadence`
@@ -207,3 +209,15 @@ Before implementing the rolling camera buffer, repair and verify a single stable
 3. capture and decode repeated `640x480` JPEG frames;
 4. measure sustainable sampling latency and CPU/temperature;
 5. only then add the bounded rolling frame buffer and temporal multipanel endpoint.
+
+## Subsequent outcome
+
+The recommendations above were completed in later increments:
+
+- the vendor MJPEG stream became usable through the bridge;
+- finite chronological capture, quality metrics, contact-sheet rendering, strict Gemini transport, replay, and persistent world updates were implemented;
+- real stationary temporal captures and Gemini inference succeeded;
+- `ContinuousMovingCapture` now stores JPEG evidence in a bounded ring, renders configurable 4/6/9-frame panels, and continues capture during one active inference;
+- during a motion lease, bridge frame capture bypasses vendor app-control preparation so camera access cannot inject its stop command.
+
+Still pending is the hardware benchmark originally implied by this baseline: measure sustainable FPS, blur, panel usefulness, Gemini stability, CPU/temperature, and cancellation behavior while BEEP physically walks. Historical numbers above remain valuable precisely because they are not being rewritten to flatter the present.

@@ -3,8 +3,10 @@
 Current bridge line:
 
 ```text
-0.14.2-bounded-manual-move
+0.17.1-moving-eyes
 ```
+
+This is the repository source version. The last physically verified deployment was `0.16.3-normal-pace`; deploy and complete the staged hardware gate before treating `0.17.1-moving-eyes` as the live robot version.
 
 Base URLs:
 

@@ -72,10 +72,10 @@ No function accepts raw velocity, motor registers, arbitrary vendor action IDs, 
 
 Important compound intents:
 
-- `approach_target`: one 0.05–0.20 m guarded segment, then stop and re-perceive;
+- `approach_target`: one 0.05–0.20 m guarded segment with fresh target and local safety evidence; deliberate close inspection may stop, ordinary exploration does not;
 - `inspect_target`: acquire a bounded alternate viewpoint to reveal actual object geometry;
 - `mark_target`: request deterministic approach, sideways alignment, and marking only at a visually supported outward corner;
-- `explore`: one 5–15 second guarded lease, then stop and re-perceive.
+- `explore`: a bounded 5–600 second asynchronous mission (90 seconds by executive default) with continuous local safety, mission telemetry, and moving temporal perception.
 
 ## Executive behaviour
 
@@ -96,20 +96,11 @@ A marking request in shadow/stationary rollout is always `dry_run=true`. Even a 
 
 Social goals produce stationary speech. Living hazards in the intended path cause observation/yielding rather than movement.
 
-## Current physical situation
+## Latest physical checkpoint
 
-The first autonomous live scene contained a centered white box:
+The last verified embodied hardware increment used the synchronous guarded bridge to execute `explore(duration_s=5)`. BEEP moved for 5.38 seconds, used six forward strides and two right turns, released the exclusive lease, and finished stopped. Post-action perception then reported a near flat cabinet/wall face, no supported outward corner, and 0.465 m front clearance. Curiosity selected a bounded left-view `inspect_target`, which was intentionally not dispatched because that trial allowed one physical skill only.
 
-- stable local identity: `object-0001`;
-- proximity: `mid`;
-- supported visible geometry: `front_face`, `top`;
-- no supported outward corner;
-- selected drive: curiosity;
-- selected goal: `investigate` (marking remains a later context-sensitive drive);
-- selected next skill: `approach_target`;
-- physical dispatch: none.
-
-BEEP remained stopped because live LiDAR and SLAM were unavailable. That is an autonomous body decision, not a request for Max to decide the experiment.
+The newer asynchronous mission worker, `BridgeBodyAdapter`, and continuous moving-eyes supervisor are source-complete and mock/integration tested but not yet deployed to the powered robot. The next physical checkpoint must therefore validate deployment, moving camera capture, cancellation, and final stopped/no-lease state before longer autonomy claims.
 
 ## Body-adapter state
 

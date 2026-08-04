@@ -2,7 +2,7 @@
 
 This file began as fair-preparation notes. It now records the current dual-network setup and preserves the failed adapter experiment only as historical context.
 
-Network addresses, topology, service observations, and the cold-boot workaround below were last physically verified on **2026-07-19**.
+The dual-network topology and cold-boot workaround were established on **2026-07-19**; direct DOGZILLA_WIFI and Tailscale paths were exercised again during development through **2026-08-03**. Reachability is still runtime state and must be checked rather than inferred from this document.
 
 ## Current working topology
 
@@ -39,11 +39,13 @@ Tailscale may use DERP relays with variable latency. It is a supervisory/control
 
 ## Current bridge and services
 
-Current bridge line:
+Last physically deployed and verified bridge line:
 
 ```text
-0.14.1-coverage-pose-cadence
+0.16.3-normal-pace
 ```
+
+Repository source is now `0.17.1-moving-eyes`; its asynchronous mission and moving-camera additions await the next powered deployment/validation gate.
 
 Pi services observed active during that verification:
 
@@ -51,8 +53,11 @@ Pi services observed active during that verification:
 beep-bridge.service
 beep-cartographer.service
 beep-occupancy-grid.service
+YahboomStart.service
 tailscaled.service
 ```
+
+`YahboomStart.service` is the sole intended MS200 LiDAR owner. Keep duplicate `XGO_Start.service` disabled and inactive; competing `oradar_scan` processes can advertise `/scan` while producing no usable data.
 
 LiDAR-aware autonomous controllers reject stale scans, use local obstacle thresholds, guard Cartographer pose where required, watch turn progress, bound runs, and attempt SDK stop cleanup. Generic `/move` and vendor `/action` bypass those autonomy gates. At least one successful SDK stop attempt is authoritative for reporting; optional Yahboom app-socket stop failure is diagnostic.
 
@@ -88,6 +93,7 @@ From GLADIS over Tailscale:
 tailscale ping beep
 curl -s http://beep.tailb08b32.ts.net:8766/health | python3 -m json.tool
 curl -s http://beep.tailb08b32.ts.net:8766/stop | python3 -m json.tool
+curl -s http://beep.tailb08b32.ts.net:8766/mission | python3 -m json.tool
 curl -s http://beep.tailb08b32.ts.net:8766/frame.jpg -o /tmp/beep-frame.jpg
 ```
 
@@ -104,6 +110,7 @@ The working replacement is the Realtek RTL8188EUS adapter. Retaining this note p
 ## Safety boundary
 
 - Keep `/stop` reachable before movement.
+- For asynchronous source `0.17.1-moving-eyes`, keep `/mission` reachable and test exact-ID cancellation before a long run.
 - Do not depend on remote round-trip latency for obstacle stopping.
 - Confirm fresh LiDAR and `moving=false` before autonomous runs.
 - Use guarded-SLAM modes only when pose/map freshness and validity pass.

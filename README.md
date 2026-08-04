@@ -6,13 +6,15 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 
 ## Current state
 
-Current bridge source line (the last physically verified deployment was `0.14.1-coverage-pose-cadence`):
+Current repository bridge source:
 
 ```text
-0.14.2-bounded-manual-move
+0.17.1-moving-eyes
 ```
 
-Current source implements the following. The main locomotion, mapping, coverage, camera, and speaker paths have also been exercised on BEEP; unit tests alone are not presented as physical verification.
+The last physically deployed and verified bridge before the current offline increment was `0.16.3-normal-pace`. Versions `0.17.0-async-mission` and `0.17.1-moving-eyes` are committed and tested but await the next powered hardware gate. Source readiness is not deployment; robots remain stubbornly literal about this distinction.
+
+Current source implements the following. The core locomotion, mapping, synchronous coverage, stationary camera, microphone, and speaker paths have been exercised on BEEP. Asynchronous missions and moving temporal vision have full mock/integration coverage but are not yet claimed as physically validated.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers
@@ -25,6 +27,9 @@ Current source implements the following. The main locomotion, mapping, coverage,
 - systematic frontier planning over the ROS occupancy grid
 - local presentation-safe LiDAR walking when global localization is not trustworthy
 - coverage-driven room exploration that stops when mapped known-space growth plateaus
+- asynchronous guarded missions with responsive status/cancellation and an independent lease-deadline watchdog
+- continuous moving-camera capture into bounded chronological 4/6/9-frame panels without app-level motor-stop injection
+- strict Gemini semantic perception, persistent entity/world state, autonomous drive arbitration, and typed body-adapter dispatch
 - Jupyter-based deployment, SLAM reset/export, diagnostics, and speaker playback helpers
 - MAC-bound dual Wi-Fi boot configu...[truncated]
 
@@ -41,6 +46,9 @@ This is genuine online mapping with pose-graph SLAM, but it is not a finished co
 ```text
 GLADIS / operator
       |
+      |-- moving-eyes ring + Gemini semantic inference + persistent world model
+      |-- typed semantic skill adapter
+      |
       | HTTP over DOGZILLA_WIFI or Tailscale
       v
 BEEP bridge :8766 (Raspberry Pi)
@@ -48,6 +56,7 @@ BEEP bridge :8766 (Raspberry Pi)
       |-- ROS 2 /scan + fresh-LiDAR safety
       |-- Cartographer TF + /map monitoring
       |-- guarded pose and exploration controllers
+      |-- asynchronous mission worker + immutable lease watchdog
       |-- Yahboom camera/app services
 
 JupyterLab :8888 (Raspberry Pi)
@@ -116,7 +125,7 @@ wlan0  original DOGZILLA_WIFI access point / robot network
 wlan1  external 2.4 GHz Wi-Fi uplink
 ```
 
-Addresses last physically verified on 2026-07-19:
+Known addresses and names, exercised during development through 2026-08-03:
 
 ```text
 192.168.8.88                    local DogZilla address
@@ -155,8 +164,8 @@ Tailscale can use a high-latency DERP relay or disappear with the external Wi-Fi
 Run validation from the repository root:
 
 ```bash
-python3 -m py_compile beep_bridge/beep_bridge.py beep_bridge/frontier_planner.py tests/test_*.py
-python3 -m unittest discover -s tests -v
+PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m compileall -q beep_agent beep_eyes beep_bridge scripts tests
 git diff --check
 ```
 
@@ -171,6 +180,7 @@ The eyes subsystem supports fully offline saved-frame replay. BEEP is required o
 - [`docs/perception_baseline.md`](docs/perception_baseline.md) — measured camera, microphone, bridge-latency, and Pi-resource baseline
 - [`docs/EYES_ARCHITECTURE.md`](docs/EYES_ARCHITECTURE.md) — multipanel Gemini eyes, typed proposals, offline workflow, and rollout gates
 - [`docs/EMBODIED_MIDDLE_LAYER.md`](docs/EMBODIED_MIDDLE_LAYER.md) — persistent world, personality/drives, autonomous goals, and callable body skills
+- [`docs/SLAM_PRESENTATION_RUNBOOK.md`](docs/SLAM_PRESENTATION_RUNBOOK.md) — preserved synchronous Friday demo and staged rehearsal
 - [`assets/ros_maps/README.md`](assets/ros_maps/README.md) — retained Cartographer artifacts
 
 ## Version-control policy
