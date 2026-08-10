@@ -9,16 +9,16 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.17.3-moving-camera-handshake
+0.18.1-external-observer
 ```
 
-Bridge `0.17.3-moving-camera-handshake` is physically deployed and verified on BEEP. Asynchronous exact-ID cancellation, camera-timeout isolation, and four-frame temporal Gemini perception during gait passed the powered hardware gate; six- and nine-frame moving panels still require comparison.
+Bridge `0.17.3-moving-camera-handshake` remains the last physically deployed version. Source `0.18.1-external-observer` adds offline-verified full-body collision policy and an external observer interface; neither increment is physically validated or deployed yet.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers
-- fluent forward gait, forward-plus-yaw walking arcs, bounded turns, and lateral escapes
+- conservative forward gait, short supervised reverse recovery, and clearance-gated bounded turns; autonomous arcs and lateral escapes are disabled
 - camera frame capture from the Yahboom MJPEG service
 - named vendor actions such as stretch, pray, and the right-leg `pee` preset
 - continuous LiDAR-supervised approach and marking sequence
@@ -29,6 +29,7 @@ Current source implements the following. Core locomotion, mapping, asynchronous 
 - coverage-driven room exploration that stops when mapped known-space growth plateaus
 - asynchronous guarded missions with responsive status/cancellation and an independent lease-deadline watchdog
 - continuous moving-camera capture into bounded chronological 4/6/9-frame panels without app-level motor-stop injection
+- optional local external-camera observer contracts with record-only default and authenticated exact-mission stop authority
 - strict Gemini semantic perception, persistent entity/world state, autonomous drive arbitration, and typed body-adapter dispatch
 - Jupyter-based deployment, SLAM reset/export, diagnostics, and speaker playback helpers
 - MAC-bound dual Wi-Fi boot configu...[truncated]
@@ -182,6 +183,7 @@ The eyes subsystem supports fully offline saved-frame replay. BEEP is required o
 - [`docs/perception_baseline.md`](docs/perception_baseline.md) — measured camera, microphone, bridge-latency, and Pi-resource baseline
 - [`docs/EYES_ARCHITECTURE.md`](docs/EYES_ARCHITECTURE.md) — multipanel Gemini eyes, typed proposals, offline workflow, and rollout gates
 - [`docs/EMBODIED_MIDDLE_LAYER.md`](docs/EMBODIED_MIDDLE_LAYER.md) — persistent world, personality/drives, autonomous goals, and callable body skills
+- [`docs/EXTERNAL_OBSERVER.md`](docs/EXTERNAL_OBSERVER.md) — local room-camera supervision, privacy, evidence, and bounded stop authority
 - [`docs/SLAM_PRESENTATION_RUNBOOK.md`](docs/SLAM_PRESENTATION_RUNBOOK.md) — preserved synchronous Friday demo and staged rehearsal
 - [`assets/ros_maps/README.md`](assets/ros_maps/README.md) — retained Cartographer artifacts
 

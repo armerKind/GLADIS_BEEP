@@ -64,6 +64,15 @@ POST /stop
 
 A redundant `/stop` after every physical routine is intentional.
 
+### External observer stop capability
+
+```text
+POST /observer/stop
+Authorization: Bearer <BEEP_OBSERVER_STOP_TOKEN>
+```
+
+This endpoint is disabled unless the bridge process has a non-empty `BEEP_OBSERVER_STOP_TOKEN`. It accepts only an exact active `mission_id`, an optional `event_id`, and a bounded reason string. Invalid authentication returns `403`; stale/missing missions return `409`; bridge-side rate limiting returns `429`. Accepted requests delegate to exact-ID mission cancellation and its repeated stop sequence. The endpoint cannot issue movement. See [`EXTERNAL_OBSERVER.md`](EXTERNAL_OBSERVER.md).
+
 ## Bounded primitive movement
 
 ```text

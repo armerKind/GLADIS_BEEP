@@ -12,6 +12,7 @@ Goals:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import os
@@ -57,6 +58,8 @@ ESCAPE_CLEARANCE_GAIN_M = max(0.05, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
+OBSERVER_STOP_TOKEN = os.environ.get("BEEP_OBSERVER_STOP_TOKEN", "")
+OBSERVER_STOP_MIN_INTERVAL_S = max(0.5, float(os.environ.get("BEEP_OBSERVER_STOP_MIN_INTERVAL_S", "2.0")))
 
 CMD_PAYLOAD = {
     "stop": 0x00,
@@ -111,9 +114,11 @@ motion_context = threading.local()
 _active_motion_lease = None
 _motion_lease_sequence = 0
 events = deque(maxlen=300)
+observer_stop_lock = threading.Lock()
+observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.0-footprint-guard",
+    "version": "0.18.1-external-observer",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1779,6 +1784,36 @@ def cancel_autonomous_mission(mission_id=None, source="mission_cancel"):
     return {"ok": error is None, "cancelled": True, "error": error, "mission": mission_snapshot(), "status": snapshot()}
 
 
+def observer_stop_request(provided_token, mission_id, event_id=None, reason=None, now=None):
+    """Authenticated, rate-limited, exact-mission stop capability."""
+    global observer_last_stop_at
+    if not OBSERVER_STOP_TOKEN:
+        return {"ok": False, "reason": "observer_stop_disabled", "status_code": 503}
+    if not provided_token or not hmac.compare_digest(str(provided_token), OBSERVER_STOP_TOKEN):
+        return {"ok": False, "reason": "observer_auth_rejected", "status_code": 403}
+    if not mission_id:
+        return {"ok": False, "reason": "mission_id_required", "status_code": 400}
+    with mission_lock:
+        mission = _active_mission
+        if mission is None:
+            return {"ok": False, "reason": "no_active_mission", "status_code": 409, "mission": mission_snapshot()}
+        if str(mission_id) != str(mission["id"]):
+            return {"ok": False, "reason": "mission_id_mismatch", "status_code": 409, "mission": mission_snapshot()}
+    observed_now = time.monotonic() if now is None else float(now)
+    with observer_stop_lock:
+        if observer_last_stop_at is not None and observed_now - observer_last_stop_at < OBSERVER_STOP_MIN_INTERVAL_S:
+            return {"ok": False, "reason": "observer_stop_rate_limited", "status_code": 429}
+        observer_last_stop_at = observed_now
+    result = cancel_autonomous_mission(str(mission_id), source="external_observer")
+    result.update({"reason": result.get("reason") or "observer_stop_delivered",
+                   "status_code": 200 if result.get("ok") else 409,
+                   "event_id": None if event_id is None else str(event_id),
+                   "observer_reason": None if reason is None else str(reason)[:240]})
+    remember("observer_stop_request", mission_id=str(mission_id), event_id=event_id,
+             reason=reason, delivered=bool(result.get("ok")))
+    return result
+
+
 def start_or_continue_fluent_forward(current_action, step):
     """Start the gait once; later planning windows leave it running uninterrupted."""
     if current_action == "forward":
@@ -2388,6 +2423,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
                                 "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "modes": ["coverage", "local"]},
+                                "external_observer": {"stop": "POST /observer/stop", "enabled": bool(OBSERVER_STOP_TOKEN),
+                                                      "exact_mission_required": True, "min_interval_s": OBSERVER_STOP_MIN_INTERVAL_S},
                                 "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
@@ -2521,6 +2558,12 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == "/stop":
                 err = request_stop("http_post")
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
+            elif p.path == "/observer/stop":
+                authorization = self.headers.get("Authorization", "")
+                provided_token = authorization[7:] if authorization.startswith("Bearer ") else ""
+                result = observer_stop_request(provided_token, body.get("mission_id"),
+                                               event_id=body.get("event_id"), reason=body.get("reason"))
+                self.send_json(result, int(result.get("status_code", 500)))
             elif p.path == "/mission/start":
                 result = start_autonomous_mission(
                     mode=body.get("mode", "coverage"),
