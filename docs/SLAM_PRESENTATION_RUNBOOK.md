@@ -20,7 +20,7 @@ This runbook preserves the synchronous Friday/presentation coordinator. It inten
 1. BEEP is fully charged or connected to a stable supply.
 2. BEEP stands on a dry, level, non-slip floor.
 3. Remove cables, feet, bags, fragile objects and drop hazards from the walking area.
-4. Keep the laptop connected to `DOGZILLA_WIFI`; wired LAN may provide internet.
+4. Keep the laptop connected to `DOGZILLA_WIFI`; wired LAN may provide internet. Prefer this direct route for a long synchronous Friday routine. A 2.4 GHz hotspot uplink can be disrupted by congestion or nearby microwave use, while BEEP's local safety loop remains onboard.
 5. Verify the stationary plan:
 
    ```bash
@@ -51,7 +51,15 @@ After final placement and before visitors arrive, run:
 ./scripts/prepare_fair_run.sh
 ```
 
-This stops BEEP, resets SLAM, verifies a stationary stability window, and writes a one-run readiness marker. Once prepared and not subsequently moved, the voice trigger launches:
+This stops BEEP and first samples the existing LiDAR/SLAM stack. If consecutive scan, map, pose, stopped-state, and lease checks are healthy, preparation preserves the active stack instead of restarting it. Only an unhealthy stack triggers the dependency-ordered LiDAR, Cartographer, occupancy-grid, and bridge recovery. Preparation then verifies a stationary stability window and writes a one-run readiness marker. Avoid manually resetting SLAM immediately before this command; rapid duplicate restarts can delay DDS scan delivery to a new Cartographer subscriber.
+
+For direct control, the defaults are sufficient. For Tailscale preparation, select the bridge route; Jupyter recovery automatically derives the same host unless `BEEP_HOST` is explicitly set:
+
+```bash
+BEEP_BRIDGE_URL=http://beep.tailb08b32.ts.net:8766 ./scripts/prepare_fair_run.sh
+```
+
+Once prepared and not subsequently moved, the voice trigger launches:
 
 ```bash
 ./scripts/start_fair_run_fast.sh

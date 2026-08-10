@@ -12,21 +12,47 @@ import json
 import sys
 import urllib.request
 
+from scripts.fair_readiness import stopped_and_unleased
+
 base, timeout_text = sys.argv[1:]
 timeout = float(timeout_text)
 try:
     with urllib.request.urlopen(base + "/stop", timeout=timeout) as response:
-        json.load(response)
+        payload = json.load(response)
+    status = payload.get("status") or payload
+    if not stopped_and_unleased(status):
+        with urllib.request.urlopen(base + "/status", timeout=timeout) as response:
+            status = json.load(response)
+        if not stopped_and_unleased(status):
+            raise RuntimeError("bridge still reports an active motion owner")
 except Exception as stop_error:
     try:
         with urllib.request.urlopen(base + "/status", timeout=timeout) as response:
             status = json.load(response)
     except Exception:
         raise SystemExit(f"Preparation stop unconfirmed: {stop_error}")
-    if status.get("moving") is not False or status.get("motion_lease_id") is not None:
+    if not stopped_and_unleased(status):
         raise SystemExit(f"Preparation stop unconfirmed: {stop_error}")
 PY
-python3 scripts/jupyter_reset_slam.py
+
+# Preserve a healthy stack. Rapidly restarting YahboomStart and then Cartographer
+# can leave a newly discovered subscriber waiting while the already healthy
+# publisher continues elsewhere. Reset only when consecutive live status samples
+# prove that recovery is actually necessary.
+if python3 scripts/fair_readiness.py \
+    --bridge-url "${BRIDGE_URL}" \
+    --timeout "${HTTP_TIMEOUT_S}" \
+    --samples 3; then
+    printf 'SLAM already healthy; preserving the active stack.\n'
+else
+    printf 'SLAM recovery required; restarting LiDAR, Cartographer, grid, and bridge.\n'
+    # Jupyter recovery must use the same route as the bridge probe unless the
+    # operator explicitly selected a different maintenance host.
+    RESET_HOST="${BRIDGE_URL#*://}"
+    RESET_HOST="${RESET_HOST%%/*}"
+    RESET_HOST="${RESET_HOST%%:*}"
+    BEEP_HOST="${BEEP_HOST:-${RESET_HOST}}" python3 scripts/jupyter_reset_slam.py
+fi
 
 python3 - "${BRIDGE_URL}" "${MARKER}" "${HTTP_TIMEOUT_S}" <<'PY'
 import json
