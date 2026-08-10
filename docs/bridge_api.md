@@ -127,8 +127,8 @@ POST /mark_object
 Default sequence:
 
 1. continuously approach generic frontal LiDAR geometry,
-2. stop at 0.25 m,
-3. perform a configurable open-loop left turn (`0.75 s` by default; `90°` is plan/calibration metadata rather than closed-loop measurement),
+2. stop no closer than the 0.55 m autonomous front floor,
+3. perform a LiDAR-sweep-guarded, measured-yaw turn (`90°` by default),
 4. execute `pee`.
 
 The routine aborts before turning if the approach does not reach its target safely. Human-leg detection and person-relative target selection are not implemented.
@@ -137,10 +137,10 @@ Example:
 
 ```json
 {
-  "target_front": 0.25,
+  "target_front": 0.55,
   "max_duration": 5.0,
   "turn": "left",
-  "turn_duration": 0.75,
+  "turn_duration": 8.0,
   "dry_run": true
 }
 ```
@@ -157,7 +157,7 @@ Example:
 
 ```json
 {
-  "target_front": 0.25,
+  "target_front": 0.55,
   "max_duration": 5.0,
   "pulse": 0.20,
   "stall_window": 4,
@@ -166,7 +166,7 @@ Example:
 }
 ```
 
-`pulse`, `stall_window`, `stall_delta`, and `reorient` remain accepted for API compatibility but are ignored. The endpoint delegates to `forward_continuous_until`; open-loop pulses and blind reorientation are disabled. `max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds), and the center-front target is clamped to at least 0.25 m. `mark_object` uses the newer continuous forward supervisor rather than visible pulse-by-pulse gait. A deliberate target approach may reduce the center-front range to its configured target (0.25 m by default), but it requires all six sectors, at least 0.42 m on both front diagonals, and at least 0.35 m on both sides throughout. The subsequent guarded turn requires 0.42 m in every sector and aborts any 0.75-second window that produces less than 10 degrees of measured yaw.
+`pulse`, `stall_window`, `stall_delta`, and `reorient` remain accepted for API compatibility but are ignored. The endpoint delegates to `forward_continuous_until`; open-loop pulses and blind reorientation are disabled. `max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds), and every autonomous center-front target is clamped to at least 0.55 m. The approach requires all six sectors, at least 0.42 m on both front diagonals, and at least 0.35 m on both sides throughout. The subsequent guarded turn requires 0.42 m in every sector and aborts any 0.75-second window that produces less than 10 degrees of measured yaw.
 
 ## Navigation modes
 

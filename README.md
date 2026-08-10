@@ -9,10 +9,10 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.18.1-external-observer
+0.18.2-safety-review
 ```
 
-Bridge `0.17.3-moving-camera-handshake` remains the last physically deployed version. Source `0.18.1-external-observer` adds offline-verified full-body collision policy and an external observer interface; neither increment is physically validated or deployed yet.
+Bridge `0.17.3-moving-camera-handshake` remains the last physically deployed version. Source `0.18.2-safety-review` adds offline-verified full-body collision policy and an external observer interface; neither increment is physically validated or deployed yet.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 

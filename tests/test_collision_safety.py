@@ -31,8 +31,25 @@ class CollisionSafetyTests(unittest.TestCase):
     def test_front_obstacle_backs_away_only_with_full_side_and_rear_clearance(self):
         action, duration, reason = bridge.choose_explore_action(FRONT_BLOCKED_REAR_CLEAR)
         self.assertEqual(action, "back")
-        self.assertLessEqual(duration, 0.35)
+        self.assertEqual(duration, 0.30)
         self.assertEqual(reason, "front_footprint_breach_backoff")
+
+    def test_every_required_sector_fails_closed_when_missing_or_invalid(self):
+        clear = {
+            "front": 1.2, "front_left": 0.8, "front_right": 0.8,
+            "left": 0.7, "right": 0.7, "rear": 0.7,
+        }
+        for name in clear:
+            with self.subTest(sector=name):
+                incomplete = dict(clear)
+                incomplete.pop(name)
+                self.assertEqual(
+                    bridge.choose_explore_action(incomplete),
+                    ("stop", 0.0, "lidar_sector_missing_or_invalid"),
+                )
+        for invalid in (None, 0.0, -1.0, float("nan"), "not-a-range"):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(bridge.choose_explore_action(dict(clear, front=invalid))[0], "stop")
 
     def test_boxed_in_state_stops_instead_of_guessing(self):
         sectors = dict(WALL_CONTACT, rear=0.30, right=0.31)
@@ -62,6 +79,7 @@ class CollisionSafetyTests(unittest.TestCase):
         improved = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.24, front_left=0.24, front_right=0.24)
         self.assertFalse(bridge.escape_made_progress("back", FRONT_BLOCKED_REAR_CLEAR, stalled))
         self.assertTrue(bridge.escape_made_progress("back", FRONT_BLOCKED_REAR_CLEAR, improved))
+        self.assertGreaterEqual(bridge.ESCAPE_CLEARANCE_GAIN_M, 0.08)
 
     def test_turn_progress_requires_heading_change_and_safe_sweep(self):
         sectors = {
@@ -90,11 +108,65 @@ class CollisionSafetyTests(unittest.TestCase):
         with patch.object(bridge, "forward_continuous_until", return_value=guarded) as continuous:
             result = bridge.forward_until(target_front=0.10, max_duration=2.0)
 
-        continuous.assert_called_once_with(target_front=0.25, max_duration=2.0, min_target=0.25)
+        continuous.assert_called_once_with(target_front=0.55, max_duration=2.0, min_target=0.55)
         self.assertEqual(result["controller"], "forward_continuous_until")
         self.assertEqual(result["mode"], "forward_until")
         self.assertFalse(result["ok"])
         self.assertFalse(hasattr(bridge, "_forward_until_legacy_disabled"))
+
+    def test_forward_supervisor_enforces_corridor_threshold_while_moving(self):
+        state = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {
+                "front": 0.60, "front_left": 0.80, "front_right": 0.80,
+                "left": 0.70, "right": 0.70, "rear": 0.70,
+            },
+        }
+        with patch.object(bridge, "snapshot", return_value=state):
+            result = bridge.supervise_lidar_motion("forward", 1.0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "forward_footprint_breach")
+
+    def test_continuous_approach_rejects_front_below_autonomous_floor(self):
+        state = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "slam": {"active": True, "pose_valid": True, "usable": True,
+                     "pose_age_s": 0.01, "map_age_s": 0.01},
+            "pose": {"yaw": 0.0},
+            "sectors": {
+                "front": 0.54, "front_left": 0.80, "front_right": 0.80,
+                "left": 0.70, "right": 0.70, "rear": 0.70,
+            },
+        }
+        with patch.object(bridge, "snapshot", return_value=state), \
+                patch.object(bridge, "motor_send") as motor:
+            result = bridge.forward_continuous_until(target_front=0.25, max_duration=1.0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "footprint_clearance_rejected_before_start")
+        motor.assert_not_called()
+
+    def test_continuous_approach_aborts_if_front_floor_is_crossed(self):
+        safe = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "slam": {"active": True, "pose_valid": True, "usable": True,
+                     "pose_age_s": 0.01, "map_age_s": 0.01},
+            "pose": {"yaw": 0.0},
+            "sectors": {
+                "front": 0.80, "front_left": 0.80, "front_right": 0.80,
+                "left": 0.70, "right": 0.70, "rear": 0.70,
+            },
+        }
+        breached = dict(safe, sectors=dict(safe["sectors"], front=0.54))
+        with patch.object(bridge, "snapshot", side_effect=[safe, breached]), \
+                patch.object(bridge, "motor_send") as motor, \
+                patch.object(bridge, "stop_burst"):
+            result = bridge.forward_continuous_until(target_front=0.55, max_duration=1.0)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["reason"].startswith("footprint_clearance_breach:front=0.540"))
+        motor.assert_called_once_with("forward", step=None)
 
     def test_backward_supervisor_stops_when_rear_clearance_closes(self):
         state = {
@@ -134,6 +206,25 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "footprint_clearance_rejected_before_start")
         self.assertEqual(result["safety_reason"], "footprint_boxed_in_stop")
+
+    def test_autonomous_mission_refuses_missing_sector_without_reverse_command(self):
+        status = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {
+                "front_left": 0.8, "front_right": 0.8,
+                "left": 0.7, "right": 0.7, "rear": 0.7,
+            },
+            "slam": {"active": True, "pose_valid": True, "usable": True,
+                     "pose_age_s": 0.01, "map_age_s": 0.01},
+        }
+        with patch.object(bridge, "snapshot", return_value=status), \
+                patch.object(bridge, "motor_send") as motor:
+            result = bridge.start_autonomous_mission(mode="local", duration_s=30)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "footprint_clearance_rejected_before_start")
+        self.assertEqual(result["safety_reason"], "lidar_sector_missing_or_invalid")
+        motor.assert_not_called()
 
 
 if __name__ == "__main__":

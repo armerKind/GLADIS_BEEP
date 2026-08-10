@@ -107,7 +107,7 @@ python3 scripts/run_slam_presentation.py --armed --duration 120 --segment 30 --p
 Only test this in a suitable right-wall corner with at least 0.45 m left-turn clearance. First inspect the dry plan:
 
 ```bash
-curl -fsS 'http://192.168.8.88:8766/mark_object?target_front=0.20&max_duration=5&turn=left&dry_run=1'
+curl -fsS 'http://192.168.8.88:8766/mark_object?target_front=0.55&max_duration=5&turn=left&dry_run=1'
 ```
 
 For the live test, remove `&dry_run=1`. Keep one hand near BEEP and stop immediately if side clearance narrows.

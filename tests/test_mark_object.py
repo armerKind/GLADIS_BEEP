@@ -1,16 +1,8 @@
-import importlib.util
-from pathlib import Path
 import math
 import unittest
 from unittest.mock import patch
 
-
-MODULE_PATH = Path(__file__).parents[1] / "beep_bridge" / "beep_bridge.py"
-SPEC = importlib.util.spec_from_file_location("beep_bridge", MODULE_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError(f"could not load bridge module from {MODULE_PATH}")
-bridge = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(bridge)
+from beep_bridge import beep_bridge as bridge
 
 
 class MarkObjectPlanTests(unittest.TestCase):
@@ -37,7 +29,7 @@ class MarkObjectPlanTests(unittest.TestCase):
         result = bridge.mark_object(dry_run=True)
 
         plan = result["plan"]
-        self.assertEqual(plan["target_front_m"], 0.25)
+        self.assertEqual(plan["target_front_m"], 0.55)
         self.assertEqual(plan["approach_mode"], "continuous")
         self.assertEqual(plan["turn"], "left")
         self.assertEqual(plan["turn_degrees"], 90.0)
@@ -202,7 +194,7 @@ class MarkObjectPlanTests(unittest.TestCase):
         ])
 
     def test_continuous_approach_starts_forward_once_and_stops_at_target(self):
-        readings = iter([1.20, 0.80, 0.24])
+        readings = iter([1.20, 0.80, 0.55])
         commands = []
         stops = []
 
@@ -226,7 +218,7 @@ class MarkObjectPlanTests(unittest.TestCase):
             setattr(bridge, "stop_burst", lambda n=3: stops.append(n))
             bridge.time.sleep = lambda seconds: None
 
-            result = bridge.forward_continuous_until(target_front=0.25, max_duration=2.0)
+            result = bridge.forward_continuous_until(target_front=0.55, max_duration=2.0)
         finally:
             setattr(bridge, "snapshot", original_snapshot)
             setattr(bridge, "motor_send", original_motor_send)
@@ -245,6 +237,7 @@ class MarkObjectPlanTests(unittest.TestCase):
             "front_right": 0.8,
             "left": 0.7,
             "right": 0.7,
+            "rear": 0.7,
         })
 
         self.assertEqual(action, "forward")

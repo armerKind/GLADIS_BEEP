@@ -54,7 +54,7 @@ FOOTPRINT_SIDE_M = max(0.35, float(os.environ.get("BEEP_FOOTPRINT_SIDE_M", "0.35
 FOOTPRINT_REAR_M = max(0.45, float(os.environ.get("BEEP_FOOTPRINT_REAR_M", "0.45")))
 FORWARD_CORRIDOR_M = max(0.65, float(os.environ.get("BEEP_FORWARD_CORRIDOR_M", "0.65")))
 TURN_SWEEP_M = max(0.42, float(os.environ.get("BEEP_TURN_SWEEP_M", "0.42")))
-ESCAPE_CLEARANCE_GAIN_M = max(0.05, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
+ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
@@ -87,8 +87,8 @@ TRICK_SETTLE_S = float(os.environ.get("BEEP_TRICK_SETTLE_S", "2.0"))
 MARK_TURN_DIRECTION = os.environ.get("BEEP_MARK_TURN_DIRECTION", "left").strip().lower()
 MARK_TURN_DEGREES = float(os.environ.get("BEEP_MARK_TURN_DEGREES", "90.0"))
 MARK_TURN_TIMEOUT_S = float(os.environ.get("BEEP_MARK_TURN_TIMEOUT_S", "8.0"))
-MARK_TARGET_FRONT_M = float(os.environ.get("BEEP_MARK_TARGET_FRONT_M", "0.25"))
-MARK_MIN_FRONT_M = max(0.25, float(os.environ.get("BEEP_MARK_MIN_FRONT_M", "0.25")))
+MARK_TARGET_FRONT_M = max(FOOTPRINT_FRONT_M, float(os.environ.get("BEEP_MARK_TARGET_FRONT_M", str(FOOTPRINT_FRONT_M))))
+MARK_MIN_FRONT_M = max(FOOTPRINT_FRONT_M, float(os.environ.get("BEEP_MARK_MIN_FRONT_M", str(FOOTPRINT_FRONT_M))))
 TRICK_ACTIONS = {
     "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
@@ -118,7 +118,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.1-external-observer",
+    "version": "0.18.2-safety-review",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1239,9 +1239,29 @@ def map_svg(m=None):
     return svg.encode('utf-8')
 
 
+def validated_sector_values(sectors):
+    required = ("front", "front_left", "front_right", "left", "right", "rear")
+    if not isinstance(sectors, dict):
+        return None
+    values = {}
+    for name in required:
+        raw = sectors.get(name)
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value <= 0.0:
+            return None
+        values[name] = value
+    return values
+
+
 def choose_explore_action(sectors):
-    values = {name: float(sectors.get(name) or 0.0) for name in
-              ("front", "front_left", "front_right", "left", "right", "rear")}
+    values = validated_sector_values(sectors)
+    if values is None:
+        return "stop", 0.0, "lidar_sector_missing_or_invalid"
     front, fl, fr = values["front"], values["front_left"], values["front_right"]
     left, right, rear = values["left"], values["right"], values["rear"]
     front_breach = front < FOOTPRINT_FRONT_M or min(fl, fr) < FOOTPRINT_DIAGONAL_M
@@ -1270,9 +1290,10 @@ def choose_explore_action(sectors):
 
 def escape_made_progress(action, before, after, before_pose=None, after_pose=None):
     """Require measured geometric improvement before allowing another escape."""
-    required = ("front", "front_left", "front_right", "left", "right", "rear")
-    before_values = {name: float(before.get(name) or 0.0) for name in required}
-    after_values = {name: float(after.get(name) or 0.0) for name in required}
+    before_values = validated_sector_values(before)
+    after_values = validated_sector_values(after)
+    if before_values is None or after_values is None:
+        return False
     if action in ("back", "backward"):
         if (after_values["rear"] < FOOTPRINT_REAR_M or
                 min(after_values["left"], after_values["right"]) < FOOTPRINT_SIDE_M):
@@ -1457,7 +1478,7 @@ def supervise_fluent_forward(duration, poll_s=0.08):
         sec = sector_values(st, ("front", "front_left", "front_right", "left", "right", "rear"))
         if sec is None:
             return {"ok": False, "reason": "lidar_sector_missing_during_fluent_forward", "elapsed_s": time.time() - started}
-        if (sec["front"] < FOOTPRINT_FRONT_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
+        if (sec["front"] < FORWARD_CORRIDOR_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
                 sec["front_right"] < FOOTPRINT_DIAGONAL_M or
                 min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M):
             return {"ok": False, "reason": "obstacle_during_fluent_forward", "elapsed_s": time.time() - started}
@@ -1480,7 +1501,7 @@ def supervise_lidar_motion(action, duration, poll_s=0.08):
         if sec is None:
             return {"ok": False, "reason": "lidar_sector_missing_during_lidar_walk", "elapsed_s": time.time() - started}
         if action == "forward":
-            if (sec["front"] < FOOTPRINT_FRONT_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
+            if (sec["front"] < FORWARD_CORRIDOR_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
                     sec["front_right"] < FOOTPRINT_DIAGONAL_M or min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M):
                 return {"ok": False, "reason": "forward_footprint_breach", "elapsed_s": time.time() - started}
         elif action in ("back", "backward"):
@@ -1932,6 +1953,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 waypoint_cell = path[min(len(path) - 1, lookahead_cells)]
                 waypoint_world = grid.cell_to_world(waypoint_cell)
                 decision = choose_natural_motion(pose_tuple, waypoint_world, sec, rng, chaos=chaos)
+                if reactive_action in ("turnleft", "turnright"):
+                    decision = {"action": reactive_action, "duration": 0.30,
+                                "why": "reactive_corridor_turn:" + reactive_reason}
 
                 if dry_run:
                     trace.append({
@@ -2083,14 +2107,14 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     return result
 
 
-def forward_until(target_front=0.25, max_duration=8.0, pulse=0.45, stall_window=5, stall_delta=0.03,
-                  min_target=0.25, reorient=True):
+def forward_until(target_front=FOOTPRINT_FRONT_M, max_duration=8.0, pulse=0.45, stall_window=5, stall_delta=0.03,
+                  min_target=FOOTPRINT_FRONT_M, reorient=True):
     """Compatibility endpoint delegated to the full six-sector approach guard."""
     del pulse, stall_window, stall_delta, reorient
     result = forward_continuous_until(
-        target_front=max(0.25, float(target_front)),
+        target_front=max(FOOTPRINT_FRONT_M, float(target_front)),
         max_duration=max_duration,
-        min_target=max(0.25, float(min_target)),
+        min_target=max(FOOTPRINT_FRONT_M, float(min_target)),
     )
     result = dict(result)
     result["mode"] = "forward_until"
@@ -2098,11 +2122,11 @@ def forward_until(target_front=0.25, max_duration=8.0, pulse=0.45, stall_window=
     return result
 
 
-def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.25,
+def forward_continuous_until(target_front=FOOTPRINT_FRONT_M, max_duration=5.0, min_target=FOOTPRINT_FRONT_M,
                              poll_interval=0.05, step=None, max_heading_drift_degrees=15.0):
     """Walk forward continuously with live LiDAR, SLAM and heading guards."""
     global last_run
-    min_target = max(0.25, float(min_target))
+    min_target = max(FOOTPRINT_FRONT_M, float(min_target))
     target_front = max(float(target_front), min_target)
     max_duration = min(max(float(max_duration), 0.0), FORWARD_UNTIL_MAX_S)
     poll_interval = min(max(float(poll_interval), 0.02), 0.20)
@@ -2131,7 +2155,8 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.2
             last_run = result
             return result
         initial_front = initial_sectors["front"]
-        if (min(initial_sectors["front_left"], initial_sectors["front_right"]) < FOOTPRINT_DIAGONAL_M or
+        if (initial_front < FOOTPRINT_FRONT_M or
+                min(initial_sectors["front_left"], initial_sectors["front_right"]) < FOOTPRINT_DIAGONAL_M or
                 min(initial_sectors["left"], initial_sectors["right"]) < FOOTPRINT_SIDE_M):
             result = {"ok": False, "mode": "forward_continuous_until",
                       "reason": "footprint_clearance_rejected_before_start", "status": final_state, "trace_tail": []}
@@ -2175,8 +2200,9 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.2
                     break
                 diagonal = min(required["front_left"], required["front_right"])
                 side = min(required["left"], required["right"])
-                if diagonal < FOOTPRINT_DIAGONAL_M or side < FOOTPRINT_SIDE_M:
-                    reason = f"footprint_clearance_breach:diagonal={diagonal:.3f},side={side:.3f}"
+                if required["front"] < FOOTPRINT_FRONT_M or diagonal < FOOTPRINT_DIAGONAL_M or side < FOOTPRINT_SIDE_M:
+                    reason = (f"footprint_clearance_breach:front={required['front']:.3f},"
+                              f"diagonal={diagonal:.3f},side={side:.3f}")
                     break
                 if front is not None and front <= target_front:
                     reason = f"target_reached:{front:.3f}"
