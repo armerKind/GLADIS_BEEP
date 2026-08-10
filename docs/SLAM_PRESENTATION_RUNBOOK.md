@@ -29,7 +29,7 @@ This runbook preserves the synchronous Friday/presentation coordinator. It inten
 
    Continue only if it returns `"ok": true` and reports fresh, valid SLAM.
 
-6. Verify the live bridge version before rehearsing. Repository source is `0.17.1-moving-eyes`, while the last physically verified deployment was `0.16.3-normal-pace`; do not assume deployment from Git state alone.
+6. Verify the live bridge version before rehearsing. Repository and verified deployment are `0.17.3-moving-camera-handshake`; do not assume deployment from Git state alone.
 
 ## Emergency stop
 

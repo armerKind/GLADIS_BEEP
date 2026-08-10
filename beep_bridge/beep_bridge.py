@@ -103,7 +103,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.17.1-moving-eyes",
+    "version": "0.17.3-moving-camera-handshake",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -820,8 +820,8 @@ def capture_frame(timeout=4.0, max_bytes=1_500_000):
 
     The Yahboom video server may connect but emit no bytes unless the app
     control state is Standard/Fullscreen. Stationary capture may prepare that
-    mode, but capture during any active motion lease must never touch the app
-    control socket because its preparation sequence includes a motor stop.
+    mode. During an active motion lease, send only that non-motion mode packet;
+    the motor-stop packet remains categorically forbidden.
     """
     timeout = float(timeout)
     deadline = time.time() + timeout
@@ -829,20 +829,20 @@ def capture_frame(timeout=4.0, max_bytes=1_500_000):
     moving_capture = active_motion_lease() is not None
     if moving_capture:
         remember("moving_frame_requested")
-    else:
+    try:
+        ctrl = socket.create_connection((HOST, APP_PORT), timeout=1.2)
+        ctrl.settimeout(0.25)
         try:
-            ctrl = socket.create_connection((HOST, APP_PORT), timeout=1.2)
-            ctrl.settimeout(0.25)
-            try:
-                ctrl.recv(256)
-            except Exception:
-                pass
-            ctrl.sendall(pkt(0x0F, [0x01]))  # Standard/control mode
+            ctrl.recv(256)
+        except Exception:
+            pass
+        ctrl.sendall(pkt(0x0F, [0x01]))  # Standard/control mode; not a motor command.
+        if not moving_capture:
             time.sleep(0.05)
             ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
             time.sleep(0.15)
-        except Exception as e:
-            remember("camera_standard_failed", error=repr(e))
+    except Exception as e:
+        remember("camera_standard_failed", moving_capture=moving_capture, error=repr(e))
 
     try:
         req = urllib.request.Request(CAMERA_URL, headers={"User-Agent": "beep-bridge/0.3"})
@@ -865,7 +865,8 @@ def capture_frame(timeout=4.0, max_bytes=1_500_000):
     finally:
         if ctrl is not None:
             try:
-                ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
+                if not moving_capture:
+                    ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
             except Exception:
                 pass
             try:
@@ -2267,6 +2268,13 @@ def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TU
     return result
 
 
+def handler_failure_requires_stop(path: str, error: BaseException) -> bool:
+    """Keep observation and response-transport failures out of motor control."""
+    if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+        return False
+    return path not in {"/frame.jpg", "/camera.jpg"}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "BEEPBridge/0.5"
 
@@ -2428,11 +2436,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)
+            stop_required = handler_failure_requires_stop(p.path, e)
+            remember("handler_exception", path=p.path, error=repr(e), stop_required=stop_required)
+            if stop_required:
+                try:
+                    request_stop("handler_exception")
+                except Exception:
+                    pass
             try:
-                request_stop("handler_exception")
-            except Exception:
+                self.send_json({"ok": False, "error": repr(e), "status": snapshot()}, 500)
+            except (BrokenPipeError, ConnectionResetError):
                 pass
-            self.send_json({"ok": False, "error": repr(e), "status": snapshot()}, 500)
 
     def do_POST(self):
         p = urlparse(self.path)
@@ -2520,11 +2534,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             with state_lock:
                 state["last_error"] = repr(e)
+            stop_required = handler_failure_requires_stop(p.path, e)
+            remember("handler_exception", path=p.path, error=repr(e), stop_required=stop_required)
+            if stop_required:
+                try:
+                    request_stop("handler_exception")
+                except Exception:
+                    pass
             try:
-                request_stop("handler_exception")
-            except Exception:
+                self.send_json({"ok": False, "error": repr(e), "status": snapshot()}, 500)
+            except (BrokenPipeError, ConnectionResetError):
                 pass
-            self.send_json({"ok": False, "error": repr(e), "status": snapshot()}, 500)
 
 
 def main():

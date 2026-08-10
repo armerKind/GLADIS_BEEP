@@ -191,7 +191,7 @@ Autonomy paths execute repeated SDK stop attempts during cleanup. Every lease al
 - The external Wi-Fi adapter and Tailscale path can disappear while local robot services continue.
 - Human-leg detection and socially targeted marking are not implemented.
 - Persistent visual object/person tracks exist, but metric visual localization and deterministic semantic course adjustment during an active mission remain incomplete.
-- Asynchronous missions and moving temporal vision are not yet physically validated on bridge source `0.17.1-moving-eyes`.
+- Asynchronous missions, exact cancellation, and four-frame moving temporal vision are physically validated on bridge `0.17.3-moving-camera-handshake`; six- and nine-frame gait panels remain unvalidated.
 
 ## Next useful upgrades
 

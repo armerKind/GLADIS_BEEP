@@ -2,7 +2,7 @@ import io
 import time
 import unittest
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
@@ -41,6 +41,14 @@ class MovingFrameRingTests(unittest.TestCase):
 
 
 class ContinuousMovingCaptureTests(unittest.TestCase):
+    def test_default_shutdown_wait_exceeds_network_timeout(self):
+        thread = MagicMock()
+        thread.is_alive.return_value = False
+        capture = ContinuousMovingCapture("http://beep", timeout_s=15)
+        capture._thread = thread
+        capture.stop()
+        self.assertGreaterEqual(thread.join.call_args.args[0], 16)
+
     def test_renders_six_and_nine_panel_moving_windows(self):
         capture = ContinuousMovingCapture("http://beep", fps=3.0, max_frames=18)
         for index in range(9):

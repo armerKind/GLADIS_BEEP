@@ -75,6 +75,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
                     sys.executable, "scripts/run_moving_eyes.py",
                     "--base-url", f"http://127.0.0.1:{server.server_port}",
                     "--panel", "4", "--fps", "6", "--duration", "5",
+                    "--inference-interval", "0.1",
                     "--max-inferences", "1", "--mock-response", str(FIXTURE),
                     "--output-root", directory,
                 ]
@@ -89,6 +90,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 windows = list(run.glob("w*"))
                 self.assertEqual(summary["inferences"], 1)
                 self.assertEqual(summary["panel_count"], 4)
+                self.assertEqual(summary["inference_interval_s"], 0.1)
                 self.assertFalse(summary["dispatch_performed"])
                 packet = json.loads((windows[0] / "observation_packet.json").read_text())
                 semantic = json.loads((windows[0] / "semantic_decision.json").read_text())

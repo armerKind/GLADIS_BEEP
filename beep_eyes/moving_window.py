@@ -106,11 +106,12 @@ class ContinuousMovingCapture:
             self._thread.start()
         return self
 
-    def stop(self, timeout_s: float = 5.0) -> None:
+    def stop(self, timeout_s: float | None = None) -> None:
         self._stop.set()
         thread = self._thread
+        join_timeout = max(5.0, self.timeout_s + 1.0) if timeout_s is None else float(timeout_s)
         if thread is not None:
-            thread.join(timeout_s)
+            thread.join(join_timeout)
         if thread is not None and thread.is_alive():
             raise RuntimeError("moving capture thread did not stop")
 

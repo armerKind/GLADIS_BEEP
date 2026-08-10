@@ -3,10 +3,10 @@
 Current bridge line:
 
 ```text
-0.17.1-moving-eyes
+0.17.3-moving-camera-handshake
 ```
 
-This is the repository source version. The last physically verified deployment was `0.16.3-normal-pace`; deploy and complete the staged hardware gate before treating `0.17.1-moving-eyes` as the live robot version.
+This repository version is physically deployed and verified on BEEP. The powered gate covered asynchronous mission start/status/exact cancellation, camera-timeout isolation from motion, and four-frame temporal Gemini perception during gait.
 
 Base URLs:
 

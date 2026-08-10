@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=3.0)
     parser.add_argument("--duration", type=float, default=90.0)
     parser.add_argument("--timeout", type=float, default=12.0)
+    parser.add_argument("--inference-interval", type=float, default=0.0,
+                        help="minimum seconds between completed semantic windows; capture continues while waiting")
     parser.add_argument("--model", default=None)
     parser.add_argument("--credential-source", choices=("auto", "environment", "hermes"), default="auto")
     parser.add_argument("--hermes-home", default=None)
@@ -73,6 +75,8 @@ def main() -> int:
         raise SystemExit("--duration must be within [5, 600]")
     if args.max_inferences < 0 or args.max_inferences > 1000:
         raise SystemExit("--max-inferences must be within [0, 1000]")
+    if args.inference_interval < 0 or args.inference_interval > 600:
+        raise SystemExit("--inference-interval must be within [0, 600]")
 
     initial_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
     if not args.allow_no_mission and (
@@ -90,11 +94,16 @@ def main() -> int:
     world = WorldModel()
     deadline = time.monotonic() + args.duration
     inference_count = 0
+    last_inference_finished = 0.0
     capture.start()
     try:
         if not capture.ring.wait_for(args.panel, min(args.duration, max(args.timeout, args.panel / args.fps + 2.0))):
             raise RuntimeError(f"moving camera did not produce {args.panel} frames: {capture.stats()}")
         while time.monotonic() < deadline:
+            wait_s = last_inference_finished + args.inference_interval - time.monotonic()
+            if inference_count and wait_s > 0:
+                time.sleep(min(0.25, wait_s))
+                continue
             mission_payload = fetch_json(args.base_url, "/mission", args.timeout)
             mission = mission_payload.get("mission")
             if not args.allow_no_mission and (
@@ -144,6 +153,7 @@ def main() -> int:
                 trace.write(json.dumps(event, sort_keys=True) + "\n")
             print(json.dumps(event, sort_keys=True), flush=True)
             inference_count += 1
+            last_inference_finished = time.monotonic()
             if args.max_inferences and inference_count >= args.max_inferences:
                 break
     finally:
@@ -154,6 +164,7 @@ def main() -> int:
         "run_id": run_id,
         "output_dir": str(output_dir),
         "panel_count": args.panel,
+        "inference_interval_s": args.inference_interval,
         "inferences": inference_count,
         "capture": capture.stats(),
         "dispatch_performed": False,

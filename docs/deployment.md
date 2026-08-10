@@ -2,7 +2,7 @@
 
 ## Source and deployment state
 
-Repository bridge source is `0.17.1-moving-eyes`. The last physically verified deployment was `0.16.3-normal-pace`; asynchronous missions and moving temporal vision must pass the staged hardware gate below after deployment. Host-side `beep_agent`, `beep_eyes`, and runner scripts execute on GLADIS and are not uploaded by the bridge deployment helper.
+Repository bridge source and verified deployment are `0.17.3-moving-camera-handshake`. Asynchronous exact-ID mission cancellation, camera-timeout isolation, and four-frame moving temporal Gemini perception passed the powered gate. Host-side `beep_agent`, `beep_eyes`, and runner scripts execute on GLADIS and are not uploaded by the bridge deployment helper.
 
 ## Pi paths
 
@@ -81,7 +81,7 @@ curl -s http://beep.tailb08b32.ts.net:8766/health | python3 -m json.tool
 curl -s http://beep.tailb08b32.ts.net:8766/stop | python3 -m json.tool
 ```
 
-Require `/health` field `status.version == "0.17.1-moving-eyes"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
+Require `/health` field `status.version == "0.17.3-moving-camera-handshake"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
 
 ## Install the bridge systemd unit
 

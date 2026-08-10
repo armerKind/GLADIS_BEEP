@@ -2,7 +2,7 @@
 
 Measured: 2026-07-21
 
-> **Historical measurement:** this file preserves the original probe and its observed failures. It is not the current camera status. The MJPEG path was subsequently restored and used for real temporal Gemini captures. Repository source now includes bounded moving 4/6/9-frame buffering, although moving-gait image quality still awaits physical validation on `0.17.1-moving-eyes`.
+> **Historical measurement:** this file preserves the original probe and its observed failures. It is not the current camera status. The MJPEG path was subsequently restored and used for real temporal Gemini captures. Four-frame temporal inference during gait is physically validated on `0.17.3-moving-camera-handshake`; six- and nine-frame gait quality still await comparison.
 
 Probe host: GLADIS over direct Tailscale
 

@@ -21,7 +21,7 @@ The model proposes semantic skills. It never emits motor registers, velocities, 
 
 ## Current milestone: continuous moving temporal eyes
 
-Repository implementation is complete through mock/integration validation. The stationary camera/Gemini path has been exercised on BEEP, but bridge `0.17.1-moving-eyes` and moving capture during real gait await the next powered hardware gate. Panel count remains configurable because 4/6/9 must be compared under actual vibration rather than selected through numerology.
+Bridge `0.17.3-moving-camera-handshake` has physically completed four-frame temporal Gemini inference during real gait. Camera timeouts no longer cancel an independently guarded mission, and moving capture sends the vendor camera-mode handshake without its motor-stop packet. Six- and nine-frame panels still require comparison under actual vibration rather than selection through numerology. `run_moving_eyes.py --inference-interval` spaces semantic windows while the capture ring continues updating.
 
 Implemented in `beep_eyes/`, `scripts/run_beep_eyes.py`, and `scripts/run_moving_eyes.py`:
 

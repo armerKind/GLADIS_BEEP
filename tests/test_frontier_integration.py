@@ -46,6 +46,7 @@ class FrontierIntegrationTests(unittest.TestCase):
 
     def test_camera_capture_during_motion_never_sends_app_stop(self):
         jpeg = b"\xff\xd8moving-frame\xff\xd9"
+        control_socket = MagicMock()
 
         class Response:
             def __enter__(self): return self
@@ -53,11 +54,21 @@ class FrontierIntegrationTests(unittest.TestCase):
             def read(self, _size): return jpeg
 
         with patch.object(bridge, "active_motion_lease", return_value=object()), \
-             patch.object(bridge.socket, "create_connection") as control, \
+             patch.object(bridge.socket, "create_connection", return_value=control_socket), \
              patch.object(bridge.urllib.request, "urlopen", return_value=Response()):
             frame = bridge.capture_frame(timeout=1)
         self.assertEqual(frame, jpeg)
-        control.assert_not_called()
+        sent = [entry.args[0] for entry in control_socket.sendall.call_args_list]
+        self.assertEqual(sent, [bridge.pkt(0x0F, [0x01])])
+        self.assertNotIn(bridge.pkt(0x12, [bridge.CMD_PAYLOAD["stop"]]), sent)
+
+    def test_perception_and_transport_failures_do_not_cancel_motion(self):
+        self.assertFalse(bridge.handler_failure_requires_stop("/frame.jpg", TimeoutError("camera timeout")))
+        self.assertFalse(bridge.handler_failure_requires_stop("/camera.jpg", RuntimeError("bad frame")))
+        self.assertFalse(bridge.handler_failure_requires_stop("/status", BrokenPipeError("client left")))
+        self.assertFalse(bridge.handler_failure_requires_stop("/mission", ConnectionResetError("client left")))
+        self.assertTrue(bridge.handler_failure_requires_stop("/move", RuntimeError("motor handler failed")))
+        self.assertTrue(bridge.handler_failure_requires_stop("/coverage_explore", TimeoutError("controller failed")))
 
     def test_async_mission_returns_while_worker_moves_and_can_be_cancelled(self):
         entered = threading.Event()

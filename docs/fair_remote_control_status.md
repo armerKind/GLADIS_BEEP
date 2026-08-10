@@ -45,7 +45,7 @@ Last physically deployed and verified bridge line:
 0.16.3-normal-pace
 ```
 
-Repository source is now `0.17.1-moving-eyes`; its asynchronous mission and moving-camera additions await the next powered deployment/validation gate.
+Repository and deployed source are now `0.17.3-moving-camera-handshake`; asynchronous exact-ID cancellation and four-frame moving temporal perception passed the powered validation gate.
 
 Pi services observed active during that verification:
 
@@ -110,7 +110,7 @@ The working replacement is the Realtek RTL8188EUS adapter. Retaining this note p
 ## Safety boundary
 
 - Keep `/stop` reachable before movement.
-- For asynchronous source `0.17.1-moving-eyes`, keep `/mission` reachable and test exact-ID cancellation before a long run.
+- Keep `/mission` reachable and test exact-ID cancellation before a long run.
 - Do not depend on remote round-trip latency for obstacle stopping.
 - Confirm fresh LiDAR and `moving=false` before autonomous runs.
 - Use guarded-SLAM modes only when pose/map freshness and validity pass.

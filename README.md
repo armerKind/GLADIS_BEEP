@@ -9,12 +9,12 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.17.1-moving-eyes
+0.17.3-moving-camera-handshake
 ```
 
-The last physically deployed and verified bridge before the current offline increment was `0.16.3-normal-pace`. Versions `0.17.0-async-mission` and `0.17.1-moving-eyes` are committed and tested but await the next powered hardware gate. Source readiness is not deployment; robots remain stubbornly literal about this distinction.
+Bridge `0.17.3-moving-camera-handshake` is physically deployed and verified on BEEP. Asynchronous exact-ID cancellation, camera-timeout isolation, and four-frame temporal Gemini perception during gait passed the powered hardware gate; six- and nine-frame moving panels still require comparison.
 
-Current source implements the following. The core locomotion, mapping, synchronous coverage, stationary camera, microphone, and speaker paths have been exercised on BEEP. Asynchronous missions and moving temporal vision have full mock/integration coverage but are not yet claimed as physically validated.
+Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers
