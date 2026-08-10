@@ -46,7 +46,17 @@ FORWARD_UNTIL_MAX_S = float(os.environ.get("BEEP_FORWARD_UNTIL_MAX_S", "12.0"))
 FRONT_STOP_M = float(os.environ.get("BEEP_FRONT_STOP_M", "0.35"))
 SIDE_STOP_M = float(os.environ.get("BEEP_SIDE_STOP_M", "0.22"))
 SCAN_STALE_S = float(os.environ.get("BEEP_SCAN_STALE_S", "0.60"))
-HARD_CLEARANCE_M = max(0.15, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.15")))
+HARD_CLEARANCE_M = max(0.18, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.18")))
+FOOTPRINT_FRONT_M = max(0.55, float(os.environ.get("BEEP_FOOTPRINT_FRONT_M", "0.55")))
+FOOTPRINT_DIAGONAL_M = max(0.42, float(os.environ.get("BEEP_FOOTPRINT_DIAGONAL_M", "0.42")))
+FOOTPRINT_SIDE_M = max(0.35, float(os.environ.get("BEEP_FOOTPRINT_SIDE_M", "0.35")))
+FOOTPRINT_REAR_M = max(0.45, float(os.environ.get("BEEP_FOOTPRINT_REAR_M", "0.45")))
+FORWARD_CORRIDOR_M = max(0.65, float(os.environ.get("BEEP_FORWARD_CORRIDOR_M", "0.65")))
+TURN_SWEEP_M = max(0.42, float(os.environ.get("BEEP_TURN_SWEEP_M", "0.42")))
+ESCAPE_CLEARANCE_GAIN_M = max(0.05, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
+ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
+TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
+TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
 
 CMD_PAYLOAD = {
     "stop": 0x00,
@@ -75,7 +85,7 @@ MARK_TURN_DIRECTION = os.environ.get("BEEP_MARK_TURN_DIRECTION", "left").strip()
 MARK_TURN_DEGREES = float(os.environ.get("BEEP_MARK_TURN_DEGREES", "90.0"))
 MARK_TURN_TIMEOUT_S = float(os.environ.get("BEEP_MARK_TURN_TIMEOUT_S", "8.0"))
 MARK_TARGET_FRONT_M = float(os.environ.get("BEEP_MARK_TARGET_FRONT_M", "0.25"))
-MARK_MIN_FRONT_M = float(os.environ.get("BEEP_MARK_MIN_FRONT_M", "0.16"))
+MARK_MIN_FRONT_M = max(0.25, float(os.environ.get("BEEP_MARK_MIN_FRONT_M", "0.25")))
 TRICK_ACTIONS = {
     "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
@@ -103,7 +113,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.17.3-moving-camera-handshake",
+    "version": "0.18.0-footprint-guard",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1225,29 +1235,65 @@ def map_svg(m=None):
 
 
 def choose_explore_action(sectors):
-    front = sectors.get("front") or 0.0
-    fl = sectors.get("front_left") or 0.0
-    fr = sectors.get("front_right") or 0.0
-    left = sectors.get("left") or 0.0
-    right = sectors.get("right") or 0.0
-    # BEEP has shown left-biased/stiff forward motion. Prefer lateral escape when
-    # the left/front-left sector tightens instead of turning in place repeatedly.
-    if (fl < 0.32 or left < 0.28) and right > 0.42:
-        return "right", 0.60, "left_close_strafe_right"
-    if (fr < 0.32 or right < 0.28) and left > 0.42:
-        return "left", 0.60, "right_close_strafe_left"
-    if front > max(EXPLORE_SAFE_FRONT_M, 0.50) and fl > 0.34 and fr > 0.34:
-        return "forward", 0.80, "front_clear_stride"
-    # If forward is blocked but one side is open, use short turns only. DogZilla
-    # SDK clamps turn step to at least 30, so duration must stay short.
-    if max(left, fl) >= max(right, fr):
-        return "turnleft", 0.45, "left_more_open_turn"
-    return "turnright", 0.45, "right_more_open_turn"
+    values = {name: float(sectors.get(name) or 0.0) for name in
+              ("front", "front_left", "front_right", "left", "right", "rear")}
+    front, fl, fr = values["front"], values["front_left"], values["front_right"]
+    left, right, rear = values["left"], values["right"], values["rear"]
+    front_breach = front < FOOTPRINT_FRONT_M or min(fl, fr) < FOOTPRINT_DIAGONAL_M
+    body_sides_clear = min(left, right) >= FOOTPRINT_SIDE_M
+    rear_escape_clear = rear >= FOOTPRINT_REAR_M and body_sides_clear
+
+    if front_breach:
+        if rear_escape_clear:
+            return "back", 0.30, "front_footprint_breach_backoff"
+        return "stop", 0.0, "footprint_boxed_in_stop"
+    if min(left, right) < FOOTPRINT_SIDE_M:
+        return "stop", 0.0, "side_footprint_breach_stop"
+    if (front >= FORWARD_CORRIDOR_M and fl >= FOOTPRINT_DIAGONAL_M and
+            fr >= FOOTPRINT_DIAGONAL_M):
+        return "forward", 0.50, "full_body_corridor_clear"
+
+    sweep_clear = min(front, fl, fr, left, right, rear) >= TURN_SWEEP_M
+    if sweep_clear:
+        if max(left, fl) >= max(right, fr):
+            return "turnleft", 0.30, "footprint_sweep_left"
+        return "turnright", 0.30, "footprint_sweep_right"
+    if rear_escape_clear:
+        return "back", 0.30, "turn_sweep_blocked_backoff"
+    return "stop", 0.0, "footprint_boxed_in_stop"
+
+
+def escape_made_progress(action, before, after, before_pose=None, after_pose=None):
+    """Require measured geometric improvement before allowing another escape."""
+    required = ("front", "front_left", "front_right", "left", "right", "rear")
+    before_values = {name: float(before.get(name) or 0.0) for name in required}
+    after_values = {name: float(after.get(name) or 0.0) for name in required}
+    if action in ("back", "backward"):
+        if (after_values["rear"] < FOOTPRINT_REAR_M or
+                min(after_values["left"], after_values["right"]) < FOOTPRINT_SIDE_M):
+            return False
+        before_front = sum(before_values[name] for name in ("front", "front_left", "front_right")) / 3.0
+        after_front = sum(after_values[name] for name in ("front", "front_left", "front_right")) / 3.0
+        return after_front - before_front >= ESCAPE_CLEARANCE_GAIN_M
+    if action in ("turnleft", "turnright"):
+        if not before_pose or not after_pose or before_pose.get("yaw") is None or after_pose.get("yaw") is None:
+            return False
+        yaw_change = abs(norm_angle(float(after_pose["yaw"]) - float(before_pose["yaw"])))
+        sweep = min(after_values[name] for name in ("front", "front_left", "front_right", "left", "right", "rear"))
+        return yaw_change >= math.radians(15.0) and sweep >= TURN_SWEEP_M
+    return False
+
+
+def turn_window_stalled(elapsed_s, progress_delta_rad):
+    return (float(elapsed_s) >= TURN_PROGRESS_WINDOW_S and
+            float(progress_delta_rad) < TURN_PROGRESS_MIN_RAD)
 
 
 def explore_step_for(action):
     if action == "forward":
         return 20
+    if action in ("back", "backward"):
+        return 15
     if action in ("left", "right"):
         return 18
     if action in ("turnleft", "turnright"):
@@ -1260,6 +1306,8 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
     max_duration = min(max(float(max_duration), 0.0), 180.0)
     started = time.time()
     trace = []
+    last_escape_action = None
+    consecutive_escape_actions = 0
     m = ensure_room_map(name=name, reset=reset_map)
     active_explore = {"active": True, "started_at": started, "name": name}
     reason = "max_duration"
@@ -1274,24 +1322,43 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                 return {"ok": False, "mode": "explore_room", "reason": reason, "status": s0, "map": map_summary(m), "trace_tail": []}
             update_map_from_scan(m, scan_match=False)
             if rotate_scan:
-                # In-place panorama: crude but valuable when odometry is unreliable.
+                # Rotate only when the complete body sweep is clear and each pulse
+                # produces measurable heading progress.
                 for i in range(6):
                     if motion_is_cancelled():
                         reason = "motion_cancelled"
                         break
                     if time.time() - started >= max_duration:
                         break
-                    motor_send("turnleft", step=30)
-                    dur = 0.45
-                    if not wait_motion(dur):
-                        reason = "motion_cancelled"
+                    before_state = snapshot()
+                    before_sectors = before_state.get("sectors") or {}
+                    if len(before_sectors) < 6 or min(float(before_sectors.get(name) or 0.0) for name in
+                                                      ("front", "front_left", "front_right", "left", "right", "rear")) < TURN_SWEEP_M:
+                        reason = "rotation_sweep_clearance_rejected"
                         break
+                    before_pose = pose_copy()
+                    motor_send("turnleft", step=30)
+                    dur = 0.30
+                    supervised = supervise_lidar_motion("turnleft", dur)
                     stop_burst(2)
-                    update_pose_for_action("turnleft", dur)
+                    after_state = snapshot()
+                    after_sectors = after_state.get("sectors") or {}
+                    after_pose = pose_copy()
+                    progress = bool(supervised["ok"]) and escape_made_progress(
+                        "turnleft", before_sectors, after_sectors, before_pose, after_pose,
+                    )
+                    trace.append({"phase": "rotate_scan", "i": i + 1,
+                                  "supervisor_reason": supervised["reason"], "progress": progress,
+                                  "sectors_before": before_sectors, "sectors_after": after_sectors})
+                    if not supervised["ok"]:
+                        reason = str(supervised["reason"])
+                        break
+                    if not progress:
+                        reason = "rotation_no_progress"
+                        break
                     time.sleep(0.08)
-                    up = update_map_from_scan(m, scan_match=False)
-                    trace.append({"phase": "rotate_scan", "i": i + 1, "update": up, "sectors": snapshot().get("sectors", {})})
-            while time.time() - started < max_duration:
+                    update_map_from_scan(m, scan_match=False)
+            while reason == "max_duration" and time.time() - started < max_duration:
                 if motion_is_cancelled():
                     reason = "motion_cancelled"
                     break
@@ -1300,41 +1367,47 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                     reason = "scan_stale_or_missing"
                     break
                 sec = st.get("sectors", {})
-                if (sec.get("front") or 99) < 0.22 or (sec.get("front_left") or 99) < 0.20 or (sec.get("front_right") or 99) < 0.20:
-                    # Try one lateral escape if the opposite side is clearly open; otherwise stop.
-                    if (sec.get("front_left") or 99) < 0.20 and (sec.get("right") or 0) > 0.45:
-                        motor_send("right", step=18)
-                        dur = 0.55
-                        time.sleep(dur)
-                        stop_burst(2)
-                        update_pose_for_action("right", dur)
-                        time.sleep(0.05)
-                        up = update_map_from_scan(m, scan_match=False)
-                        trace.append({"action": "right", "step": 18, "duration": round(dur, 2), "why": "reflex_left_close_escape", "sectors": sec, "pose": pose_copy(), "map_update": up})
-                        continue
-                    if (sec.get("front_right") or 99) < 0.20 and (sec.get("left") or 0) > 0.45:
-                        motor_send("left", step=18)
-                        dur = 0.55
-                        time.sleep(dur)
-                        stop_burst(2)
-                        update_pose_for_action("left", dur)
-                        time.sleep(0.05)
-                        up = update_map_from_scan(m, scan_match=False)
-                        trace.append({"action": "left", "step": 18, "duration": round(dur, 2), "why": "reflex_right_close_escape", "sectors": sec, "pose": pose_copy(), "map_update": up})
-                        continue
-                    reason = "too_close_reflex_stop"
-                    break
                 action, dur, why = choose_explore_action(sec)
-                step = explore_step_for(action)
-                motor_send(action, step=step)
-                if not wait_motion(dur):
-                    reason = "motion_cancelled"
+                if action == "stop":
+                    reason = why
+                    trace.append({"action": "stop", "why": why, "sectors": sec})
                     break
+                if action == "forward":
+                    last_escape_action = None
+                    consecutive_escape_actions = 0
+                elif action == last_escape_action:
+                    consecutive_escape_actions += 1
+                else:
+                    last_escape_action = action
+                    consecutive_escape_actions = 1
+                if action != "forward" and consecutive_escape_actions > 2:
+                    reason = "repeated_escape_action_stop"
+                    trace.append({"action": "stop", "why": reason,
+                                  "attempted_action": action, "sectors": sec})
+                    break
+                step = explore_step_for(action)
+                before_pose = pose_copy()
+                motor_send(action, step=step)
+                supervised = supervise_lidar_motion(action, dur)
                 stop_burst(2)
-                update_pose_for_action(action, dur)
+                after_state = snapshot()
+                after_sectors = after_state.get("sectors") or {}
+                after_pose = pose_copy()
+                progress = action == "forward" or (bool(supervised["ok"]) and escape_made_progress(
+                    action, sec, after_sectors, before_pose, after_pose,
+                ))
+                trace.append({"action": action, "step": step,
+                              "duration": round(float(supervised["elapsed_s"]), 2), "why": why,
+                              "sectors_before": sec, "sectors_after": after_sectors,
+                              "progress": progress, "supervisor_reason": supervised["reason"]})
+                if not supervised["ok"]:
+                    reason = str(supervised["reason"])
+                    break
+                if not progress:
+                    reason = "escape_no_progress"
+                    break
                 time.sleep(0.05)
-                up = update_map_from_scan(m, scan_match=False)
-                trace.append({"action": action, "step": step, "duration": round(dur, 2), "why": why, "sectors": sec, "pose": pose_copy(), "map_update": up})
+                update_map_from_scan(m, scan_match=False)
         except Exception as e:
             reason = "exception:" + repr(e)
             with state_lock:
@@ -1343,7 +1416,7 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
             stop_burst(3)
             active_explore = None
     saved_path = save_room_map(name) if save else None
-    result = {"ok": not reason.startswith("exception") and not reason.startswith("scan_stale") and reason != "motion_cancelled", "mode": "explore_room", "reason": reason, "elapsed_s": round(time.time() - started, 2), "map": map_summary(m), "saved_path": saved_path, "trace_tail": trace[-30:], "status": snapshot()}
+    result = {"ok": reason == "max_duration", "mode": "explore_room", "reason": reason, "elapsed_s": round(time.time() - started, 2), "map": map_summary(m), "saved_path": saved_path, "trace_tail": trace[-30:], "status": snapshot()}
     last_run = result
     remember("explore_done", reason=reason, elapsed_s=result["elapsed_s"], saved_path=saved_path)
     return result
@@ -1376,17 +1449,20 @@ def supervise_fluent_forward(duration, poll_s=0.08):
             return {"ok": False, "reason": "scan_stale_during_fluent_forward", "elapsed_s": time.time() - started}
         if not slam_ok(st):
             return {"ok": False, "reason": "slam_unusable_during_fluent_forward", "elapsed_s": time.time() - started}
-        sec = sector_values(st, ("front", "front_left", "front_right"))
+        sec = sector_values(st, ("front", "front_left", "front_right", "left", "right", "rear"))
         if sec is None:
             return {"ok": False, "reason": "lidar_sector_missing_during_fluent_forward", "elapsed_s": time.time() - started}
-        if (sec["front"] < 0.38 or sec["front_left"] < 0.22 or sec["front_right"] < 0.22):
+        if (sec["front"] < FOOTPRINT_FRONT_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
+                sec["front_right"] < FOOTPRINT_DIAGONAL_M or
+                min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M):
             return {"ok": False, "reason": "obstacle_during_fluent_forward", "elapsed_s": time.time() - started}
         time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
 
 
-def supervise_lidar_forward(duration, poll_s=0.08):
-    """Supervise fluent forward gait using only fresh local LiDAR."""
+def supervise_lidar_motion(action, duration, poll_s=0.08):
+    """Supervise one body-relative action against the full LiDAR footprint."""
+    action = str(action).lower()
     started = time.time()
     deadline = started + max(0.0, float(duration))
     while time.time() < deadline:
@@ -1395,13 +1471,33 @@ def supervise_lidar_forward(duration, poll_s=0.08):
         st = snapshot()
         if not scan_ok(st):
             return {"ok": False, "reason": "scan_stale_during_lidar_walk", "elapsed_s": time.time() - started}
-        sec = sector_values(st, ("front", "front_left", "front_right"))
+        sec = sector_values(st, ("front", "front_left", "front_right", "left", "right", "rear"))
         if sec is None:
             return {"ok": False, "reason": "lidar_sector_missing_during_lidar_walk", "elapsed_s": time.time() - started}
-        if (sec["front"] < 0.38 or sec["front_left"] < 0.22 or sec["front_right"] < 0.22):
-            return {"ok": False, "reason": "obstacle_during_lidar_walk", "elapsed_s": time.time() - started}
+        if action == "forward":
+            if (sec["front"] < FOOTPRINT_FRONT_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
+                    sec["front_right"] < FOOTPRINT_DIAGONAL_M or min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M):
+                return {"ok": False, "reason": "forward_footprint_breach", "elapsed_s": time.time() - started}
+        elif action in ("back", "backward"):
+            if sec["rear"] < FOOTPRINT_REAR_M:
+                return {"ok": False, "reason": "rear_clearance_breach", "elapsed_s": time.time() - started}
+            if min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
+                return {"ok": False, "reason": "side_clearance_breach_during_backoff", "elapsed_s": time.time() - started}
+        elif action in ("turnleft", "turnright"):
+            if min(sec.values()) < TURN_SWEEP_M:
+                return {"ok": False, "reason": "turn_sweep_clearance_breach", "elapsed_s": time.time() - started}
+        else:
+            return {"ok": False, "reason": "unsupported_reactive_motion", "elapsed_s": time.time() - started}
         time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
+
+
+def supervise_lidar_forward(duration, poll_s=0.08):
+    """Compatibility wrapper for the local-LiDAR forward supervisor."""
+    result = supervise_lidar_motion("forward", duration, poll_s=poll_s)
+    if result["reason"] == "forward_footprint_breach":
+        result = dict(result, reason="obstacle_during_lidar_walk")
+    return result
 
 
 def coverage_has_plateaued(samples, now, window_s, min_growth_cells):
@@ -1423,6 +1519,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     trace = []
     reason = "max_duration"
     current_action = None
+    last_escape_action = None
+    consecutive_escape_actions = 0
     coverage_samples = deque()
     initial_known_cells = None
     final_known_cells = None
@@ -1463,61 +1561,70 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
                 remaining = max_duration - (time.time() - started)
+                if action == "stop":
+                    stop_burst(3)
+                    current_action = None
+                    reason = why
+                    trace.append({"action": "stop", "why": why, "sectors": sec})
+                    break
                 if action == "forward":
+                    last_escape_action = None
+                    consecutive_escape_actions = 0
                     current_action, gait_started = start_or_continue_fluent_forward(current_action, step=20)
                     supervised = supervise_lidar_forward(min(0.50, remaining))
-                    trace.append({"action": "forward", "gait_started": gait_started, "duration": round(supervised["elapsed_s"], 3), "why": why, "sectors": sec})
+                    trace.append({"action": "forward", "gait_started": gait_started,
+                                  "duration": round(float(supervised["elapsed_s"]), 3),
+                                  "why": why, "sectors": sec})
                     if not supervised["ok"]:
                         stop_burst(2)
                         current_action = None
                         if supervised["reason"] == "obstacle_during_lidar_walk":
-                            trace.append({"action": "stop_reassess", "why": supervised["reason"], "sectors": snapshot().get("sectors") or {}})
+                            trace.append({"action": "stop_reassess", "why": supervised["reason"],
+                                          "sectors": snapshot().get("sectors") or {}})
                             time.sleep(0.10)
                             continue
-                        reason = supervised["reason"]
+                        reason = str(supervised["reason"])
                         break
                     continue
-                curve_direction = None
-                if action in ("turnleft", "left"):
-                    curve_direction = "left"
-                elif action in ("turnright", "right"):
-                    curve_direction = "right"
-                can_curve = (
-                    curve_direction is not None and
-                    float(sec.get("front") or 0) > 0.52 and
-                    float(sec.get("front_left") or 0) > 0.22 and
-                    float(sec.get("front_right") or 0) > 0.22
-                )
-                if can_curve:
-                    assert curve_direction is not None
-                    curve_duration = (0.90 if action.startswith("turn") else 0.65)
-                    sdk_curve(curve_direction, forward_step=20, yaw_step=30)
-                    current_action = "forward"
-                    supervised = supervise_lidar_forward(min(curve_duration, remaining))
-                    trace.append({"action": "arc_" + curve_direction, "duration": round(supervised["elapsed_s"], 3), "why": why, "sectors": sec})
-                    if supervised["ok"]:
-                        sdk_straighten()
-                        continue
-                    stop_burst(2)
-                    current_action = None
-                    if supervised["reason"] == "obstacle_during_lidar_walk":
-                        trace.append({"action": "stop_reassess", "why": supervised["reason"], "sectors": snapshot().get("sectors") or {}})
-                        time.sleep(0.10)
-                        continue
-                    reason = supervised["reason"]
-                    break
                 if current_action is not None:
                     stop_burst(2)
                     current_action = None
-                if action in ("turnleft", "turnright"):
-                    duration *= 2.0
-                duration = min(duration, remaining)
-                motor_send(action, step=explore_step_for(action))
-                if not wait_motion(duration):
-                    reason = "motion_cancelled"
+                if action == last_escape_action:
+                    consecutive_escape_actions += 1
+                else:
+                    last_escape_action = action
+                    consecutive_escape_actions = 1
+                if consecutive_escape_actions > 2:
+                    reason = "repeated_escape_action_stop"
+                    trace.append({"action": "stop", "why": reason,
+                                  "attempted_action": action, "sectors": sec})
                     break
+                duration = min(duration, remaining)
+                before_pose = pose_copy()
+                motor_send(action, step=explore_step_for(action))
+                supervised = supervise_lidar_motion(action, duration)
                 stop_burst(2)
-                trace.append({"action": action, "duration": round(duration, 3), "why": why, "sectors": sec})
+                after_state = snapshot()
+                after_sectors = after_state.get("sectors") or {}
+                after_pose = pose_copy()
+                progress = bool(supervised["ok"]) and escape_made_progress(
+                    action, sec, after_sectors, before_pose, after_pose,
+                )
+                trace.append({
+                    "action": action,
+                    "duration": round(float(supervised["elapsed_s"]), 3),
+                    "why": why,
+                    "sectors_before": sec,
+                    "sectors_after": after_sectors,
+                    "progress": progress,
+                    "supervisor_reason": supervised["reason"],
+                })
+                if not supervised["ok"]:
+                    reason = str(supervised["reason"])
+                    break
+                if not progress:
+                    reason = "escape_no_progress"
+                    break
         except Exception as exc:
             reason = "exception:" + repr(exc)
             with state_lock:
@@ -1526,7 +1633,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
             stop_burst(3)
             active_explore = None
     result = {
-        "ok": not reason.startswith("exception") and not reason.startswith("scan_stale") and reason not in ("slam_invalid_during_coverage", "motion_cancelled"),
+        "ok": reason in ("max_duration", "coverage_plateau"),
         "mode": "coverage_explore" if coverage_goal else "lidar_walk",
         "localization": "guarded_slam_coverage_with_local_lidar_motion" if coverage_goal else "local_lidar_reactive_no_global_slam",
         "reason": reason,
@@ -1625,6 +1732,10 @@ def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
         return {"ok": False, "reason": "scan_stale_or_missing_before_start", "status": initial}
     if mode == "coverage" and not slam_ok(initial):
         return {"ok": False, "reason": "slam_unusable_before_start", "status": initial}
+    initial_action, _, initial_reason = choose_explore_action(initial.get("sectors") or {})
+    if initial_action == "stop":
+        return {"ok": False, "reason": "footprint_clearance_rejected_before_start",
+                "safety_reason": initial_reason, "status": initial}
     with mission_lock:
         if _active_mission is not None:
             return {"ok": False, "busy": True, "reason": "autonomous_mission_busy", "mission": mission_snapshot()}
@@ -1720,16 +1831,13 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
 
                 pose = pose_copy()
                 pose_tuple = (float(pose["x"]), float(pose["y"]), float(pose["yaw"]))
-                sec = sector_values(st, ("front", "front_left", "front_right", "left", "right"))
+                sec = sector_values(st, ("front", "front_left", "front_right", "left", "right", "rear"))
                 if sec is None:
                     reason = "lidar_sector_missing"
                     break
-                if (sec["front"] < max(0.20, HARD_CLEARANCE_M) or
-                        sec["front_left"] < HARD_CLEARANCE_M or
-                        sec["front_right"] < HARD_CLEARANCE_M or
-                        sec["left"] < HARD_CLEARANCE_M or
-                        sec["right"] < HARD_CLEARANCE_M):
-                    reason = "hard_obstacle_stop"
+                reactive_action, _, reactive_reason = choose_explore_action(sec)
+                if reactive_action in ("back", "stop"):
+                    reason = "frontier_footprint_clearance_stop:" + reactive_reason
                     break
 
                 path = None
@@ -1746,7 +1854,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                         stall_count = 0
                     else:
                         target_cell = grid.world_to_cell(*selected_target_world)
-                        radius_cells = max(1, int(math.ceil(0.16 / grid.resolution)))
+                        radius_cells = max(1, int(math.ceil(ROBOT_FOOTPRINT_RADIUS_M / grid.resolution)))
                         blocked = inflate_obstacles(grid, radius_cells)
                         start_cell = nearest_free_cell(grid, grid.world_to_cell(pose_tuple[0], pose_tuple[1]), blocked)
                         if start_cell is not None:
@@ -1763,7 +1871,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
 
                 if selected_target_world is None:
                     excluded_cells = [grid.world_to_cell(x, y) for x, y in excluded_world]
-                    plan = find_frontier_plan(grid, pose_tuple, rng, chaos=chaos, robot_radius_m=0.16, excluded=excluded_cells)
+                    plan = find_frontier_plan(grid, pose_tuple, rng, chaos=chaos,
+                                              robot_radius_m=ROBOT_FOOTPRINT_RADIUS_M,
+                                              excluded=excluded_cells)
                     if plan is None:
                         reason = "coverage_complete_or_no_reachable_frontiers"
                         break
@@ -1818,20 +1928,28 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     if gait_action is not None:
                         stop_burst(1)
                         gait_action = None
+                    if min(sec.values()) < TURN_SWEEP_M:
+                        reason = "turn_sweep_clearance_rejected"
+                        break
                     if turn_streak_action == decision["action"]:
                         turn_streak_count += 1
                     else:
                         turn_streak_action = decision["action"]
                         turn_streak_count = 1
                         turn_streak_start_yaw = float(before_pose[2])
+                    turn_duration = min(0.30, float(decision["duration"]))
+                    decision["duration"] = turn_duration
                     motor_send(decision["action"], step=decision["step"])
-                    if not wait_motion(float(decision["duration"])):
-                        reason = "motion_cancelled"
+                    motion_window = supervise_lidar_motion(decision["action"], turn_duration)
+                    if not motion_window["ok"]:
+                        reason = str(motion_window["reason"])
+                        stop_burst(2)
                         break
                     stop_burst(1)
                     time.sleep(rng.uniform(0.04, 0.10))
                 after_pose_dict = pose_copy()
                 after_pose = (float(after_pose_dict["x"]), float(after_pose_dict["y"]), float(after_pose_dict["yaw"]))
+                after_sectors = (snapshot().get("sectors") or {})
                 translated = math.hypot(after_pose[0] - before_pose[0], after_pose[1] - before_pose[1])
                 if decision["action"] == "forward" and translated < 0.008:
                     stall_count += 1
@@ -1853,10 +1971,21 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     "path_cells": len(path),
                     "frontier": selected_meta,
                     "pose": after_pose_dict,
-                    "sectors": sec,
+                    "sectors_before": sec,
+                    "sectors_after": after_sectors,
                 })
 
                 if decision["action"] in ("turnleft", "turnright"):
+                    turn_progress = escape_made_progress(
+                        decision["action"], sec, after_sectors,
+                        {"yaw": before_pose[2]}, {"yaw": after_pose[2]},
+                    )
+                    trace[-1]["turn_progress"] = turn_progress
+                    if not turn_progress:
+                        stop_burst(2)
+                        gait_action = None
+                        reason = "turn_no_progress"
+                        break
                     streak_start_yaw = float(after_pose[2] if turn_streak_start_yaw is None else turn_streak_start_yaw)
                     turn_yaw_delta = abs(norm_angle(float(after_pose[2]) - streak_start_yaw))
                     trace[-1]["turn_streak_count"] = turn_streak_count
@@ -1899,7 +2028,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
             active_explore = None
 
     result = {
-        "ok": not reason.startswith("exception") and reason not in ("scan_stale_or_missing", "slam_pose_unavailable_or_stale", "slam_pose_guard_rejected_drift", "slam_map_unavailable_or_stale", "slam_grid_not_received", "turn_progress_stalled", "motion_cancelled"),
+        "ok": reason in ("max_duration", "coverage_complete_or_no_reachable_frontiers", "dry_run_plan_ready"),
         "mode": "frontier_explore",
         "reason": reason,
         "elapsed_s": round(time.time() - started, 2),
@@ -1919,116 +2048,27 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     return result
 
 
-def forward_until(target_front=0.10, max_duration=8.0, pulse=0.45, stall_window=5, stall_delta=0.03,
-                  min_target=0.08, reorient=True):
-    global last_run
-    target_front = max(float(target_front), float(min_target))
-    max_duration = min(max(float(max_duration), 0.0), FORWARD_UNTIL_MAX_S)
-    pulse = min(max(float(pulse), 0.10), 1.20)
-    stall_window = max(int(stall_window), 3)
-    stall_delta = max(float(stall_delta), 0.005)
-
-    trace = []
-    readings = []
-    total = 0.0
-    started = time.time()
-    reason = "max_duration"
-
-    with motion_lock:
-        s0 = snapshot()
-        if not scan_ok(s0):
-            result = {"ok": False, "mode": "forward_until", "reason": "scan_stale_or_missing_before_start", "status": s0, "trace_tail": []}
-            last_run = result
-            return result
-        if front_distance(s0) is not None and front_distance(s0) <= target_front:
-            result = {"ok": True, "mode": "forward_until", "reason": f"already_at_target:{front_distance(s0):.2f}m", "status": s0, "trace_tail": []}
-            last_run = result
-            return result
-
-        try:
-            while total < max_duration:
-                if motion_is_cancelled():
-                    reason = "motion_cancelled"
-                    break
-                s = snapshot()
-                before = front_distance(s)
-                if not scan_ok(s):
-                    reason = "scan_stale_or_missing"
-                    break
-                if before is not None and before <= target_front:
-                    reason = f"target_reached_before:{before:.3f}"
-                    break
-
-                run_for = min(pulse, max_duration - total)
-                motor_send("forward")
-                if not wait_motion(run_for):
-                    reason = "motion_cancelled"
-                    break
-                stop_burst(2)
-                total += run_for
-                time.sleep(0.08)
-
-                s2 = snapshot()
-                after = front_distance(s2)
-                readings.append(after)
-                entry = {"pulse": len(trace) + 1, "run_s": round(run_for, 2), "total_s": round(total, 2),
-                         "front_before": before, "front_after": after, "sectors": s2.get("sectors", {})}
-                trace.append(entry)
-
-                if not scan_ok(s2):
-                    reason = "scan_stale_or_missing_after_pulse"
-                    break
-                if after is not None and after <= target_front:
-                    reason = f"target_reached:{after:.3f}"
-                    break
-                if before is not None and after is not None and after - before > 0.08:
-                    reason = f"moving_away:{before:.3f}->{after:.3f}"
-                    break
-
-                if len(readings) >= stall_window:
-                    recent = [x for x in readings[-stall_window:] if x is not None]
-                    if len(recent) >= stall_window:
-                        progress = recent[0] - recent[-1]
-                        if progress < -stall_delta:
-                            reason = f"moving_away_or_reversed:{progress:.3f}_over_{stall_window}"
-                            break
-                        if progress < stall_delta:
-                            # One small wiggle to correct the common angled/turning plateau.
-                            if reorient and not any(t.get("reorient") for t in trace):
-                                sec = s2.get("sectors", {})
-                                fl = sec.get("front_left") or 99
-                                fr = sec.get("front_right") or 99
-                                # Turn toward the side with the closer reading, trying to face the obstacle.
-                                turn = "left" if fl < fr else "right"
-                                sdk_turn = "turnleft" if turn == "left" else "turnright"
-                                motor_send(sdk_turn)
-                                time.sleep(0.35)
-                                stop_burst(2)
-                                trace.append({"reorient": turn, "duration_s": 0.28, "sectors": snapshot().get("sectors", {})})
-                                readings.clear()
-                                continue
-                            reason = f"stalled_progress:{progress:.3f}m_over_{stall_window}_pulses"
-                            break
-        except Exception as e:
-            reason = "exception:" + repr(e)
-            with state_lock:
-                state["last_error"] = repr(e)
-        finally:
-            stop_burst(3)
-
-    result = {"ok": not reason.startswith("exception"), "mode": "forward_until", "target_front_m": target_front,
-              "reason": reason, "commanded_s": round(total, 2), "elapsed_s": round(time.time() - started, 2),
-              "trace_tail": trace[-20:], "status": snapshot()}
-    last_run = result
-    remember("forward_until_done", reason=reason, commanded_s=round(total, 2), target_front_m=target_front)
+def forward_until(target_front=0.25, max_duration=8.0, pulse=0.45, stall_window=5, stall_delta=0.03,
+                  min_target=0.25, reorient=True):
+    """Compatibility endpoint delegated to the full six-sector approach guard."""
+    del pulse, stall_window, stall_delta, reorient
+    result = forward_continuous_until(
+        target_front=max(0.25, float(target_front)),
+        max_duration=max_duration,
+        min_target=max(0.25, float(min_target)),
+    )
+    result = dict(result)
+    result["mode"] = "forward_until"
+    result["controller"] = "forward_continuous_until"
     return result
 
 
-def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.16,
+def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.25,
                              poll_interval=0.05, step=None, max_heading_drift_degrees=15.0):
     """Walk forward continuously with live LiDAR, SLAM and heading guards."""
     global last_run
-    target_front = max(float(target_front), float(min_target))
+    min_target = max(0.25, float(min_target))
+    target_front = max(float(target_front), min_target)
     max_duration = min(max(float(max_duration), 0.0), FORWARD_UNTIL_MAX_S)
     poll_interval = min(max(float(poll_interval), 0.02), 0.20)
     max_heading_drift = math.radians(max(5.0, min(float(max_heading_drift_degrees), 30.0)))
@@ -2049,13 +2089,19 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
             last_run = result
             return result
         start_yaw = float(final_state["pose"]["yaw"])
-        initial_sectors = sector_values(final_state, ("front", "front_left", "front_right", "left", "right"))
+        initial_sectors = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
         if initial_sectors is None:
             result = {"ok": False, "mode": "forward_continuous_until",
                       "reason": "lidar_sector_missing_before_start", "status": final_state, "trace_tail": []}
             last_run = result
             return result
         initial_front = initial_sectors["front"]
+        if (min(initial_sectors["front_left"], initial_sectors["front_right"]) < FOOTPRINT_DIAGONAL_M or
+                min(initial_sectors["left"], initial_sectors["right"]) < FOOTPRINT_SIDE_M):
+            result = {"ok": False, "mode": "forward_continuous_until",
+                      "reason": "footprint_clearance_rejected_before_start", "status": final_state, "trace_tail": []}
+            last_run = result
+            return result
         if initial_front is not None and initial_front <= target_front:
             result = {"ok": True, "mode": "forward_continuous_until",
                       "reason": f"already_at_target:{initial_front:.3f}", "status": final_state, "trace_tail": []}
@@ -2088,16 +2134,17 @@ def forward_continuous_until(target_front=0.25, max_duration=5.0, min_target=0.1
                 if heading_drift > max_heading_drift:
                     reason = f"heading_drift:{math.degrees(heading_drift):.1f}deg"
                     break
-                if front is not None and front <= target_front:
-                    reason = f"target_reached:{front:.3f}"
-                    break
-                required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right"))
+                required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
                 if required is None:
                     reason = "lidar_sector_missing"
                     break
-                close_side = min(required[name] for name in ("front_left", "front_right", "left", "right"))
-                if close_side < max(float(min_target), HARD_CLEARANCE_M):
-                    reason = f"side_too_close:{close_side:.3f}"
+                diagonal = min(required["front_left"], required["front_right"])
+                side = min(required["left"], required["right"])
+                if diagonal < FOOTPRINT_DIAGONAL_M or side < FOOTPRINT_SIDE_M:
+                    reason = f"footprint_clearance_breach:diagonal={diagonal:.3f},side={side:.3f}"
+                    break
+                if front is not None and front <= target_front:
+                    reason = f"target_reached:{front:.3f}"
                     break
                 time.sleep(poll_interval)
         except Exception as e:
@@ -2147,10 +2194,12 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
         required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
         if required is None:
             return {"ok": False, "mode": "guarded_slam_turn", "reason": "lidar_sector_missing_before_start", "status": final_state, "trace_tail": []}
-        if min(required.values()) < HARD_CLEARANCE_M:
+        if min(required.values()) < TURN_SWEEP_M:
             return {"ok": False, "mode": "guarded_slam_turn", "reason": "clearance_breach_before_start", "status": final_state, "trace_tail": []}
         start_yaw = float(pose["yaw"])
         action = "turnleft" if turn == "left" else "turnright"
+        progress_checkpoint_at = started
+        progress_checkpoint = 0.0
         try:
             motor_send(action, step=step)
             while time.time() - started < max_duration:
@@ -2172,7 +2221,7 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
                     reason = "lidar_sector_missing"
                     break
                 nearest = min(required.values())
-                if nearest < HARD_CLEARANCE_M:
+                if nearest < TURN_SWEEP_M:
                     reason = f"clearance_too_close:{nearest:.3f}"
                     break
                 yaw = float(pose["yaw"])
@@ -2186,6 +2235,13 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
                 if progress < -math.radians(12.0):
                     reason = f"wrong_direction:{math.degrees(progress):.1f}deg"
                     break
+                now = time.time()
+                if now - progress_checkpoint_at >= TURN_PROGRESS_WINDOW_S:
+                    if turn_window_stalled(now - progress_checkpoint_at, progress - progress_checkpoint):
+                        reason = f"turn_no_progress:{math.degrees(progress - progress_checkpoint):.1f}deg"
+                        break
+                    progress_checkpoint_at = now
+                    progress_checkpoint = progress
                 time.sleep(poll_interval)
         except Exception as e:
             reason = "exception:" + repr(e)
@@ -2206,7 +2262,7 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
 def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TURN_DIRECTION,
                 turn_duration=MARK_TURN_TIMEOUT_S, dry_run=False):
     """Approach a target, turn left 90 degrees, then lift the right leg."""
-    target_front = max(0.20, min(float(target_front), 1.0))
+    target_front = max(MARK_MIN_FRONT_M, min(float(target_front), 1.0))
     max_duration = max(0.0, min(float(max_duration), 8.0))
     turn_timeout = max(1.0, min(float(turn_duration), 8.0))
     turn = str(turn).lower()
@@ -2228,24 +2284,26 @@ def mark_object(target_front=MARK_TARGET_FRONT_M, max_duration=5.0, turn=MARK_TU
     approach = forward_continuous_until(target_front=target_front, max_duration=max_duration, min_target=MARK_MIN_FRONT_M)
     steps.append({"step": "approach", "result": approach})
     snap = snapshot()
-    required = sector_values(snap, ("front", "front_left", "front_right", "left", "right"))
+    required = sector_values(snap, ("front", "front_left", "front_right", "left", "right", "rear"))
     if required is None:
         result = {"ok": False, "mode": "mark_object", "reason": "lidar_sector_missing_after_approach", "steps": steps, "status": snap}
         remember("mark_object_abort", reason=result["reason"])
         return result
     front = required["front"]
-    side_clearance = min(required[name] for name in ("front_left", "front_right", "left", "right"))
+    diagonal_clearance = min(required[name] for name in ("front_left", "front_right"))
+    side_clearance = min(required[name] for name in ("left", "right"))
     if motion_is_cancelled():
         stop_burst(3)
         result = {"ok": False, "mode": "mark_object", "reason": "motion_cancelled", "steps": steps, "status": snap}
         remember("mark_object_abort", reason=result["reason"], front=front)
         return result
-    if not approach.get("ok") or front is None or front < MARK_MIN_FRONT_M or side_clearance < HARD_CLEARANCE_M:
+    if (not approach.get("ok") or front is None or front < MARK_MIN_FRONT_M or
+            diagonal_clearance < FOOTPRINT_DIAGONAL_M or side_clearance < FOOTPRINT_SIDE_M):
         stop_burst(3)
         if not approach.get("ok"):
             reason = "approach_failed:" + str(approach.get("reason"))
-        elif side_clearance < HARD_CLEARANCE_M:
-            reason = f"unsafe_side_clearance:{side_clearance:.3f}"
+        elif diagonal_clearance < FOOTPRINT_DIAGONAL_M or side_clearance < FOOTPRINT_SIDE_M:
+            reason = f"unsafe_footprint_clearance:diagonal={diagonal_clearance:.3f},side={side_clearance:.3f}"
         else:
             reason = "unsafe_after_approach"
         result = {"ok": False, "mode": "mark_object", "reason": reason, "steps": steps, "status": snap}
@@ -2318,7 +2376,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
-                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M, "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
+                                "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M,
+                                "footprint_clearance_m": {"front": FOOTPRINT_FRONT_M, "front_diagonal": FOOTPRINT_DIAGONAL_M,
+                                                           "side": FOOTPRINT_SIDE_M, "rear": FOOTPRINT_REAR_M,
+                                                           "forward_corridor": FORWARD_CORRIDOR_M, "turn_sweep": TURN_SWEEP_M,
+                                                           "map_radius": ROBOT_FOOTPRINT_RADIUS_M,
+                                                           "escape_gain": ESCAPE_CLEARANCE_GAIN_M,
+                                                           "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,
+                                                           "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD)},
+                                "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
                                 "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "modes": ["coverage", "local"]},

@@ -166,7 +166,7 @@ def _cluster_representative(cluster):
     return min(cluster, key=lambda cell: (cell[0] - cx) ** 2 + (cell[1] - cy) ** 2)
 
 
-def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.16, excluded=None):
+def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.35, excluded=None):
     chaos = min(max(float(chaos), 0.0), 1.0)
     excluded = list(excluded or ())
     radius_cells = max(1, int(math.ceil(float(robot_radius_m) / grid.resolution)))

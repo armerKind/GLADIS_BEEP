@@ -161,10 +161,10 @@ class MarkObjectPlanTests(unittest.TestCase):
     def test_continuous_approach_aborts_on_heading_drift(self):
         snapshots = iter([
             {"scan_seen": True, "scan_age_s": 0.01,
-             "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right")},
+             "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
              "slam": {"usable": True}, "pose": {"yaw": 0.0}},
             {"scan_seen": True, "scan_age_s": 0.01,
-             "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right")},
+             "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
              "slam": {"usable": True}, "pose": {"yaw": math.radians(18.0)}},
         ])
         commands = []
@@ -210,7 +210,8 @@ class MarkObjectPlanTests(unittest.TestCase):
             return {
                 "scan_seen": True,
                 "scan_age_s": 0.01,
-                "sectors": {"front": next(readings), "front_left": 0.8, "front_right": 0.8, "left": 0.8, "right": 0.8},
+                "sectors": {"front": next(readings), "front_left": 0.8, "front_right": 0.8,
+                            "left": 0.8, "right": 0.8, "rear": 0.8},
                 "slam": {"active": True, "pose_valid": True, "usable": True},
                 "pose": {"yaw": 0.0},
             }
@@ -247,8 +248,8 @@ class MarkObjectPlanTests(unittest.TestCase):
         })
 
         self.assertEqual(action, "forward")
-        self.assertEqual(duration, 0.8)
-        self.assertEqual(reason, "front_clear_stride")
+        self.assertEqual(duration, 0.5)
+        self.assertEqual(reason, "full_body_corridor_clear")
 
     def test_quaternion_to_yaw_extracts_planar_slam_heading(self):
         yaw = math.pi / 2

@@ -80,7 +80,10 @@ class FrontierIntegrationTests(unittest.TestCase):
             cancelled = bridge.motion_is_cancelled()
             return {"ok": not cancelled, "reason": "motion_cancelled" if cancelled else "max_duration", "elapsed_s": 0.1}
 
-        with patch.object(bridge, "snapshot", return_value={"scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True}}), \
+        with patch.object(bridge, "snapshot", return_value={
+                 "scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True},
+                 "sectors": {"front": 1.2, "front_left": 0.8, "front_right": 0.8,
+                             "left": 0.8, "right": 0.8, "rear": 0.8}}), \
              patch.object(bridge, "scan_ok", return_value=True), \
              patch.object(bridge, "slam_ok", return_value=True), \
              patch.object(bridge, "lidar_walk", side_effect=fake_walk), \
@@ -133,7 +136,10 @@ class FrontierIntegrationTests(unittest.TestCase):
                 return response.status, json.load(response)
 
         try:
-            with patch.object(bridge, "snapshot", return_value={"scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True}}), \
+            with patch.object(bridge, "snapshot", return_value={
+                 "scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True},
+                 "sectors": {"front": 1.2, "front_left": 0.8, "front_right": 0.8,
+                             "left": 0.8, "right": 0.8, "rear": 0.8}}), \
                  patch.object(bridge, "scan_ok", return_value=True), \
                  patch.object(bridge, "slam_ok", return_value=True), \
                  patch.object(bridge, "lidar_walk", side_effect=fake_walk), \
@@ -274,7 +280,8 @@ class FrontierIntegrationTests(unittest.TestCase):
         close = {
             "scan_seen": True,
             "scan_age_s": 0.01,
-            "sectors": {"front": 0.30, "front_left": 0.8, "front_right": 0.8},
+            "sectors": {"front": 0.30, "front_left": 0.8, "front_right": 0.8,
+                        "left": 0.8, "right": 0.8, "rear": 0.8},
         }
         with patch.object(bridge, "snapshot", return_value=close):
             result = bridge.supervise_lidar_forward(1.0)
@@ -349,7 +356,8 @@ class FrontierIntegrationTests(unittest.TestCase):
             "scan_seen": True,
             "scan_age_s": 0.01,
             "slam": {"active": True, "pose_valid": True, "usable": True, "pose_age_s": 0.02, "map_age_s": 0.05},
-            "sectors": {"front": 1.4, "front_left": 1.0, "front_right": 1.0, "left": 1.2, "right": 1.1},
+            "sectors": {"front": 1.4, "front_left": 1.0, "front_right": 1.0,
+                        "left": 1.2, "right": 1.1, "rear": 1.0},
         }
         pose = {"x": 0.7, "y": 0.7, "yaw": 0.0, "source": "cartographer_slam", "confidence": 0.95, "scan_match_score": None}
 
@@ -363,8 +371,8 @@ class FrontierIntegrationTests(unittest.TestCase):
             result = bridge.frontier_explore(max_duration=1.0, chaos=0.45, seed=7, save=False)
 
         self.assertEqual(result["mode"], "frontier_explore")
-        self.assertIn(result["reason"], ("max_duration", "turn_progress_stalled"))
-        self.assertEqual(result["ok"], result["reason"] != "turn_progress_stalled")
+        self.assertIn(result["reason"], ("max_duration", "turn_no_progress"))
+        self.assertEqual(result["ok"], result["reason"] == "max_duration")
         self.assertTrue(any(action != "stop" for action, _ in commands))
         self.assertGreaterEqual(len(commands), 1)
         self.assertEqual(stops[-1], 3)

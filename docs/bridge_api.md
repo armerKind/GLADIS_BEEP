@@ -87,7 +87,7 @@ Supported primitive names:
 forward  back  left  right  turnleft  turnright  stop
 ```
 
-Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A positive non-stop primitive attempts `stop_burst()` after sleeping for the bounded duration. `/move` performs no LiDAR freshness or clearance check. Autonomous controllers do not currently use reverse movement. Primitive access is a supervised diagnostic/manual interface, not a substitute for navigation.
+Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A positive non-stop primitive attempts `stop_burst()` after sleeping for the bounded duration. `/move` performs no LiDAR freshness or clearance check. Autonomous controllers use reverse only as a 0.30-second LiDAR-supervised front-obstacle backoff; they do not use autonomous lateral motion. Primitive access is a supervised diagnostic/manual interface, not a substitute for navigation.
 
 ## Vendor preset actions
 
@@ -148,7 +148,7 @@ Example:
 
 ```json
 {
-  "target_front": 0.10,
+  "target_front": 0.25,
   "max_duration": 5.0,
   "pulse": 0.20,
   "stall_window": 4,
@@ -157,7 +157,7 @@ Example:
 }
 ```
 
-`max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds). `mark_object` uses the newer continuous forward supervisor rather than visible pulse-by-pulse gait.
+`pulse`, `stall_window`, `stall_delta`, and `reorient` remain accepted for API compatibility but are ignored. The endpoint delegates to `forward_continuous_until`; open-loop pulses and blind reorientation are disabled. `max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds), and the center-front target is clamped to at least 0.25 m. `mark_object` uses the newer continuous forward supervisor rather than visible pulse-by-pulse gait. A deliberate target approach may reduce the center-front range to its configured target (0.25 m by default), but it requires all six sectors, at least 0.42 m on both front diagonals, and at least 0.35 m on both sides throughout. The subsequent guarded turn requires 0.42 m in every sector and aborts any 0.75-second window that produces less than 10 degrees of measured yaw.
 
 ## Navigation modes
 
@@ -168,7 +168,7 @@ GET/POST /explore_room
 GET/POST /explore
 ```
 
-This older endpoint requires a fresh scan and `slam.active` before starting, then maintains the bridge's legacy map. It does not continuously enforce guarded-pose validity, pose/map freshness, or pose rejection during the loop. `save=1` writes the legacy bridge-map JSON, not the action trace. It is retained for compatibility; prefer `/frontier_explore`, `/coverage_explore`, or `/lidar_walk` according to the localization objective.
+This older endpoint requires a fresh scan and `slam.active` before starting, then maintains the bridge's legacy map. Every motion pulse now uses the same six-sector footprint supervisor and escape-progress checks as the local controller, including turn-sweep validation. It still does not continuously enforce guarded-pose validity, pose/map freshness, or pose rejection during the loop. `save=1` writes the legacy bridge-map JSON, not the action trace. It is retained for compatibility; prefer `/frontier_explore`, `/coverage_explore`, or `/lidar_walk` according to the localization objective.
 
 ### Frontier exploration
 
@@ -190,12 +190,12 @@ Behavior:
 
 - uses the authoritative ROS occupancy grid,
 - detects and clusters free/unknown boundaries,
-- inflates obstacles for leg sweep,
+- inflates obstacles by a conservative 0.35 m robot radius,
 - runs A* through known free space,
 - keeps selected frontiers until reached or lost,
 - maintains fluent forward gait across compatible replanning windows,
-- uses bounded calibrated turns,
-- aborts repeated turns that do not reduce heading error,
+- uses six-sector-supervised turns capped at 0.30 seconds,
+- aborts the first turn that does not produce at least 15 degrees of measured heading progress while preserving sweep clearance,
 - refuses stale/rejected SLAM or stale LiDAR,
 - attempts final SDK stop cleanup.
 
@@ -224,7 +224,7 @@ POST /mission/cancel
 }
 ```
 
-The bridge validates fresh LiDAR and, for `coverage`, usable guarded SLAM before acquiring an immutable exclusive lease. It then returns HTTP `202` with a mission ID while a dedicated onboard worker runs the fluent controller. `GET /mission` and ordinary `/status` requests remain responsive during locomotion, allowing the middle layer to reason, inspect SLAM/LiDAR progress, or cancel without waiting for a long navigation response.
+The bridge validates fresh LiDAR, all six sectors, full-body startup clearance and, for `coverage`, usable guarded SLAM before acquiring an immutable exclusive lease. Unsafe startup geometry returns HTTP `412` without moving. It then returns HTTP `202` with a mission ID while a dedicated onboard worker runs the fluent controller. `GET /mission` and ordinary `/status` requests remain responsive during locomotion, allowing the middle layer to reason, inspect SLAM/LiDAR progress, or cancel without waiting for a long navigation response.
 
 Only one asynchronous or synchronous motion owner may exist. Conflicts return HTTP `409`; they never queue. Cancellation may include the current `mission_id`, preventing a stale planner decision from cancelling a newer mission. Each lease also has an independent deadline watchdog that latches cancellation and attempts repeated SDK stops even if the movement worker stalls.
 
@@ -244,12 +244,14 @@ GET /demo_walk?max_duration=90
 
 This presentation-safe fallback makes **no global-SLAM claim**. It:
 
-- keeps one fluent forward SDK gait active across compatible windows,
-- polls local LiDAR approximately every 80 ms,
-- combines forward velocity and yaw for walking arcs,
-- clears yaw to resume straight walking without restarting gait,
-- retains in-place turns and lateral escapes for blocked geometry,
-- reassesses close obstacles and resumes when safe,
+- keeps one fluent forward SDK gait active across compatible clear windows,
+- polls all six local LiDAR sectors approximately every 80 ms,
+- requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
+- disables autonomous lateral escape and walking arcs,
+- permits only a 0.30-second supervised reverse backoff when front clearance is breached and rear clearance is available,
+- requires at least 0.08 m average frontal-clearance gain after backoff,
+- caps turns at 0.30 seconds and requires at least 15 degrees of measured heading progress plus preserved 0.42 m sweep clearance,
+- fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,
 - clamps duration to 180 seconds,
 - attempts final SDK stop cleanup.
 

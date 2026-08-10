@@ -98,9 +98,9 @@ Social goals produce stationary speech. Living hazards in the intended path caus
 
 ## Latest physical checkpoint
 
-The last verified embodied hardware increment used the synchronous guarded bridge to execute `explore(duration_s=5)`. BEEP moved for 5.38 seconds, used six forward strides and two right turns, released the exclusive lease, and finished stopped. Post-action perception then reported a near flat cabinet/wall face, no supported outward corner, and 0.465 m front clearance. Curiosity selected a bounded left-view `inspect_target`, which was intentionally not dispatched because that trial allowed one physical skill only.
+The asynchronous mission worker and moving-camera path were deployed and validated on powered hardware: one immutable lease remained active while chronological moving frames and Gemini windows were captured. The navigation result was not physically successful. BEEP contacted solid walls and closets, including during the initial Friday run; one recorded trace permitted only 0.127 m front and 0.128 m front-left clearance while selecting a lateral escape. Software telemetry must not classify such a run as successful.
 
-The newer asynchronous mission worker, `BridgeBodyAdapter`, and continuous moving-eyes supervisor are source-complete and mock/integration tested but not yet deployed to the powered robot. The next physical checkpoint must therefore validate deployment, moving camera capture, cancellation, and final stopped/no-lease state before longer autonomy claims.
+The reactive controller has therefore been rewritten offline around a conservative full-body contract: six required sectors, 0.35 m occupancy-map inflation radius, no autonomous lateral escape or walking arcs, short supervised reverse backoff, full turn-sweep clearance, measured escape progress, repeated-action suppression, and fail-closed mission results. These changes are source-complete and regression tested but **not physically validated**. The next hardware checkpoint must be a short human-observed test in open space, followed by a staged wall approach with immediate physical stop authority; no long autonomous run is justified before that gate passes.
 
 ## Body-adapter state
 
@@ -124,4 +124,4 @@ Remaining adapters are:
 6. `mark_target` → bind the stable target/corner to the existing deterministic approach-sideways-mark routine;
 7. semantic course updates → apply a prepared intent at a deterministic navigation boundary without routine gait stops.
 
-The next hardware activation is moving-camera validation during a short supervised mission, followed by stationary speech/gesture, supervised semantic course adjustment, approach, inspection geometry, and only then marking. Agency without staged embodiment is merely a more articulate accident.
+The next hardware activation is conservative footprint-controller validation during a short supervised mission, followed by stationary speech/gesture, supervised semantic course adjustment, approach, inspection geometry, and only then marking. Agency without staged embodiment is merely a more articulate accident.

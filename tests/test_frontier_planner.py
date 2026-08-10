@@ -33,11 +33,11 @@ class FrontierPlannerTests(unittest.TestCase):
 
     def test_obstacle_inflation_reserves_space_for_legs(self):
         grid = self.room_grid()
-        blocked = inflate_obstacles(grid, radius_cells=2)
+        blocked = inflate_obstacles(grid, radius_cells=4)
 
         self.assertIn((10, 10), blocked)
-        self.assertIn((9, 10), blocked)
-        self.assertIn((11, 10), blocked)
+        self.assertIn((6, 10), blocked)
+        self.assertIn((10, 6), blocked)
         self.assertNotIn((4, 4), blocked)
 
     def test_natural_motion_turns_toward_waypoint_then_varies_stride(self):
