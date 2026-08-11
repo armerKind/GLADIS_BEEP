@@ -77,6 +77,22 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.pkt(0x11, [0x00, 0x9C]),
         ])
 
+    def test_app_reverse_arc_combines_negative_x_and_yaw(self):
+        sock = MagicMock()
+        sock.recv.side_effect = TimeoutError()
+        connection = MagicMock()
+        connection.__enter__.return_value = sock
+        with patch.object(bridge.socket, "create_connection", return_value=connection):
+            bridge.app_send("arcbackright")
+        sent = [entry.args[0] for entry in sock.sendall.call_args_list]
+        self.assertEqual(sent, [
+            bridge.pkt(0x0F, [0x01]),
+            bridge.pkt(0x13, [0x64]),
+            bridge.pkt(0x14, [bridge.APP_REVERSE_PACE]),
+            bridge.pkt(0x11, [0x00, 0x9C]),
+            bridge.pkt(0x12, [0x06]),
+        ])
+
     def test_app_stop_neutralizes_both_axes_before_button_stop(self):
         sock = MagicMock()
         sock.recv.side_effect = TimeoutError()
@@ -102,6 +118,21 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.motor_send("backward")
         dog.gait_type.assert_called_once_with("high_walk")
         app.assert_called_once_with("backward")
+
+    def test_reverse_arc_rejects_turn_sweep_breach_before_motor_command(self):
+        status = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {"front": 0.41, "front_left": 0.8, "front_right": 0.8,
+                        "left": 0.8, "right": 0.8, "rear": 0.8},
+            "pose": {},
+        }
+        with patch.object(bridge, "snapshot", return_value=status), \
+             patch.object(bridge, "motor_send") as motor:
+            result = bridge.run_supervised_calibration("arcbackleft", 1.2)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "reverse_arc_envelope_blocked")
+        motor.assert_not_called()
 
     def test_perception_and_transport_failures_do_not_cancel_motion(self):
         self.assertFalse(bridge.handler_failure_requires_stop("/frame.jpg", TimeoutError("camera timeout")))

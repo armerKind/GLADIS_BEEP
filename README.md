@@ -9,7 +9,7 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.19.1-high-walk-reverse
+0.19.2-supervised-arcs
 ```
 
 Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
@@ -17,6 +17,8 @@ Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots 
 Release `0.19.0-app-analog-motion` moved translation to app analog command `0x11`, explicitly writing both axes. D-pad translation was rejected because it leaves persistent axis state. Live testing then showed that ordinary `walk` reverse moved forward at slow, normal, and high pace.
 
 Release `0.19.1-high-walk-reverse` uses app width `100`, analog negative X (`-20`), `high_walk`, and normal pace for reverse, then restores width `50`, normal pace, and the standard `walk` profile after stop. In its completed 0.8-second LiDAR- and SLAM-supervised trial, settled displacement was `x=-0.0564 m`, `y=-0.0007 m`, yaw drift was `3.27 degrees`, front clearance gained `0.031 m`, and rear clearance decreased `0.101 m`. This is the first physically verified straight backward primitive.
+
+Release `0.19.2-supervised-arcs` adds LiDAR-supervised `turnleft`/`turnright` calibration, raises app-backed measured turn segments from 0.50 to 0.90 seconds, and adds reverse-left/right arcs by combining the verified high-walk negative-X profile with persistent yaw. Reverse arcs retain the 0.42 m full sweep floor, 0.45 m rear floor, 0.35 m side floor, and 0.02 m maximum frontal worsening. Live 1.2-second trials completed in both directions with moving onboard-camera evidence and no visible contact.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 

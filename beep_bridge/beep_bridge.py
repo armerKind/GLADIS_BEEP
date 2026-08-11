@@ -72,6 +72,7 @@ REVERSE_CORRECTION_STEP = min(10, max(
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
+TURN_SEGMENT_S = min(1.20, max(0.50, float(os.environ.get("BEEP_TURN_SEGMENT_S", "0.90"))))
 OBSERVER_STOP_TOKEN = os.environ.get("BEEP_OBSERVER_STOP_TOKEN", "")
 OBSERVER_STOP_MIN_INTERVAL_S = max(0.5, float(os.environ.get("BEEP_OBSERVER_STOP_MIN_INTERVAL_S", "2.0")))
 
@@ -83,6 +84,7 @@ APP_ANALOG_PAYLOAD = {
     "left": (0x64, 0x00),
     "right": (0x9C, 0x00),
 }
+APP_REVERSE_ARC_TURN = {"arcbackleft": 0x05, "arcbackright": 0x06}
 APP_REVERSE_PACE = min(3, max(1, int(os.environ.get("BEEP_APP_REVERSE_PACE", "2"))))
 APP_REVERSE_GAIT = os.environ.get("BEEP_APP_REVERSE_GAIT", "high_walk").strip()
 SDK_STEP_DEFAULT = int(os.environ.get("BEEP_SDK_STEP", "10"))
@@ -133,7 +135,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.19.1-high-walk-reverse",
+    "version": "0.19.2-supervised-arcs",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -327,7 +329,7 @@ def app_send(action: str):
     aliases = {"turn_left": "turnleft", "turn_right": "turnright",
                "rotate_left": "turnleft", "rotate_right": "turnright"}
     action = aliases.get(action, action)
-    if action not in CMD_PAYLOAD and action not in APP_ANALOG_PAYLOAD:
+    if action not in CMD_PAYLOAD and action not in APP_ANALOG_PAYLOAD and action not in APP_REVERSE_ARC_TURN:
         raise ValueError(f"unknown app action {action!r}")
     with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
         s.settimeout(0.25)
@@ -346,6 +348,14 @@ def app_send(action: str):
             s.sendall(pkt(0x13, [0x32]))
             time.sleep(0.01)
             s.sendall(pkt(0x14, [0x02]))
+        elif action in APP_REVERSE_ARC_TURN:
+            s.sendall(pkt(0x13, [0x64]))
+            time.sleep(0.025)
+            s.sendall(pkt(0x14, [APP_REVERSE_PACE]))
+            time.sleep(0.025)
+            s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD["backward"]))
+            time.sleep(0.025)
+            s.sendall(pkt(0x12, [APP_REVERSE_ARC_TURN[action]]))
         elif action in APP_ANALOG_PAYLOAD:
             if action in ("back", "backward"):
                 s.sendall(pkt(0x13, [0x64]))
@@ -545,7 +555,7 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
 def motor_send(action: str, step=None):
     if MOTOR_BACKEND == "sdk":
         return sdk_send(action, step=step)
-    if str(action).lower() in ("back", "backward") and APP_REVERSE_GAIT:
+    if str(action).lower() in ("back", "backward", "arcbackleft", "arcbackright") and APP_REVERSE_GAIT:
         if APP_REVERSE_GAIT not in ("trot", "walk", "high_walk"):
             raise ValueError(f"unsupported app reverse gait {APP_REVERSE_GAIT!r}")
         sdk_init().gait_type(APP_REVERSE_GAIT)
@@ -877,10 +887,10 @@ def run_action(action: str, duration: float, step=None):
 def run_supervised_calibration(action: str, duration: float):
     """Run one bounded translation while the normal full-envelope supervisor remains authoritative."""
     action = str(action).lower()
-    aliases = {"back": "backward"}
+    aliases = {"back": "backward", "turn_left": "turnleft", "turn_right": "turnright"}
     action = aliases.get(action, action)
-    if action not in ("forward", "backward", "left", "right"):
-        raise ValueError("supervised calibration supports forward/backward/left/right")
+    if action not in ("forward", "backward", "left", "right", "turnleft", "turnright", "arcbackleft", "arcbackright"):
+        raise ValueError("unsupported supervised calibration action")
     duration = min(max(float(duration), 0.05), 1.2)
     before = snapshot()
     sectors = validated_sector_values(before.get("sectors"))
@@ -894,6 +904,12 @@ def run_supervised_calibration(action: str, duration: float):
         return {"ok": False, "reason": "reverse_envelope_blocked", "action": action, "status": before}
     if action in ("left", "right") and min(sectors.values()) < TURN_SWEEP_M:
         return {"ok": False, "reason": "lateral_envelope_blocked", "action": action, "status": before}
+    if action in ("turnleft", "turnright") and min(sectors.values()) < TURN_SWEEP_M:
+        return {"ok": False, "reason": "turn_envelope_blocked", "action": action, "status": before}
+    if action in ("arcbackleft", "arcbackright") and (
+            min(sectors.values()) < TURN_SWEEP_M or sectors["rear"] < FOOTPRINT_REAR_M or
+            min(sectors["left"], sectors["right"]) < FOOTPRINT_SIDE_M):
+        return {"ok": False, "reason": "reverse_arc_envelope_blocked", "action": action, "status": before}
     start_pose = dict(before.get("pose") or {})
     motor_send(action)
     try:
@@ -1611,6 +1627,17 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
             if (sec["front"] < FORWARD_CORRIDOR_M or sec["front_left"] < FOOTPRINT_DIAGONAL_M or
                     sec["front_right"] < FOOTPRINT_DIAGONAL_M or min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M):
                 return {"ok": False, "reason": "forward_footprint_breach", "elapsed_s": time.time() - started}
+        elif action in ("arcbackleft", "arcbackright"):
+            if min(sec.values()) < TURN_SWEEP_M:
+                return {"ok": False, "reason": "reverse_arc_sweep_breach", "elapsed_s": time.time() - started}
+            if sec["rear"] < FOOTPRINT_REAR_M or min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
+                return {"ok": False, "reason": "reverse_arc_envelope_breach", "elapsed_s": time.time() - started}
+            current_front = sum(sec[name] for name in ("front", "front_left", "front_right")) / 3.0
+            if baseline_front is None:
+                baseline_front = current_front
+            elif baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M:
+                return {"ok": False, "reason": "front_clearance_worsening_during_reverse_arc",
+                        "elapsed_s": time.time() - started}
         elif action in ("back", "backward"):
             if sec["rear"] < FOOTPRINT_REAR_M:
                 return {"ok": False, "reason": "rear_clearance_breach", "elapsed_s": time.time() - started}
@@ -2524,7 +2551,7 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
                     break
                 motor_send(action, step=step)
                 segment = supervise_lidar_motion(
-                    action, min(0.50, max_duration - (time.time() - started)), poll_s=poll_interval)
+                    action, min(TURN_SEGMENT_S, max_duration - (time.time() - started)), poll_s=poll_interval)
                 stop_burst(2)
                 if not segment.get("ok"):
                     reason = str(segment.get("reason"))
