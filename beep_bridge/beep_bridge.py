@@ -83,6 +83,8 @@ APP_ANALOG_PAYLOAD = {
     "left": (0x64, 0x00),
     "right": (0x9C, 0x00),
 }
+APP_REVERSE_PACE = min(3, max(1, int(os.environ.get("BEEP_APP_REVERSE_PACE", "2"))))
+APP_REVERSE_GAIT = os.environ.get("BEEP_APP_REVERSE_GAIT", "high_walk").strip()
 SDK_STEP_DEFAULT = int(os.environ.get("BEEP_SDK_STEP", "10"))
 SDK_GAIT = os.environ.get("BEEP_SDK_GAIT", "walk")
 SDK_PACE = os.environ.get("BEEP_SDK_PACE", "normal")
@@ -131,7 +133,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.19.0-app-analog-motion",
+    "version": "0.19.1-high-walk-reverse",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -340,7 +342,16 @@ def app_send(action: str):
             s.sendall(pkt(0x11, [0x00, 0x00]))
             time.sleep(0.01)
             s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
+            time.sleep(0.01)
+            s.sendall(pkt(0x13, [0x32]))
+            time.sleep(0.01)
+            s.sendall(pkt(0x14, [0x02]))
         elif action in APP_ANALOG_PAYLOAD:
+            if action in ("back", "backward"):
+                s.sendall(pkt(0x13, [0x64]))
+                time.sleep(0.025)
+                s.sendall(pkt(0x14, [APP_REVERSE_PACE]))
+                time.sleep(0.025)
             s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD[action]))
         else:
             s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
@@ -534,6 +545,10 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
 def motor_send(action: str, step=None):
     if MOTOR_BACKEND == "sdk":
         return sdk_send(action, step=step)
+    if str(action).lower() in ("back", "backward") and APP_REVERSE_GAIT:
+        if APP_REVERSE_GAIT not in ("trot", "walk", "high_walk"):
+            raise ValueError(f"unsupported app reverse gait {APP_REVERSE_GAIT!r}")
+        sdk_init().gait_type(APP_REVERSE_GAIT)
     return app_send(action)
 
 
@@ -556,6 +571,12 @@ def stop_burst(n=3):
         app_send("stop")
     except Exception as e:
         app_error = repr(e)
+
+    if APP_REVERSE_GAIT and sdk_ok:
+        try:
+            sdk_apply_motion_profile()
+        except Exception as e:
+            remember("reverse_gait_restore_failed", error=repr(e))
 
     err = None if sdk_ok else (sdk_errors[-1] if sdk_errors else "sdk_stop_not_confirmed")
     with state_lock:

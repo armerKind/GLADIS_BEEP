@@ -72,6 +72,8 @@ class FrontierIntegrationTests(unittest.TestCase):
         sent = [entry.args[0] for entry in sock.sendall.call_args_list]
         self.assertEqual(sent, [
             bridge.pkt(0x0F, [0x01]),
+            bridge.pkt(0x13, [0x64]),
+            bridge.pkt(0x14, [bridge.APP_REVERSE_PACE]),
             bridge.pkt(0x11, [0x00, 0x9C]),
         ])
 
@@ -87,7 +89,19 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.pkt(0x0F, [0x01]),
             bridge.pkt(0x11, [0x00, 0x00]),
             bridge.pkt(0x12, [0x00]),
+            bridge.pkt(0x13, [0x32]),
+            bridge.pkt(0x14, [0x02]),
         ])
+
+    def test_app_reverse_selects_high_walk_before_analog_command(self):
+        dog = MagicMock()
+        with patch.object(bridge, "MOTOR_BACKEND", "app"), \
+             patch.object(bridge, "APP_REVERSE_GAIT", "high_walk"), \
+             patch.object(bridge, "sdk_init", return_value=dog), \
+             patch.object(bridge, "app_send") as app:
+            bridge.motor_send("backward")
+        dog.gait_type.assert_called_once_with("high_walk")
+        app.assert_called_once_with("backward")
 
     def test_perception_and_transport_failures_do_not_cancel_motion(self):
         self.assertFalse(bridge.handler_failure_requires_stop("/frame.jpg", TimeoutError("camera timeout")))

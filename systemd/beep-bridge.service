@@ -13,6 +13,8 @@ Environment=BEEP_APP_HOST=192.168.8.88
 Environment=BEEP_CAMERA_URL=http://192.168.8.88:6500/video_feed
 Environment=BEEP_FORWARD_UNTIL_MAX_S=12
 Environment=BEEP_MOTOR_BACKEND=app
+Environment=BEEP_APP_REVERSE_PACE=2
+Environment=BEEP_APP_REVERSE_GAIT=high_walk
 Environment=BEEP_SDK_STEP=10
 Environment=BEEP_SDK_GAIT=walk
 Environment=BEEP_SDK_PACE=normal

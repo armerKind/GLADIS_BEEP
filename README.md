@@ -9,12 +9,14 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.19.0-app-analog-motion
+0.19.1-high-walk-reverse
 ```
 
 Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
 
-Release `0.19.0-app-analog-motion` calibrates the vendor app-control server against onboard LiDAR and camera evidence. D-pad translations retain stale axis state and are therefore not used. Translation now uses app analog command `0x11`, explicitly writing both axes: forward `(0, +100)`, backward `(0, -100)`, left `(+100, 0)`, and right `(-100, 0)`. Stop writes analog zero before button stop. The bridge service uses the app backend; turn buttons remain `5` and `6`. A live negative-X analog trial increased frontal clearance by 0.102 m while rear clearance decreased by 0.051 m, establishing a physical backward primitive.
+Release `0.19.0-app-analog-motion` moved translation to app analog command `0x11`, explicitly writing both axes. D-pad translation was rejected because it leaves persistent axis state. Live testing then showed that ordinary `walk` reverse moved forward at slow, normal, and high pace.
+
+Release `0.19.1-high-walk-reverse` uses app width `100`, analog negative X (`-20`), `high_walk`, and normal pace for reverse, then restores width `50`, normal pace, and the standard `walk` profile after stop. In its completed 0.8-second LiDAR- and SLAM-supervised trial, settled displacement was `x=-0.0564 m`, `y=-0.0007 m`, yaw drift was `3.27 degrees`, front clearance gained `0.031 m`, and rear clearance decreased `0.101 m`. This is the first physically verified straight backward primitive.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 
