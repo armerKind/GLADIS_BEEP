@@ -257,7 +257,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - polls all six local LiDAR sectors approximately every 80 ms,
 - requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
 - disables autonomous lateral escape and walking arcs,
-- permits only a continuously supervised reverse recovery when front clearance is breached and rear clearance is available; it stops at 0.08 m average frontal-clearance gain or a hard 1.2-second ceiling,
+- permits only a yaw-corrected, continuously supervised reverse recovery when front clearance is breached and rear clearance is available: at most three 0.60-second segments, with a full stop and clearance-gated measured heading correction between segments; recovery stops at 0.08 m average frontal-clearance gain,
 - aborts reverse immediately if average front clearance worsens by more than 0.02 m or measured heading drifts by more than 5 degrees,
 - requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,
 - uses clearance-gated 20-degree measured-yaw exploration turns with a two-second ceiling; each turn aborts on stale pose, wrong direction, stalled yaw, cancellation, or sweep clearance below 0.42 m,

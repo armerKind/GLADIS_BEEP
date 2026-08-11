@@ -63,6 +63,12 @@ BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
 )
 REVERSE_ESCAPE_MAX_S = min(1.2, max(
     0.30, float(os.environ.get("BEEP_REVERSE_ESCAPE_MAX_S", "1.2"))))
+REVERSE_CORRECTION_SEGMENT_S = min(0.60, max(
+    0.30, float(os.environ.get("BEEP_REVERSE_CORRECTION_SEGMENT_S", "0.60"))))
+REVERSE_CORRECTION_ATTEMPTS = min(3, max(
+    1, int(os.environ.get("BEEP_REVERSE_CORRECTION_ATTEMPTS", "3"))))
+REVERSE_CORRECTION_STEP = min(10, max(
+    5, int(os.environ.get("BEEP_REVERSE_CORRECTION_STEP", "8"))))
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
@@ -126,7 +132,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.5-supervised-reverse",
+    "version": "0.18.6-yaw-corrected-reverse",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1425,6 +1431,8 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                     supervised = guarded_slam_turn(
                         turn="left" if action == "turnleft" else "right",
                         degrees=20.0, max_duration=min(2.0, remaining), step=step)
+                elif action in ("back", "backward"):
+                    supervised = yaw_corrected_reverse_escape(sec, before_pose)
                 else:
                     motor_send(action, step=step)
                     supervised = supervise_lidar_motion(
@@ -1570,6 +1578,81 @@ def supervise_lidar_forward(duration, poll_s=0.08):
     return result
 
 
+def yaw_corrected_reverse_escape(baseline_sectors, baseline_pose):
+    """Reverse in bounded segments, correcting measured yaw between segments."""
+    baseline_values = validated_sector_values(baseline_sectors)
+    if baseline_values is None or not baseline_pose or baseline_pose.get("yaw") is None:
+        return {"ok": False, "reason": "reverse_baseline_invalid", "elapsed_s": 0.0,
+                "attempts": [], "status": snapshot()}
+    target_yaw = float(baseline_pose["yaw"])
+    baseline_front = sum(
+        baseline_values[name] for name in ("front", "front_left", "front_right")) / 3.0
+    started = time.time()
+    attempts = []
+
+    for attempt in range(1, REVERSE_CORRECTION_ATTEMPTS + 1):
+        if motion_is_cancelled():
+            return {"ok": False, "reason": "motion_cancelled", "elapsed_s": time.time() - started,
+                    "attempts": attempts, "status": snapshot()}
+        before = snapshot()
+        required = sector_values(before, ("front", "front_left", "front_right", "left", "right", "rear"))
+        pose = before.get("pose") or {}
+        if (required is None or pose.get("yaw") is None or not scan_ok(before) or not slam_ok(before)):
+            return {"ok": False, "reason": "reverse_guard_invalid_before_segment",
+                    "elapsed_s": time.time() - started, "attempts": attempts, "status": before}
+        if required["rear"] < FOOTPRINT_REAR_M or min(required["left"], required["right"]) < FOOTPRINT_SIDE_M:
+            return {"ok": False, "reason": "reverse_envelope_rejected_before_segment",
+                    "elapsed_s": time.time() - started, "attempts": attempts, "status": before}
+
+        motor_send("back", step=REVERSE_CORRECTION_STEP)
+        segment = supervise_lidar_motion(
+            "back", REVERSE_CORRECTION_SEGMENT_S,
+            baseline_sectors=baseline_values, baseline_pose={"yaw": target_yaw},
+            stop_on_front_gain_m=ESCAPE_CLEARANCE_GAIN_M)
+        stop_burst(2)
+        after = snapshot()
+        after_required = sector_values(
+            after, ("front", "front_left", "front_right", "left", "right", "rear"))
+        after_pose = after.get("pose") or {}
+        gain = None
+        drift = None
+        if after_required is not None:
+            gain = (sum(after_required[name] for name in ("front", "front_left", "front_right")) / 3.0 -
+                    baseline_front)
+        if after_pose.get("yaw") is not None:
+            drift = norm_angle(float(after_pose["yaw"]) - target_yaw)
+        item = {"attempt": attempt, "segment": segment,
+                "front_clearance_gain_m": gain,
+                "heading_drift_degrees": None if drift is None else math.degrees(drift)}
+        attempts.append(item)
+
+        if segment.get("ok") and (segment.get("reason") == "reverse_clearance_gain_reached" or
+                                  (gain is not None and gain >= ESCAPE_CLEARANCE_GAIN_M)):
+            return {"ok": True, "reason": "reverse_clearance_gain_reached",
+                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
+        if segment.get("reason") not in ("window_complete", "heading_drift_during_backoff"):
+            return {"ok": False, "reason": str(segment.get("reason")),
+                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
+        if drift is None:
+            return {"ok": False, "reason": "reverse_heading_unavailable",
+                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
+
+        if abs(drift) >= math.radians(2.0):
+            corrected = guarded_slam_turn(
+                turn="right" if drift > 0.0 else "left",
+                degrees=max(10.0, abs(math.degrees(drift))),
+                max_duration=1.5, tolerance_degrees=5.0, step=20)
+            item["correction"] = corrected
+            if not corrected.get("ok"):
+                return {"ok": False,
+                        "reason": "reverse_yaw_correction_failed:" + str(corrected.get("reason")),
+                        "elapsed_s": time.time() - started, "attempts": attempts,
+                        "status": corrected.get("status") or snapshot()}
+
+    return {"ok": False, "reason": "reverse_clearance_gain_not_reached",
+            "elapsed_s": time.time() - started, "attempts": attempts, "status": snapshot()}
+
+
 def coverage_has_plateaued(samples, now, window_s, min_growth_cells):
     recent = [(float(t), int(c)) for t, c in samples if float(t) >= float(now) - float(window_s)]
     if len(recent) < 2 or recent[-1][0] - recent[0][0] < float(window_s) * 0.90:
@@ -1679,6 +1762,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         turn="left" if action == "turnleft" else "right",
                         degrees=20.0, max_duration=min(2.0, remaining),
                         step=explore_step_for(action))
+                elif action in ("back", "backward"):
+                    supervised = yaw_corrected_reverse_escape(sec, before_pose)
                 else:
                     motor_send(action, step=explore_step_for(action))
                     supervised = supervise_lidar_motion(
@@ -2501,6 +2586,9 @@ class Handler(BaseHTTPRequestHandler):
                                                            "map_radius": ROBOT_FOOTPRINT_RADIUS_M,
                                                            "escape_gain": ESCAPE_CLEARANCE_GAIN_M,
                                                            "reverse_escape_max_s": REVERSE_ESCAPE_MAX_S,
+                                                           "reverse_correction_segment_s": REVERSE_CORRECTION_SEGMENT_S,
+                                                           "reverse_correction_attempts": REVERSE_CORRECTION_ATTEMPTS,
+                                                           "reverse_correction_step": REVERSE_CORRECTION_STEP,
                                                            "backoff_max_front_loss": BACKOFF_MAX_FRONT_LOSS_M,
                                                            "backoff_max_heading_drift_deg": math.degrees(BACKOFF_MAX_HEADING_DRIFT_RAD),
                                                            "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,

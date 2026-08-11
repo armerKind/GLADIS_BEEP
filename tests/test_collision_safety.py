@@ -277,6 +277,43 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(result["front_clearance_gain_m"], 0.08)
         self.assertLess(result["elapsed_s"], bridge.REVERSE_ESCAPE_MAX_S)
 
+    def test_reverse_recovery_corrects_yaw_between_bounded_segments(self):
+        baseline = {
+            "front": 0.64, "front_left": 0.63, "front_right": 0.48,
+            "left": 0.57, "right": 0.44, "rear": 1.12,
+        }
+
+        def state(sectors, yaw):
+            return {
+                "scan_seen": True, "scan_age_s": 0.01, "sectors": sectors,
+                "pose": {"yaw": yaw},
+                "slam": {"usable": True, "pose_valid": True,
+                         "pose_age_s": 0.01, "map_age_s": 0.01},
+            }
+
+        first_after = dict(baseline, front=0.66, front_left=0.65, front_right=0.48)
+        corrected = dict(first_after, right=0.46)
+        gained = dict(corrected, front=0.73, front_left=0.72, front_right=0.56)
+        segment_results = [
+            {"ok": False, "reason": "heading_drift_during_backoff", "elapsed_s": 0.5},
+            {"ok": True, "reason": "reverse_clearance_gain_reached", "elapsed_s": 0.4},
+        ]
+        turn_result = {"ok": True, "reason": "target_reached:5.1deg", "elapsed_s": 0.5}
+        with patch.object(bridge, "snapshot", side_effect=[
+                state(baseline, 0.0), state(first_after, math.radians(6.0)),
+                state(corrected, 0.0), state(gained, math.radians(1.0)),
+                ]), \
+                patch.object(bridge, "supervise_lidar_motion", side_effect=segment_results), \
+                patch.object(bridge, "guarded_slam_turn", return_value=turn_result) as correction, \
+                patch.object(bridge, "motor_send") as motor, \
+                patch.object(bridge, "stop_burst"):
+            result = bridge.yaw_corrected_reverse_escape(baseline, {"yaw": 0.0})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "reverse_clearance_gain_reached")
+        self.assertEqual(motor.call_count, 2)
+        correction.assert_called_once()
+        self.assertEqual(correction.call_args.kwargs["turn"], "right")
+
     def test_autonomous_mission_refuses_boxed_in_preflight(self):
         status = {
             "scan_seen": True,
