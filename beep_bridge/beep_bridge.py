@@ -75,15 +75,14 @@ TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PR
 OBSERVER_STOP_TOKEN = os.environ.get("BEEP_OBSERVER_STOP_TOKEN", "")
 OBSERVER_STOP_MIN_INTERVAL_S = max(0.5, float(os.environ.get("BEEP_OBSERVER_STOP_MIN_INTERVAL_S", "2.0")))
 
-CMD_PAYLOAD = {
-    "stop": 0x00,
-    "forward": 0x01,
-    "back": 0x02,
-    "backward": 0x02,
-    "left": 0x05,
-    "right": 0x06,
+CMD_PAYLOAD = {"stop": 0x00, "turnleft": 0x05, "turnright": 0x06}
+APP_ANALOG_PAYLOAD = {
+    "forward": (0x00, 0x64),
+    "back": (0x00, 0x9C),
+    "backward": (0x00, 0x9C),
+    "left": (0x64, 0x00),
+    "right": (0x9C, 0x00),
 }
-
 SDK_STEP_DEFAULT = int(os.environ.get("BEEP_SDK_STEP", "10"))
 SDK_GAIT = os.environ.get("BEEP_SDK_GAIT", "walk")
 SDK_PACE = os.environ.get("BEEP_SDK_PACE", "normal")
@@ -132,7 +131,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.9-lateral-turn-setup",
+    "version": "0.19.0-app-analog-motion",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -323,8 +322,11 @@ def pkt(cmd: int, payload=()):
 
 def app_send(action: str):
     action = str(action).lower()
-    if action not in CMD_PAYLOAD:
-        raise ValueError(f"unknown app action {action!r}; use {sorted(CMD_PAYLOAD)}")
+    aliases = {"turn_left": "turnleft", "turn_right": "turnright",
+               "rotate_left": "turnleft", "rotate_right": "turnright"}
+    action = aliases.get(action, action)
+    if action not in CMD_PAYLOAD and action not in APP_ANALOG_PAYLOAD:
+        raise ValueError(f"unknown app action {action!r}")
     with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
         s.settimeout(0.25)
         try:
@@ -334,7 +336,14 @@ def app_send(action: str):
         # Standard/control mode, then command.
         s.sendall(pkt(0x0F, [0x01]))
         time.sleep(0.025)
-        s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
+        if action == "stop":
+            s.sendall(pkt(0x11, [0x00, 0x00]))
+            time.sleep(0.01)
+            s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
+        elif action in APP_ANALOG_PAYLOAD:
+            s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD[action]))
+        else:
+            s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
     with state_lock:
         state["last_command"] = "app:" + action
         state["last_command_at"] = time.time()

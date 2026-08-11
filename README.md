@@ -9,10 +9,12 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.18.9-lateral-turn-setup
+0.19.0-app-analog-motion
 ```
 
-Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Source `0.18.9-lateral-turn-setup` adds one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
+Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
+
+Release `0.19.0-app-analog-motion` calibrates the vendor app-control server against onboard LiDAR and camera evidence. D-pad translations retain stale axis state and are therefore not used. Translation now uses app analog command `0x11`, explicitly writing both axes: forward `(0, +100)`, backward `(0, -100)`, left `(+100, 0)`, and right `(-100, 0)`. Stop writes analog zero before button stop. The bridge service uses the app backend; turn buttons remain `5` and `6`. A live negative-X analog trial increased frontal clearance by 0.102 m while rear clearance decreased by 0.051 m, establishing a physical backward primitive.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 

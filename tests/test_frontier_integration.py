@@ -62,6 +62,33 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(sent, [bridge.pkt(0x0F, [0x01])])
         self.assertNotIn(bridge.pkt(0x12, [bridge.CMD_PAYLOAD["stop"]]), sent)
 
+    def test_app_backward_uses_neutralized_negative_x_analog_packet(self):
+        sock = MagicMock()
+        sock.recv.side_effect = TimeoutError()
+        connection = MagicMock()
+        connection.__enter__.return_value = sock
+        with patch.object(bridge.socket, "create_connection", return_value=connection):
+            bridge.app_send("backward")
+        sent = [entry.args[0] for entry in sock.sendall.call_args_list]
+        self.assertEqual(sent, [
+            bridge.pkt(0x0F, [0x01]),
+            bridge.pkt(0x11, [0x00, 0x9C]),
+        ])
+
+    def test_app_stop_neutralizes_both_axes_before_button_stop(self):
+        sock = MagicMock()
+        sock.recv.side_effect = TimeoutError()
+        connection = MagicMock()
+        connection.__enter__.return_value = sock
+        with patch.object(bridge.socket, "create_connection", return_value=connection):
+            bridge.app_send("stop")
+        sent = [entry.args[0] for entry in sock.sendall.call_args_list]
+        self.assertEqual(sent, [
+            bridge.pkt(0x0F, [0x01]),
+            bridge.pkt(0x11, [0x00, 0x00]),
+            bridge.pkt(0x12, [0x00]),
+        ])
+
     def test_perception_and_transport_failures_do_not_cancel_motion(self):
         self.assertFalse(bridge.handler_failure_requires_stop("/frame.jpg", TimeoutError("camera timeout")))
         self.assertFalse(bridge.handler_failure_requires_stop("/camera.jpg", RuntimeError("bad frame")))
