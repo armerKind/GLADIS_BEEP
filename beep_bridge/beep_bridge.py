@@ -132,7 +132,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.8-stop-measure-turns",
+    "version": "0.18.9-lateral-turn-setup",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1287,6 +1287,9 @@ def choose_explore_action(sectors):
             if max(left, fl) >= max(right, fr):
                 return "turnleft", 0.30, "front_breach_sweep_left"
             return "turnright", 0.30, "front_breach_sweep_right"
+        if (front >= 0.46 and min(fl, fr) >= TURN_SWEEP_M and
+                left >= FOOTPRINT_SIDE_M and right >= 0.55 and rear >= FOOTPRINT_REAR_M):
+            return "right", 0.35, "bounded_lateral_turn_setup"
         if rear_escape_clear:
             return "back", REVERSE_ESCAPE_MAX_S, "front_footprint_breach_backoff"
         return "stop", 0.0, "footprint_boxed_in_stop"
@@ -1325,6 +1328,11 @@ def escape_made_progress(action, before, after, before_pose=None, after_pose=Non
         yaw_change = abs(norm_angle(float(after_pose["yaw"]) - float(before_pose["yaw"])))
         sweep = min(after_values[name] for name in ("front", "front_left", "front_right", "left", "right", "rear"))
         return yaw_change >= math.radians(15.0) and sweep >= TURN_SWEEP_M
+    if action == "right":
+        before_front = sum(before_values[name] for name in ("front", "front_left", "front_right")) / 3.0
+        after_front = sum(after_values[name] for name in ("front", "front_left", "front_right")) / 3.0
+        return (after_values["left"] - before_values["left"] >= 0.008 and
+                after_values["right"] >= 0.45 and after_front >= before_front - 0.02)
     return False
 
 
@@ -1339,7 +1347,7 @@ def explore_step_for(action):
     if action in ("back", "backward"):
         return 15
     if action in ("left", "right"):
-        return 18
+        return 5
     if action in ("turnleft", "turnright"):
         return 30
     return SDK_STEP_DEFAULT
@@ -1567,6 +1575,26 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
                     return {"ok": False, "reason": "heading_drift_during_backoff",
                             "elapsed_s": time.time() - started,
                             "heading_drift_degrees": round(math.degrees(drift), 2)}
+        elif action == "right":
+            if (sec["front"] < 0.44 or min(sec["front_left"], sec["front_right"]) < TURN_SWEEP_M or
+                    sec["left"] < FOOTPRINT_SIDE_M or sec["right"] < 0.45 or
+                    sec["rear"] < FOOTPRINT_REAR_M):
+                return {"ok": False, "reason": "lateral_setup_clearance_breach",
+                        "elapsed_s": time.time() - started}
+            current_front = sum(sec[name] for name in ("front", "front_left", "front_right")) / 3.0
+            if baseline_front is None:
+                baseline_front = current_front
+            elif baseline_front - current_front > 0.02:
+                return {"ok": False, "reason": "front_clearance_worsening_during_lateral_setup",
+                        "elapsed_s": time.time() - started}
+            yaw = ((st.get("pose") or {}).get("yaw"))
+            if baseline_yaw is None and yaw is not None:
+                baseline_yaw = float(yaw)
+            elif baseline_yaw is not None and yaw is not None:
+                drift = abs(norm_angle(float(yaw) - baseline_yaw))
+                if drift > BACKOFF_MAX_HEADING_DRIFT_RAD:
+                    return {"ok": False, "reason": "heading_drift_during_lateral_setup",
+                            "elapsed_s": time.time() - started}
         elif action in ("turnleft", "turnright"):
             if min(sec.values()) < TURN_SWEEP_M:
                 return {"ok": False, "reason": "turn_sweep_clearance_breach", "elapsed_s": time.time() - started}

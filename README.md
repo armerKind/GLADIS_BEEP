@@ -9,10 +9,10 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.18.8-stop-measure-turns
+0.18.9-lateral-turn-setup
 ```
 
-Bridge `0.18.7-pivot-fallback` selected the intended right pivot but its continuous moving-yaw watchdog rejected gait-cycle SLAM regression, despite a settled post-stop rotation of about 4.7 degrees in the correct direction. Source `0.18.8-stop-measure-turns` uses 0.50-second clearance-supervised micro-pivots with a full stop and settled SLAM measurement between segments.
+Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Source `0.18.9-lateral-turn-setup` adds one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 

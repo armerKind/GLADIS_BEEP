@@ -117,6 +117,26 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(action, "turnleft")
         self.assertEqual(reason, "front_breach_sweep_left")
 
+    def test_front_breach_uses_bounded_right_shift_to_open_turn_margin(self):
+        constrained_left = {
+            "front": 0.47, "front_left": 0.43, "front_right": 0.49,
+            "left": 0.41, "right": 0.57, "rear": 1.0,
+        }
+        action, duration, reason = bridge.choose_explore_action(constrained_left)
+        self.assertEqual((action, duration, reason),
+                         ("right", 0.35, "bounded_lateral_turn_setup"))
+        self.assertEqual(bridge.explore_step_for(action), 5)
+
+    def test_bounded_right_shift_requires_measured_left_clearance_gain(self):
+        before = {
+            "front": 0.47, "front_left": 0.43, "front_right": 0.49,
+            "left": 0.41, "right": 0.57, "rear": 1.0,
+        }
+        improved = dict(before, left=0.422, right=0.55)
+        stalled = dict(before, left=0.414, right=0.55)
+        self.assertTrue(bridge.escape_made_progress("right", before, improved))
+        self.assertFalse(bridge.escape_made_progress("right", before, stalled))
+
     def test_guarded_turn_progress_window_fails_stalled_motion(self):
         self.assertFalse(bridge.turn_window_stalled(0.50, math.radians(0.0)))
         self.assertTrue(bridge.turn_window_stalled(0.75, math.radians(4.0)))
