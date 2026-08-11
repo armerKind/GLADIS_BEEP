@@ -103,6 +103,31 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertTrue(bridge.turn_window_stalled(0.75, math.radians(4.0)))
         self.assertFalse(bridge.turn_window_stalled(0.75, math.radians(12.0)))
 
+    def test_local_exploration_uses_measured_yaw_turn_instead_of_open_loop_pulse(self):
+        state = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": {
+                "front": 0.63, "front_left": 0.65, "front_right": 0.46,
+                "left": 0.58, "right": 0.43, "rear": 1.0,
+            },
+            "pose": {"yaw": 0.0},
+            "slam": {"usable": True, "pose_valid": True},
+        }
+        guarded_result = {"ok": True, "reason": "target_reached:20.0deg", "elapsed_s": 0.8}
+        with patch.object(bridge, "snapshot", return_value=state), \
+                patch.object(bridge, "guarded_slam_turn", return_value=guarded_result) as turn, \
+                patch.object(bridge, "motor_send") as motor, \
+                patch.object(bridge, "stop_burst"):
+            result = bridge.lidar_walk(max_duration=1.2, save=False)
+        self.assertEqual(result["reason"], "repeated_escape_action_stop")
+        self.assertEqual(turn.call_count, 2)
+        kwargs = turn.call_args.kwargs
+        self.assertEqual((kwargs["turn"], kwargs["degrees"], kwargs["step"]), ("left", 20.0, 30))
+        self.assertGreaterEqual(kwargs["max_duration"], 1.0)
+        self.assertLessEqual(kwargs["max_duration"], 1.2)
+        motor.assert_not_called()
+
     def test_legacy_forward_endpoint_delegates_to_six_sector_guard(self):
         guarded = {"ok": False, "reason": "footprint_clearance_rejected_before_start"}
         with patch.object(bridge, "forward_continuous_until", return_value=guarded) as continuous:

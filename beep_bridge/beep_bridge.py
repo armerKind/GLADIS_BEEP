@@ -122,7 +122,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.3-backoff-guard",
+    "version": "0.18.4-measured-turns",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1367,16 +1367,12 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                         reason = "rotation_sweep_clearance_rejected"
                         break
                     before_pose = pose_copy()
-                    motor_send("turnleft", step=30)
-                    dur = 0.30
-                    supervised = supervise_lidar_motion("turnleft", dur)
-                    stop_burst(2)
+                    supervised = guarded_slam_turn(
+                        turn="left", degrees=20.0, max_duration=2.0, step=30)
                     after_state = snapshot()
                     after_sectors = after_state.get("sectors") or {}
                     after_pose = pose_copy()
-                    progress = bool(supervised["ok"]) and escape_made_progress(
-                        "turnleft", before_sectors, after_sectors, before_pose, after_pose,
-                    )
+                    progress = bool(supervised["ok"])
                     trace.append({"phase": "rotate_scan", "i": i + 1,
                                   "supervisor_reason": supervised["reason"], "progress": progress,
                                   "sectors_before": before_sectors, "sectors_after": after_sectors})
@@ -1417,18 +1413,28 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                     break
                 step = explore_step_for(action)
                 before_pose = pose_copy()
-                motor_send(action, step=step)
-                supervised = supervise_lidar_motion(
-                    action, dur, baseline_sectors=sec, baseline_pose=before_pose)
-                stop_burst(2)
+                if action in ("turnleft", "turnright"):
+                    remaining = max_duration - (time.time() - started)
+                    if remaining < 1.0:
+                        reason = "max_duration"
+                        break
+                    supervised = guarded_slam_turn(
+                        turn="left" if action == "turnleft" else "right",
+                        degrees=20.0, max_duration=min(2.0, remaining), step=step)
+                else:
+                    motor_send(action, step=step)
+                    supervised = supervise_lidar_motion(
+                        action, dur, baseline_sectors=sec, baseline_pose=before_pose)
+                    stop_burst(2)
                 after_state = snapshot()
                 after_sectors = after_state.get("sectors") or {}
                 after_pose = pose_copy()
-                progress = action == "forward" or (bool(supervised["ok"]) and escape_made_progress(
-                    action, sec, after_sectors, before_pose, after_pose,
-                ))
+                progress = (action == "forward" or
+                            (action in ("turnleft", "turnright") and bool(supervised["ok"])) or
+                            (bool(supervised["ok"]) and escape_made_progress(
+                                action, sec, after_sectors, before_pose, after_pose)))
                 trace.append({"action": action, "step": step,
-                              "duration": round(float(supervised["elapsed_s"]), 2), "why": why,
+                              "duration": round(float(supervised.get("elapsed_s", 0.0)), 2), "why": why,
                               "sectors_before": sec, "sectors_after": after_sectors,
                               "progress": progress, "supervisor_reason": supervised["reason"]})
                 if not supervised["ok"]:
@@ -1625,7 +1631,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     current_action, gait_started = start_or_continue_fluent_forward(current_action, step=20)
                     supervised = supervise_lidar_forward(min(0.50, remaining))
                     trace.append({"action": "forward", "gait_started": gait_started,
-                                  "duration": round(float(supervised["elapsed_s"]), 3),
+                                  "duration": round(float(supervised.get("elapsed_s", 0.0)), 3),
                                   "why": why, "sectors": sec})
                     if not supervised["ok"]:
                         stop_burst(2)
@@ -1653,19 +1659,28 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     break
                 duration = min(duration, remaining)
                 before_pose = pose_copy()
-                motor_send(action, step=explore_step_for(action))
-                supervised = supervise_lidar_motion(
-                    action, duration, baseline_sectors=sec, baseline_pose=before_pose)
-                stop_burst(2)
+                if action in ("turnleft", "turnright"):
+                    if remaining < 1.0:
+                        reason = "max_duration"
+                        break
+                    supervised = guarded_slam_turn(
+                        turn="left" if action == "turnleft" else "right",
+                        degrees=20.0, max_duration=min(2.0, remaining),
+                        step=explore_step_for(action))
+                else:
+                    motor_send(action, step=explore_step_for(action))
+                    supervised = supervise_lidar_motion(
+                        action, duration, baseline_sectors=sec, baseline_pose=before_pose)
+                    stop_burst(2)
                 after_state = snapshot()
                 after_sectors = after_state.get("sectors") or {}
                 after_pose = pose_copy()
-                progress = bool(supervised["ok"]) and escape_made_progress(
-                    action, sec, after_sectors, before_pose, after_pose,
-                )
+                progress = (bool(supervised["ok"]) if action in ("turnleft", "turnright") else
+                            bool(supervised["ok"]) and escape_made_progress(
+                                action, sec, after_sectors, before_pose, after_pose))
                 trace.append({
                     "action": action,
-                    "duration": round(float(supervised["elapsed_s"]), 3),
+                    "duration": round(float(supervised.get("elapsed_s", 0.0)), 3),
                     "why": why,
                     "sectors_before": sec,
                     "sectors_after": after_sectors,

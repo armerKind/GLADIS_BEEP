@@ -260,7 +260,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - permits only a 0.30-second supervised reverse backoff when front clearance is breached and rear clearance is available,
 - aborts reverse during the pulse if average front clearance worsens by more than 0.02 m or measured heading drifts by more than 5 degrees,
 - requires at least 0.08 m average frontal-clearance gain after backoff,
-- caps turns at 0.30 seconds and requires at least 15 degrees of measured heading progress plus preserved 0.42 m sweep clearance,
+- uses clearance-gated 20-degree measured-yaw exploration turns with a two-second ceiling; each turn aborts on stale pose, wrong direction, stalled yaw, cancellation, or sweep clearance below 0.42 m,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,
 - clamps duration to 180 seconds,
 - attempts final SDK stop cleanup.
