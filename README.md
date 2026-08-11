@@ -9,10 +9,10 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.18.2-safety-review
+0.18.3-backoff-guard
 ```
 
-Bridge `0.17.3-moving-camera-handshake` remains the last physically deployed version. Source `0.18.2-safety-review` adds offline-verified full-body collision policy and an external observer interface; neither increment is physically validated or deployed yet.
+Bridge `0.18.2-safety-review` was deployed for the first bounded live collision-policy trial. Source `0.18.3-backoff-guard` adds the fail-closed corrections discovered by that trial; it is not physically validated yet.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 
@@ -150,7 +150,7 @@ Tailscale can use a high-latency DERP relay or disappear with the external Wi-Fi
 
 - Autonomous navigation and approach routines require a fresh LiDAR scan; generic `/move` and vendor `/action` are lower-level interfaces and are not scan-gated.
 - Autonomous controllers require all six local LiDAR sectors and apply conservative full-body thresholds: 0.55 m front, 0.42 m front diagonals/turn sweep, 0.35 m sides, and 0.45 m rear. These are provisional safety floors pending measured-footprint calibration.
-- A blocked front may trigger a short, continuously supervised reverse escape only when the full side envelope and rear clearance remain available. Lateral escape is disabled.
+- A blocked front may trigger a short, continuously supervised reverse escape only when the full side envelope and rear clearance remain available. Reverse also aborts if average frontal clearance worsens by more than 0.02 m or heading drifts by more than 5 degrees. Lateral escape is disabled.
 - Reverse/turn escapes must produce measured clearance or heading progress; ineffective escapes and more than two repeated identical escapes fail closed.
 - Guarded SLAM is required for map-directed frontier/coverage claims.
 - Occupancy-grid planning inflates obstacles by a conservative 0.35 m robot radius and rejects stale map/pose, impossible relocation, turn non-progress, and unsafe sweep clearance.

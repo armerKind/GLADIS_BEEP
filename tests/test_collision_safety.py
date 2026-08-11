@@ -193,6 +193,36 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "side_clearance_breach_during_backoff")
 
+    def test_backward_supervisor_stops_when_front_clearance_worsens(self):
+        baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
+        worsened = dict(baseline, front=0.81, front_left=0.39, front_right=0.711)
+        state = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": worsened,
+            "pose": {"yaw": 0.01},
+        }
+        with patch.object(bridge, "snapshot", return_value=state):
+            result = bridge.supervise_lidar_motion(
+                "back", 0.30, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
+
+    def test_backward_supervisor_stops_on_unexpected_yaw(self):
+        baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
+        state = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": baseline,
+            "pose": {"yaw": math.radians(6.0)},
+        }
+        with patch.object(bridge, "snapshot", return_value=state):
+            result = bridge.supervise_lidar_motion(
+                "back", 0.30, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "heading_drift_during_backoff")
+        self.assertGreater(result["heading_drift_degrees"], 5.0)
+
     def test_autonomous_mission_refuses_boxed_in_preflight(self):
         status = {
             "scan_seen": True,

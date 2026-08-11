@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Restart BEEP's LiDAR publisher, Cartographer stack, and bridge through Jupyter.
+"""Restart BEEP's Cartographer stack and bridge through Jupyter.
 
 BEEP's vendor image enables both YahboomStart and XGO_Start, which launch
-competing MS200 publishers on /dev/ttyAMA1. Keep YahboomStart authoritative and
-stop the duplicate before rebuilding SLAM state.
+competing MS200 publishers on /dev/ttyAMA1. Keep a healthy YahboomStart publisher
+authoritative, stop the duplicate, and rebuild only downstream SLAM state.
 """
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ async def reset_slam(session: requests.Session, xsrf: str) -> None:
 import subprocess, time
 steps = [
     (['sudo', 'systemctl', 'stop', 'XGO_Start'], 2),
-    (['sudo', 'systemctl', 'restart', 'YahboomStart'], 7),
     (['sudo', 'systemctl', 'restart', 'beep-cartographer', 'beep-occupancy-grid'], 4),
     (['sudo', 'systemctl', 'restart', 'beep-bridge'], 3),
 ]

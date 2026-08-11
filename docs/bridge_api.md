@@ -258,6 +258,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
 - disables autonomous lateral escape and walking arcs,
 - permits only a 0.30-second supervised reverse backoff when front clearance is breached and rear clearance is available,
+- aborts reverse during the pulse if average front clearance worsens by more than 0.02 m or measured heading drifts by more than 5 degrees,
 - requires at least 0.08 m average frontal-clearance gain after backoff,
 - caps turns at 0.30 seconds and requires at least 15 degrees of measured heading progress plus preserved 0.42 m sweep clearance,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,

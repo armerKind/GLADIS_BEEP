@@ -55,6 +55,10 @@ FOOTPRINT_REAR_M = max(0.45, float(os.environ.get("BEEP_FOOTPRINT_REAR_M", "0.45
 FORWARD_CORRIDOR_M = max(0.65, float(os.environ.get("BEEP_FORWARD_CORRIDOR_M", "0.65")))
 TURN_SWEEP_M = max(0.42, float(os.environ.get("BEEP_TURN_SWEEP_M", "0.42")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
+BACKOFF_MAX_FRONT_LOSS_M = min(0.02, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.02"))))
+BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
+    min(5.0, max(1.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "5.0"))))
+)
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
@@ -118,7 +122,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.2-safety-review",
+    "version": "0.18.3-backoff-guard",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1414,7 +1418,8 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                 step = explore_step_for(action)
                 before_pose = pose_copy()
                 motor_send(action, step=step)
-                supervised = supervise_lidar_motion(action, dur)
+                supervised = supervise_lidar_motion(
+                    action, dur, baseline_sectors=sec, baseline_pose=before_pose)
                 stop_burst(2)
                 after_state = snapshot()
                 after_sectors = after_state.get("sectors") or {}
@@ -1486,11 +1491,17 @@ def supervise_fluent_forward(duration, poll_s=0.08):
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
 
 
-def supervise_lidar_motion(action, duration, poll_s=0.08):
+def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None, baseline_pose=None):
     """Supervise one body-relative action against the full LiDAR footprint."""
     action = str(action).lower()
     started = time.time()
     deadline = started + max(0.0, float(duration))
+    baseline_values = validated_sector_values(baseline_sectors) if baseline_sectors is not None else None
+    baseline_front = None if baseline_values is None else sum(
+        baseline_values[name] for name in ("front", "front_left", "front_right")) / 3.0
+    baseline_yaw = None
+    if baseline_pose is not None and baseline_pose.get("yaw") is not None:
+        baseline_yaw = float(baseline_pose["yaw"])
     while time.time() < deadline:
         if motion_is_cancelled():
             return {"ok": False, "reason": "motion_cancelled", "elapsed_s": time.time() - started}
@@ -1509,6 +1520,21 @@ def supervise_lidar_motion(action, duration, poll_s=0.08):
                 return {"ok": False, "reason": "rear_clearance_breach", "elapsed_s": time.time() - started}
             if min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
                 return {"ok": False, "reason": "side_clearance_breach_during_backoff", "elapsed_s": time.time() - started}
+            current_front = sum(sec[name] for name in ("front", "front_left", "front_right")) / 3.0
+            if baseline_front is None:
+                baseline_front = current_front
+            elif baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M:
+                return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
+                        "elapsed_s": time.time() - started}
+            yaw = ((st.get("pose") or {}).get("yaw"))
+            if baseline_yaw is None and yaw is not None:
+                baseline_yaw = float(yaw)
+            elif baseline_yaw is not None and yaw is not None:
+                drift = abs(norm_angle(float(yaw) - baseline_yaw))
+                if drift > BACKOFF_MAX_HEADING_DRIFT_RAD:
+                    return {"ok": False, "reason": "heading_drift_during_backoff",
+                            "elapsed_s": time.time() - started,
+                            "heading_drift_degrees": round(math.degrees(drift), 2)}
         elif action in ("turnleft", "turnright"):
             if min(sec.values()) < TURN_SWEEP_M:
                 return {"ok": False, "reason": "turn_sweep_clearance_breach", "elapsed_s": time.time() - started}
@@ -1628,7 +1654,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 duration = min(duration, remaining)
                 before_pose = pose_copy()
                 motor_send(action, step=explore_step_for(action))
-                supervised = supervise_lidar_motion(action, duration)
+                supervised = supervise_lidar_motion(
+                    action, duration, baseline_sectors=sec, baseline_pose=before_pose)
                 stop_burst(2)
                 after_state = snapshot()
                 after_sectors = after_state.get("sectors") or {}
@@ -2443,6 +2470,8 @@ class Handler(BaseHTTPRequestHandler):
                                                            "forward_corridor": FORWARD_CORRIDOR_M, "turn_sweep": TURN_SWEEP_M,
                                                            "map_radius": ROBOT_FOOTPRINT_RADIUS_M,
                                                            "escape_gain": ESCAPE_CLEARANCE_GAIN_M,
+                                                           "backoff_max_front_loss": BACKOFF_MAX_FRONT_LOSS_M,
+                                                           "backoff_max_heading_drift_deg": math.degrees(BACKOFF_MAX_HEADING_DRIFT_RAD),
                                                            "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,
                                                            "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD)},
                                 "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
