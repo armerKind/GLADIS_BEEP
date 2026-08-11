@@ -76,7 +76,7 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["reason"].startswith("target_reached"))
         self.assertEqual(commands, [("turnleft", None)])
-        self.assertEqual(stops, [3])
+        self.assertEqual(stops, [2, 3])
         self.assertGreaterEqual(result["trace_tail"][-1]["progress_degrees"], 85.0)
 
     def test_guarded_slam_turn_rejects_wrong_direction(self):
@@ -116,7 +116,7 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(result["reason"].startswith("wrong_direction"))
         self.assertEqual(commands, [("turnleft", None)])
-        self.assertEqual(stops, [3])
+        self.assertEqual(stops, [2, 3])
 
     def test_guarded_slam_turn_rejects_missing_sector_before_motor_command(self):
         status = {

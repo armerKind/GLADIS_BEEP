@@ -261,7 +261,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - aborts reverse immediately if average front clearance worsens by more than 0.02 m or measured heading drifts by more than 5 degrees,
 - prefers a clearance-gated measured turn over reverse whenever all six stopped sectors satisfy the 0.45 m turn-start margin; if reverse worsens frontal clearance but the stopped envelope subsequently opens beyond that margin, it may make one guarded measured pivot instead of repeating reverse,
 - requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,
-- uses clearance-gated 20-degree measured-yaw exploration turns with a two-second ceiling; each turn aborts on stale pose, wrong direction, stalled yaw, cancellation, or sweep clearance below 0.42 m,
+- executes turns as 0.50-second clearance-supervised micro-pivots with a full stop and settled SLAM yaw measurement after each segment; two consecutive segments without at least 2 degrees of additional settled progress abort the turn,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,
 - clamps duration to 180 seconds,
 - attempts final SDK stop cleanup.

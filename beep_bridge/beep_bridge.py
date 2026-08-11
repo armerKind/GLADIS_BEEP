@@ -132,7 +132,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.7-pivot-fallback",
+    "version": "0.18.8-stop-measure-turns",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -2394,7 +2394,7 @@ def forward_continuous_until(target_front=FOOTPRINT_FRONT_M, max_duration=5.0, m
 
 def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_S,
                       tolerance_degrees=5.0, poll_interval=0.05, step=None):
-    """Turn in place until guarded Cartographer yaw reaches the requested delta."""
+    """Turn through clearance-supervised micro-pivots and settled SLAM measurements."""
     global last_run
     turn = str(turn).lower()
     if turn not in ("left", "right"):
@@ -2426,14 +2426,21 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
             return {"ok": False, "mode": "guarded_slam_turn", "reason": "clearance_breach_before_start", "status": final_state, "trace_tail": []}
         start_yaw = float(pose["yaw"])
         action = "turnleft" if turn == "left" else "turnright"
-        progress_checkpoint_at = started
-        progress_checkpoint = 0.0
+        best_progress = 0.0
+        stalled_segments = 0
         try:
-            motor_send(action, step=step)
             while time.time() - started < max_duration:
                 if motion_is_cancelled():
                     reason = "motion_cancelled"
                     break
+                motor_send(action, step=step)
+                segment = supervise_lidar_motion(
+                    action, min(0.50, max_duration - (time.time() - started)), poll_s=poll_interval)
+                stop_burst(2)
+                if not segment.get("ok"):
+                    reason = str(segment.get("reason"))
+                    break
+                time.sleep(0.10)
                 final_state = snapshot()
                 slam = final_state.get("slam") or {}
                 pose = final_state.get("pose") or {}
@@ -2456,21 +2463,23 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
                 signed_delta = math.atan2(math.sin(yaw - start_yaw), math.cos(yaw - start_yaw))
                 progress = signed_delta if turn == "left" else -signed_delta
                 trace.append({"elapsed_s": round(time.time() - started, 3), "yaw": round(yaw, 4),
-                              "progress_degrees": round(math.degrees(progress), 2), "nearest_m": round(nearest, 3)})
+                              "progress_degrees": round(math.degrees(progress), 2),
+                              "nearest_m": round(nearest, 3),
+                              "segment_elapsed_s": round(float(segment.get("elapsed_s", 0.0)), 3)})
                 if progress >= target_rad - tolerance_rad:
                     reason = f"target_reached:{math.degrees(progress):.1f}deg"
                     break
-                if progress < -math.radians(12.0):
+                if progress < -math.radians(5.0):
                     reason = f"wrong_direction:{math.degrees(progress):.1f}deg"
                     break
-                now = time.time()
-                if now - progress_checkpoint_at >= TURN_PROGRESS_WINDOW_S:
-                    if turn_window_stalled(now - progress_checkpoint_at, progress - progress_checkpoint):
-                        reason = f"turn_no_progress:{math.degrees(progress - progress_checkpoint):.1f}deg"
+                if progress >= best_progress + math.radians(2.0):
+                    best_progress = progress
+                    stalled_segments = 0
+                else:
+                    stalled_segments += 1
+                    if stalled_segments >= 2:
+                        reason = f"turn_no_settled_progress:{math.degrees(progress):.1f}deg"
                         break
-                    progress_checkpoint_at = now
-                    progress_checkpoint = progress
-                time.sleep(poll_interval)
         except Exception as e:
             reason = "exception:" + repr(e)
             with state_lock:
