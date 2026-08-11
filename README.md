@@ -9,10 +9,10 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.18.6-yaw-corrected-reverse
+0.18.7-pivot-fallback
 ```
 
-Bridge `0.18.5-supervised-reverse` physically stopped after 1.04 seconds when reverse yaw drift exceeded 5 degrees; it gained only about 0.016 m frontal clearance. Source `0.18.6-yaw-corrected-reverse` splits recovery into at most three 0.60-second segments, stops between segments, restores the original heading with a clearance-gated measured turn, and resumes only while every guard remains valid.
+Bridge `0.18.6-yaw-corrected-reverse` stopped safely when its first live recovery worsened frontal clearance; the recovery trace was insufficiently detailed. Source `0.18.7-pivot-fallback` records each segment and correction, prefers a measured turn when full 0.45 m start clearance exists, and falls back from worsening reverse to a guarded turn only after the stopped six-sector envelope opens.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 

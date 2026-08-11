@@ -259,6 +259,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - disables autonomous lateral escape and walking arcs,
 - permits only a yaw-corrected, continuously supervised reverse recovery when front clearance is breached and rear clearance is available: at most three 0.60-second segments, with a full stop and clearance-gated measured heading correction between segments; recovery stops at 0.08 m average frontal-clearance gain,
 - aborts reverse immediately if average front clearance worsens by more than 0.02 m or measured heading drifts by more than 5 degrees,
+- prefers a clearance-gated measured turn over reverse whenever all six stopped sectors satisfy the 0.45 m turn-start margin; if reverse worsens frontal clearance but the stopped envelope subsequently opens beyond that margin, it may make one guarded measured pivot instead of repeating reverse,
 - requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,
 - uses clearance-gated 20-degree measured-yaw exploration turns with a two-second ceiling; each turn aborts on stale pose, wrong direction, stalled yaw, cancellation, or sweep clearance below 0.42 m,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,

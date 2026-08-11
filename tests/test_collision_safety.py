@@ -108,6 +108,15 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(duration, bridge.REVERSE_ESCAPE_MAX_S)
         self.assertEqual(reason, "turn_sweep_blocked_backoff")
 
+    def test_front_breach_prefers_guarded_turn_when_full_start_margin_exists(self):
+        recoverable = {
+            "front": 0.52, "front_left": 0.54, "front_right": 0.51,
+            "left": 0.62, "right": 0.55, "rear": 1.0,
+        }
+        action, _, reason = bridge.choose_explore_action(recoverable)
+        self.assertEqual(action, "turnleft")
+        self.assertEqual(reason, "front_breach_sweep_left")
+
     def test_guarded_turn_progress_window_fails_stalled_motion(self):
         self.assertFalse(bridge.turn_window_stalled(0.50, math.radians(0.0)))
         self.assertTrue(bridge.turn_window_stalled(0.75, math.radians(4.0)))
@@ -313,6 +322,37 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(motor.call_count, 2)
         correction.assert_called_once()
         self.assertEqual(correction.call_args.kwargs["turn"], "right")
+
+    def test_reverse_worsening_falls_back_to_guarded_turn_when_sweep_opens(self):
+        baseline = {
+            "front": 0.62, "front_left": 0.62, "front_right": 0.50,
+            "left": 0.57, "right": 0.43, "rear": 1.0,
+        }
+        opened = {
+            "front": 0.54, "front_left": 0.52, "front_right": 0.56,
+            "left": 0.60, "right": 0.50, "rear": 1.0,
+        }
+        before = {
+            "scan_seen": True, "scan_age_s": 0.01, "sectors": baseline,
+            "pose": {"yaw": 0.0}, "slam": {"usable": True, "pose_valid": True},
+        }
+        after = {
+            "scan_seen": True, "scan_age_s": 0.01, "sectors": opened,
+            "pose": {"yaw": 0.0}, "slam": {"usable": True, "pose_valid": True},
+        }
+        turn_result = {"ok": True, "reason": "target_reached:16.0deg",
+                       "elapsed_s": 1.0, "status": after}
+        with patch.object(bridge, "snapshot", side_effect=[before, after]), \
+                patch.object(bridge, "supervise_lidar_motion", return_value={
+                    "ok": False, "reason": "front_clearance_worsening_during_backoff",
+                    "elapsed_s": 0.4}), \
+                patch.object(bridge, "guarded_slam_turn", return_value=turn_result) as turn, \
+                patch.object(bridge, "motor_send"), patch.object(bridge, "stop_burst"):
+            result = bridge.yaw_corrected_reverse_escape(baseline, {"yaw": 0.0})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "reverse_worsened_turn_recovery")
+        self.assertEqual(result["recovery_action"], "turn")
+        self.assertEqual(turn.call_args.kwargs["turn"], "left")
 
     def test_autonomous_mission_refuses_boxed_in_preflight(self):
         status = {

@@ -132,7 +132,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.6-yaw-corrected-reverse",
+    "version": "0.18.7-pivot-fallback",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1283,6 +1283,10 @@ def choose_explore_action(sectors):
     rear_escape_clear = rear >= FOOTPRINT_REAR_M and body_sides_clear
 
     if front_breach:
+        if min(front, fl, fr, left, right, rear) >= TURN_START_CLEARANCE_M:
+            if max(left, fl) >= max(right, fr):
+                return "turnleft", 0.30, "front_breach_sweep_left"
+            return "turnright", 0.30, "front_breach_sweep_right"
         if rear_escape_clear:
             return "back", REVERSE_ESCAPE_MAX_S, "front_footprint_breach_backoff"
         return "stop", 0.0, "footprint_boxed_in_stop"
@@ -1446,11 +1450,13 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                             (action in ("turnleft", "turnright") and bool(supervised["ok"])) or
                             (bool(supervised["ok"]) and (
                                 supervised.get("reason") == "reverse_clearance_gain_reached" or
+                                supervised.get("recovery_action") == "turn" or
                                 escape_made_progress(action, sec, after_sectors, before_pose, after_pose))))
                 trace.append({"action": action, "step": step,
                               "duration": round(float(supervised.get("elapsed_s", 0.0)), 2), "why": why,
                               "sectors_before": sec, "sectors_after": after_sectors,
-                              "progress": progress, "supervisor_reason": supervised["reason"]})
+                              "progress": progress, "supervisor_reason": supervised["reason"],
+                              "recovery_attempts": supervised.get("attempts")})
                 if not supervised["ok"]:
                     reason = str(supervised["reason"])
                     break
@@ -1630,6 +1636,24 @@ def yaw_corrected_reverse_escape(baseline_sectors, baseline_pose):
                                   (gain is not None and gain >= ESCAPE_CLEARANCE_GAIN_M)):
             return {"ok": True, "reason": "reverse_clearance_gain_reached",
                     "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
+        if segment.get("reason") == "front_clearance_worsening_during_backoff":
+            if after_required is not None and min(after_required.values()) >= TURN_START_CLEARANCE_M:
+                fallback_direction = ("left" if max(after_required["left"], after_required["front_left"]) >=
+                                      max(after_required["right"], after_required["front_right"]) else "right")
+                fallback = guarded_slam_turn(
+                    turn=fallback_direction, degrees=20.0,
+                    max_duration=2.0, tolerance_degrees=5.0, step=30)
+                item["fallback_turn"] = fallback
+                if fallback.get("ok"):
+                    return {"ok": True, "reason": "reverse_worsened_turn_recovery",
+                            "recovery_action": "turn", "elapsed_s": time.time() - started,
+                            "attempts": attempts, "status": fallback.get("status") or snapshot()}
+                return {"ok": False,
+                        "reason": "reverse_worsened_turn_failed:" + str(fallback.get("reason")),
+                        "elapsed_s": time.time() - started, "attempts": attempts,
+                        "status": fallback.get("status") or snapshot()}
+            return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
+                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
         if segment.get("reason") not in ("window_complete", "heading_drift_during_backoff"):
             return {"ok": False, "reason": str(segment.get("reason")),
                     "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
@@ -1776,6 +1800,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 progress = (bool(supervised["ok"]) if action in ("turnleft", "turnright") else
                             bool(supervised["ok"]) and (
                                 supervised.get("reason") == "reverse_clearance_gain_reached" or
+                                supervised.get("recovery_action") == "turn" or
                                 escape_made_progress(action, sec, after_sectors, before_pose, after_pose)))
                 trace.append({
                     "action": action,
@@ -1785,6 +1810,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     "sectors_after": after_sectors,
                     "progress": progress,
                     "supervisor_reason": supervised["reason"],
+                    "recovery_attempts": supervised.get("attempts"),
                 })
                 if not supervised["ok"]:
                     reason = str(supervised["reason"])
