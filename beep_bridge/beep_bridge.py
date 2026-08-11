@@ -853,6 +853,37 @@ def run_action(action: str, duration: float, step=None):
         return {"ok": True, "backend": MOTOR_BACKEND, "action": action, "step": SDK_STEP_DEFAULT if step is None else int(step), "duration": duration, "pose": pose_copy(), "map": map_summary(room_map) if room_map is not None else None, "status": snapshot()}
 
 
+def run_supervised_calibration(action: str, duration: float):
+    """Run one bounded translation while the normal full-envelope supervisor remains authoritative."""
+    action = str(action).lower()
+    aliases = {"back": "backward"}
+    action = aliases.get(action, action)
+    if action not in ("forward", "backward", "left", "right"):
+        raise ValueError("supervised calibration supports forward/backward/left/right")
+    duration = min(max(float(duration), 0.05), 1.2)
+    before = snapshot()
+    sectors = validated_sector_values(before.get("sectors"))
+    if sectors is None:
+        return {"ok": False, "reason": "lidar_sector_missing_or_invalid", "action": action, "status": before}
+    if action == "forward" and (sectors["front"] < FORWARD_CORRIDOR_M or
+                                min(sectors["front_left"], sectors["front_right"]) < FOOTPRINT_DIAGONAL_M or
+                                min(sectors["left"], sectors["right"]) < FOOTPRINT_SIDE_M):
+        return {"ok": False, "reason": "forward_corridor_blocked", "action": action, "status": before}
+    if action == "backward" and (sectors["rear"] < FOOTPRINT_REAR_M or min(sectors["left"], sectors["right"]) < FOOTPRINT_SIDE_M):
+        return {"ok": False, "reason": "reverse_envelope_blocked", "action": action, "status": before}
+    if action in ("left", "right") and min(sectors.values()) < TURN_SWEEP_M:
+        return {"ok": False, "reason": "lateral_envelope_blocked", "action": action, "status": before}
+    start_pose = dict(before.get("pose") or {})
+    motor_send(action)
+    try:
+        supervised = supervise_lidar_motion(action, duration, baseline_sectors=sectors, baseline_pose=start_pose)
+    finally:
+        stop_burst(3)
+    after = snapshot()
+    return {"ok": bool(supervised.get("ok")), "reason": supervised.get("reason"), "action": action,
+            "duration": duration, "supervision": supervised, "before": before, "status": after}
+
+
 def capture_frame(timeout=4.0, max_bytes=1_500_000):
     """Return one JPEG from the MJPEG stream.
 
@@ -2712,6 +2743,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(run_action(action, duration, step=step))
                 else:
                     self.send_json(run_owned_motion("http_get_move", lambda: run_action(action, duration, step=step), max_duration=duration + 1.0))
+            elif p.path == "/supervised_move":
+                action = (qs.get("action") or ["backward"])[0]
+                duration = float((qs.get("duration") or ["0.8"])[0])
+                self.send_json(run_owned_motion("http_get_supervised_move", lambda: run_supervised_calibration(action, duration), max_duration=min(duration, 1.2) + 1.0))
             elif p.path in ("/action", "/trick"):
                 name = (qs.get("name") or qs.get("action") or qs.get("trick") or [None])[0]
                 action_id = (qs.get("id") or qs.get("action_id") or [None])[0]
