@@ -31,7 +31,7 @@ class CollisionSafetyTests(unittest.TestCase):
     def test_front_obstacle_backs_away_only_with_full_side_and_rear_clearance(self):
         action, duration, reason = bridge.choose_explore_action(FRONT_BLOCKED_REAR_CLEAR)
         self.assertEqual(action, "back")
-        self.assertEqual(duration, 0.30)
+        self.assertEqual(duration, bridge.REVERSE_ESCAPE_MAX_S)
         self.assertEqual(reason, "front_footprint_breach_backoff")
 
     def test_every_required_sector_fails_closed_when_missing_or_invalid(self):
@@ -98,6 +98,16 @@ class CollisionSafetyTests(unittest.TestCase):
             before_pose, {"yaw": -math.radians(18)}
         ))
 
+    def test_turn_requires_start_margin_above_runtime_sweep_floor(self):
+        marginal = {
+            "front": 0.63, "front_left": 0.65, "front_right": 0.46,
+            "left": 0.58, "right": 0.43, "rear": 1.0,
+        }
+        action, duration, reason = bridge.choose_explore_action(marginal)
+        self.assertEqual(action, "back")
+        self.assertEqual(duration, bridge.REVERSE_ESCAPE_MAX_S)
+        self.assertEqual(reason, "turn_sweep_blocked_backoff")
+
     def test_guarded_turn_progress_window_fails_stalled_motion(self):
         self.assertFalse(bridge.turn_window_stalled(0.50, math.radians(0.0)))
         self.assertTrue(bridge.turn_window_stalled(0.75, math.radians(4.0)))
@@ -109,7 +119,7 @@ class CollisionSafetyTests(unittest.TestCase):
             "scan_age_s": 0.01,
             "sectors": {
                 "front": 0.63, "front_left": 0.65, "front_right": 0.46,
-                "left": 0.58, "right": 0.43, "rear": 1.0,
+                "left": 0.58, "right": 0.50, "rear": 1.0,
             },
             "pose": {"yaw": 0.0},
             "slam": {"usable": True, "pose_valid": True},
@@ -247,6 +257,25 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "heading_drift_during_backoff")
         self.assertGreater(result["heading_drift_degrees"], 5.0)
+
+    def test_backward_supervisor_stops_as_soon_as_clearance_gain_is_reached(self):
+        baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.50, front_left=0.50, front_right=0.50)
+        improved = dict(baseline, front=0.59, front_left=0.59, front_right=0.59)
+        state = {
+            "scan_seen": True,
+            "scan_age_s": 0.01,
+            "sectors": improved,
+            "pose": {"yaw": 0.0},
+        }
+        with patch.object(bridge, "snapshot", return_value=state):
+            result = bridge.supervise_lidar_motion(
+                "back", bridge.REVERSE_ESCAPE_MAX_S,
+                baseline_sectors=baseline, baseline_pose={"yaw": 0.0},
+                stop_on_front_gain_m=bridge.ESCAPE_CLEARANCE_GAIN_M)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "reverse_clearance_gain_reached")
+        self.assertGreaterEqual(result["front_clearance_gain_m"], 0.08)
+        self.assertLess(result["elapsed_s"], bridge.REVERSE_ESCAPE_MAX_S)
 
     def test_autonomous_mission_refuses_boxed_in_preflight(self):
         status = {

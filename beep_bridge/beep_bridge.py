@@ -54,11 +54,15 @@ FOOTPRINT_SIDE_M = max(0.35, float(os.environ.get("BEEP_FOOTPRINT_SIDE_M", "0.35
 FOOTPRINT_REAR_M = max(0.45, float(os.environ.get("BEEP_FOOTPRINT_REAR_M", "0.45")))
 FORWARD_CORRIDOR_M = max(0.65, float(os.environ.get("BEEP_FORWARD_CORRIDOR_M", "0.65")))
 TURN_SWEEP_M = max(0.42, float(os.environ.get("BEEP_TURN_SWEEP_M", "0.42")))
+TURN_START_CLEARANCE_M = max(TURN_SWEEP_M + 0.03,
+                             float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.45")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
 BACKOFF_MAX_FRONT_LOSS_M = min(0.02, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.02"))))
 BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
     min(5.0, max(1.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "5.0"))))
 )
+REVERSE_ESCAPE_MAX_S = min(1.2, max(
+    0.30, float(os.environ.get("BEEP_REVERSE_ESCAPE_MAX_S", "1.2"))))
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
@@ -122,7 +126,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.18.4-measured-turns",
+    "version": "0.18.5-supervised-reverse",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1274,7 +1278,7 @@ def choose_explore_action(sectors):
 
     if front_breach:
         if rear_escape_clear:
-            return "back", 0.30, "front_footprint_breach_backoff"
+            return "back", REVERSE_ESCAPE_MAX_S, "front_footprint_breach_backoff"
         return "stop", 0.0, "footprint_boxed_in_stop"
     if min(left, right) < FOOTPRINT_SIDE_M:
         return "stop", 0.0, "side_footprint_breach_stop"
@@ -1282,13 +1286,13 @@ def choose_explore_action(sectors):
             fr >= FOOTPRINT_DIAGONAL_M):
         return "forward", 0.50, "full_body_corridor_clear"
 
-    sweep_clear = min(front, fl, fr, left, right, rear) >= TURN_SWEEP_M
+    sweep_clear = min(front, fl, fr, left, right, rear) >= TURN_START_CLEARANCE_M
     if sweep_clear:
         if max(left, fl) >= max(right, fr):
             return "turnleft", 0.30, "footprint_sweep_left"
         return "turnright", 0.30, "footprint_sweep_right"
     if rear_escape_clear:
-        return "back", 0.30, "turn_sweep_blocked_backoff"
+        return "back", REVERSE_ESCAPE_MAX_S, "turn_sweep_blocked_backoff"
     return "stop", 0.0, "footprint_boxed_in_stop"
 
 
@@ -1424,15 +1428,17 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                 else:
                     motor_send(action, step=step)
                     supervised = supervise_lidar_motion(
-                        action, dur, baseline_sectors=sec, baseline_pose=before_pose)
+                        action, dur, baseline_sectors=sec, baseline_pose=before_pose,
+                        stop_on_front_gain_m=ESCAPE_CLEARANCE_GAIN_M if action in ("back", "backward") else None)
                     stop_burst(2)
                 after_state = snapshot()
                 after_sectors = after_state.get("sectors") or {}
                 after_pose = pose_copy()
                 progress = (action == "forward" or
                             (action in ("turnleft", "turnright") and bool(supervised["ok"])) or
-                            (bool(supervised["ok"]) and escape_made_progress(
-                                action, sec, after_sectors, before_pose, after_pose)))
+                            (bool(supervised["ok"]) and (
+                                supervised.get("reason") == "reverse_clearance_gain_reached" or
+                                escape_made_progress(action, sec, after_sectors, before_pose, after_pose))))
                 trace.append({"action": action, "step": step,
                               "duration": round(float(supervised.get("elapsed_s", 0.0)), 2), "why": why,
                               "sectors_before": sec, "sectors_after": after_sectors,
@@ -1497,7 +1503,8 @@ def supervise_fluent_forward(duration, poll_s=0.08):
     return {"ok": True, "reason": "window_complete", "elapsed_s": time.time() - started}
 
 
-def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None, baseline_pose=None):
+def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
+                           baseline_pose=None, stop_on_front_gain_m=None):
     """Supervise one body-relative action against the full LiDAR footprint."""
     action = str(action).lower()
     started = time.time()
@@ -1532,6 +1539,11 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
             elif baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M:
                 return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
                         "elapsed_s": time.time() - started}
+            elif (stop_on_front_gain_m is not None and
+                  current_front - baseline_front >= float(stop_on_front_gain_m)):
+                return {"ok": True, "reason": "reverse_clearance_gain_reached",
+                        "elapsed_s": time.time() - started,
+                        "front_clearance_gain_m": current_front - baseline_front}
             yaw = ((st.get("pose") or {}).get("yaw"))
             if baseline_yaw is None and yaw is not None:
                 baseline_yaw = float(yaw)
@@ -1670,14 +1682,16 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 else:
                     motor_send(action, step=explore_step_for(action))
                     supervised = supervise_lidar_motion(
-                        action, duration, baseline_sectors=sec, baseline_pose=before_pose)
+                        action, duration, baseline_sectors=sec, baseline_pose=before_pose,
+                        stop_on_front_gain_m=ESCAPE_CLEARANCE_GAIN_M if action in ("back", "backward") else None)
                     stop_burst(2)
                 after_state = snapshot()
                 after_sectors = after_state.get("sectors") or {}
                 after_pose = pose_copy()
                 progress = (bool(supervised["ok"]) if action in ("turnleft", "turnright") else
-                            bool(supervised["ok"]) and escape_made_progress(
-                                action, sec, after_sectors, before_pose, after_pose))
+                            bool(supervised["ok"]) and (
+                                supervised.get("reason") == "reverse_clearance_gain_reached" or
+                                escape_made_progress(action, sec, after_sectors, before_pose, after_pose)))
                 trace.append({
                     "action": action,
                     "duration": round(float(supervised.get("elapsed_s", 0.0)), 3),
@@ -2483,8 +2497,10 @@ class Handler(BaseHTTPRequestHandler):
                                 "footprint_clearance_m": {"front": FOOTPRINT_FRONT_M, "front_diagonal": FOOTPRINT_DIAGONAL_M,
                                                            "side": FOOTPRINT_SIDE_M, "rear": FOOTPRINT_REAR_M,
                                                            "forward_corridor": FORWARD_CORRIDOR_M, "turn_sweep": TURN_SWEEP_M,
+                                                           "turn_start_clearance": TURN_START_CLEARANCE_M,
                                                            "map_radius": ROBOT_FOOTPRINT_RADIUS_M,
                                                            "escape_gain": ESCAPE_CLEARANCE_GAIN_M,
+                                                           "reverse_escape_max_s": REVERSE_ESCAPE_MAX_S,
                                                            "backoff_max_front_loss": BACKOFF_MAX_FRONT_LOSS_M,
                                                            "backoff_max_heading_drift_deg": math.degrees(BACKOFF_MAX_HEADING_DRIFT_RAD),
                                                            "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,

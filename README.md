@@ -9,10 +9,10 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source:
 
 ```text
-0.18.4-measured-turns
+0.18.5-supervised-reverse
 ```
 
-Bridge `0.18.3-backoff-guard` completed bounded 2-second and 5-second forward trials and a 10-second obstacle-response trial; its 0.30-second turn pulse could not satisfy the 15-degree progress rule. Source `0.18.4-measured-turns` replaces exploration turn pulses with clearance-gated 20-degree measured-yaw turns and is pending physical validation.
+Bridge `0.18.4-measured-turns` physically aborted its first measured turn after 0.52 seconds when transient sweep clearance reached 0.418 m; no contact occurred. Source `0.18.5-supervised-reverse` adds a 0.45 m turn-start margin and a continuously supervised reverse recovery that stops at 0.08 m frontal-clearance gain or a hard 1.2-second ceiling.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 
