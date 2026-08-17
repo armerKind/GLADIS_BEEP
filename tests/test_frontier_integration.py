@@ -348,6 +348,22 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.state.clear()
             bridge.state.update(original)
 
+    def test_sit_is_named_social_camera_action(self):
+        trick = bridge.resolve_trick(name="social_sit")
+        self.assertEqual(trick["name"], "sit")
+        self.assertEqual(trick["id"], 12)
+        self.assertTrue(trick["safe_for_fair"])
+
+    def test_fall_signature_is_exposed_in_status(self):
+        original = dict(bridge.state)
+        try:
+            bridge.state["sectors"] = {"front": 0.05, "front_left": None, "front_right": 0.37,
+                                       "left": None, "right": 0.34, "rear": 0.06}
+            self.assertTrue(bridge.snapshot()["fall_suspected"])
+        finally:
+            bridge.state.clear()
+            bridge.state.update(original)
+
     def test_lidar_forward_supervisor_stops_on_fresh_close_obstacle(self):
         close = {
             "scan_seen": True,
@@ -408,6 +424,31 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertFalse(second_started)
         self.assertEqual(action, "forward")
         self.assertEqual(commands, [("forward", 20)])
+
+    def test_fluent_steering_prefers_more_open_side(self):
+        base = {"front": 1.0, "front_left": 0.9, "front_right": 0.55,
+                "left": 0.8, "right": 0.50, "rear": 0.8}
+        self.assertEqual(bridge.choose_fluent_steering(base), "curveleft")
+        mirrored = dict(base, front_left=0.55, front_right=0.9, left=0.50, right=0.8)
+        self.assertEqual(bridge.choose_fluent_steering(mirrored), "curveright")
+        open_corridor = dict(base, front=1.8, front_left=1.0, front_right=0.95, left=0.9, right=0.9)
+        self.assertEqual(bridge.choose_fluent_steering(open_corridor), "forward")
+        tight_curve = dict(base, front=0.70, front_left=0.70, front_right=1.2, left=0.65, right=0.8)
+        self.assertEqual(bridge.choose_fluent_steering(tight_curve, current_action="curveleft"), "curveleft")
+
+    def test_fluent_motion_changes_yaw_without_stop(self):
+        with patch.object(bridge, "motor_send") as motor, \
+             patch.object(bridge, "sdk_curve") as curve, \
+             patch.object(bridge, "sdk_straighten") as straighten:
+            action, changed = bridge.start_or_update_fluent_motion(None, "forward", step=20)
+            self.assertTrue(changed)
+            action, changed = bridge.start_or_update_fluent_motion(action, "curveleft", step=20, yaw_step=18)
+            self.assertTrue(changed)
+            action, changed = bridge.start_or_update_fluent_motion(action, "forward", step=20)
+            self.assertTrue(changed)
+        motor.assert_called_once_with("forward", step=20)
+        curve.assert_called_once_with("left", forward_step=20, yaw_step=18)
+        straighten.assert_called_once_with()
 
     def test_bounded_frontier_loop_plans_motion_and_finishes_stopped(self):
         width = height = 15

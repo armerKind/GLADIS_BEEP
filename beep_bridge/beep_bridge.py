@@ -111,6 +111,7 @@ TRICK_ACTIONS = {
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
     "three_axis": {"id": 10, "label": "3-axis body motion", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["3axis", "axis", "body_demo"]},
     "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 8.0, "safe_for_fair": True, "aliases": ["leg_lift", "mark", "urinate"]},
+    "sit": {"id": 12, "label": "Sit / upward social view", "duration_s": 4.0, "safe_for_fair": True, "aliases": ["sit_down", "social_sit", "look_up"]},
     "stretch": {"id": 14, "label": "Stretch", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["show", "startup_show", "lazy"]},
     "swing": {"id": 16, "label": "Swing", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["shake", "wobble"]},
     "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["prey", "beg", "begging", "request_food"]},
@@ -135,7 +136,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.19.2-supervised-arcs",
+    "version": "0.19.3-fluent-steering",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -818,6 +819,13 @@ def snapshot(full=False):
         else:
             slam["usable_reason"] = "ok"
         out["slam"] = slam
+        sectors = out.get("sectors") or {}
+        front_value, rear_value = sectors.get("front"), sectors.get("rear")
+        missing_required = any(sectors.get(name) is None for name in
+                               ("front", "front_left", "front_right", "left", "right", "rear"))
+        out["fall_suspected"] = bool(
+            missing_required and isinstance(front_value, (int, float)) and
+            isinstance(rear_value, (int, float)) and front_value < 0.10 and rear_value < 0.10)
         if full:
             out["last_run"] = last_run
         elif last_run:
@@ -1686,6 +1694,9 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
         elif action in ("turnleft", "turnright"):
             if min(sec.values()) < TURN_SWEEP_M:
                 return {"ok": False, "reason": "turn_sweep_clearance_breach", "elapsed_s": time.time() - started}
+        elif action in ("curveleft", "curveright"):
+            if min(sec.values()) < TURN_SWEEP_M or min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
+                return {"ok": False, "reason": "fluent_curve_envelope_breach", "elapsed_s": time.time() - started}
         else:
             return {"ok": False, "reason": "unsupported_reactive_motion", "elapsed_s": time.time() - started}
         time.sleep(min(float(poll_s), max(0.0, deadline - time.time())))
@@ -1854,6 +1865,10 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
                 remaining = max_duration - (time.time() - started)
+                if (current_action in ("curveleft", "curveright") and
+                        min(sec.values()) >= TURN_SWEEP_M and
+                        min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M):
+                    action, why = "forward", "continue_in_gait_curve"
                 if action == "stop":
                     stop_burst(3)
                     current_action = None
@@ -1863,9 +1878,13 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 if action == "forward":
                     last_escape_action = None
                     consecutive_escape_actions = 0
-                    current_action, gait_started = start_or_continue_fluent_forward(current_action, step=20)
-                    supervised = supervise_lidar_forward(min(0.50, remaining))
-                    trace.append({"action": "forward", "gait_started": gait_started,
+                    desired_action = choose_fluent_steering(sec, current_action=current_action)
+                    current_action, gait_started = start_or_update_fluent_motion(
+                        current_action, desired_action, step=20, yaw_step=18)
+                    supervised = (supervise_lidar_motion(current_action, min(0.50, remaining))
+                                  if current_action in ("curveleft", "curveright")
+                                  else supervise_lidar_forward(min(0.50, remaining)))
+                    trace.append({"action": desired_action, "gait_started": gait_started,
                                   "duration": round(float(supervised.get("elapsed_s", 0.0)), 3),
                                   "why": why, "sectors": sec})
                     if not supervised["ok"]:
@@ -1898,10 +1917,15 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     if remaining < 1.0:
                         reason = "max_duration"
                         break
-                    supervised = guarded_slam_turn(
-                        turn="left" if action == "turnleft" else "right",
-                        degrees=20.0, max_duration=min(2.0, remaining),
-                        step=explore_step_for(action))
+                    if slam_ok(snapshot()):
+                        supervised = guarded_slam_turn(
+                            turn="left" if action == "turnleft" else "right",
+                            degrees=20.0, max_duration=min(2.5, remaining),
+                            step=explore_step_for(action))
+                    else:
+                        motor_send(action, step=explore_step_for(action))
+                        supervised = supervise_lidar_motion(action, min(2.5, remaining))
+                        stop_burst(2)
                 elif action in ("back", "backward"):
                     supervised = yaw_corrected_reverse_escape(sec, before_pose)
                 else:
@@ -2124,6 +2148,43 @@ def start_or_continue_fluent_forward(current_action, step):
         return "forward", False
     motor_send("forward", step=step)
     return "forward", True
+
+
+def choose_fluent_steering(sectors, current_action=None):
+    """Choose a gentle in-gait heading correction from the current local envelope."""
+    values = validated_sector_values(sectors)
+    if values is None:
+        return "forward"
+    left_open = min(values["front_left"], values["left"])
+    right_open = min(values["front_right"], values["right"])
+    if current_action in ("curveleft", "curveright") and values["front"] < 1.15:
+        return current_action
+    correction_needed = values["front"] < 1.15 or abs(left_open - right_open) >= 0.16
+    if not correction_needed:
+        return "forward"
+    if left_open >= right_open + 0.08:
+        return "curveleft"
+    if right_open >= left_open + 0.08:
+        return "curveright"
+    return "forward"
+
+
+def start_or_update_fluent_motion(current_action, desired_action, step=20, yaw_step=18):
+    """Update heading registers without neutralizing an already active walking gait."""
+    desired_action = str(desired_action).lower()
+    if desired_action not in ("forward", "curveleft", "curveright"):
+        raise ValueError("unsupported fluent motion action")
+    if current_action == desired_action:
+        return current_action, False
+    if desired_action == "forward":
+        if current_action is None:
+            motor_send("forward", step=step)
+        else:
+            sdk_straighten()
+    else:
+        sdk_curve("left" if desired_action == "curveleft" else "right",
+                  forward_step=step, yaw_step=yaw_step)
+    return desired_action, True
 
 
 def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=None, save=True, dry_run=False):

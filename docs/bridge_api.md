@@ -254,15 +254,17 @@ GET /demo_walk?max_duration=90
 This presentation-safe fallback makes **no global-SLAM claim**. It:
 
 - keeps one fluent forward SDK gait active across compatible clear windows,
+- adjusts yaw in gait with `curveleft`/`curveright`, then clears yaw without neutralizing forward motion,
 - polls all six local LiDAR sectors approximately every 80 ms,
 - requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
-- disables autonomous lateral escape and walking arcs,
+- uses gentle in-gait forward curves for heading correction while keeping autonomous lateral and reverse-arc escape disabled,
 - permits only a yaw-corrected, continuously supervised reverse recovery when front clearance is breached and rear clearance is available: at most three 0.60-second segments, with a full stop and clearance-gated measured heading correction between segments; recovery stops at 0.08 m average frontal-clearance gain,
 - aborts reverse immediately if average front clearance worsens by more than 0.02 m or measured heading drifts by more than 5 degrees,
 - prefers a clearance-gated measured turn over reverse whenever all six stopped sectors satisfy the 0.45 m turn-start margin; if reverse worsens frontal clearance but the stopped envelope subsequently opens beyond that margin, it may make one guarded measured pivot instead of repeating reverse,
 - requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,
 - The vendor app D-pad translation buttons are not used for autonomous motion because they update only one persistent motion axis. App-backend translation uses analog command `0x11` and writes both axes on every request: forward `(0, +100)`, backward `(0, -100)`, left `(+100, 0)`, right `(-100, 0)`. Reverse additionally selects width `100`, `high_walk`, and normal pace; stop sends `(0, 0)` and button stop, restores width `50` and normal pace, then restores the standard `walk` SDK profile. Turn-left/right use buttons `5`/`6`.
 - Supervised reverse arcs use `arcbackleft` and `arcbackright`: width `100`, normal pace, high-walk analog negative X, then persistent yaw button `5` or `6`. The full six-sector 0.42 m turn-sweep floor remains active together with reverse rear, side, and frontal-progress guards. Supervised turn calibration also accepts `turnleft` and `turnright`; app-backed measured pivots use 0.90-second segments before stop-and-measure.
+- Named stationary action `sit` (firmware action `12`, aliases `sit_down`, `social_sit`, `look_up`) raises the camera for social observation. Status exposes `fall_suspected` when required sectors are missing while both front and rear collapse below 0.10 m. This is a fail-closed diagnostic, not proof of orientation; physical attitude sensing or an external view remains required.
 - permits a narrowly bounded rightward turn-setup shift only when front clearance is at least 0.46 m, both diagonals remain above the 0.42 m sweep floor, right clearance exceeds 0.55 m, and rear/side guards pass; the 0.35-second step-5 shift aborts on more than 0.02 m frontal loss or 5 degrees heading drift and must gain at least 0.008 m left clearance,
 - executes turns as 0.90-second clearance-supervised pivots with a full stop and settled SLAM yaw measurement after each segment; two consecutive segments without at least 2 degrees of additional settled progress abort the turn,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,
