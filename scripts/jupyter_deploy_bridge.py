@@ -10,6 +10,7 @@ Environment variables:
   BEEP_PLANNER_SRC          default: beep_bridge/frontier_planner.py
   BEEP_SLAM_CONFIG_SRC      default: config/beep_2d.lua
   BEEP_SAVE_SLAM_SRC        default: scripts/save_slam_map.sh
+  BEEP_SERVICE_SRC          default: systemd/beep-bridge.service
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"
 PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
 SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
 SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map.sh"))
+SERVICE_SRC = Path(os.environ.get("BEEP_SERVICE_SRC", "systemd/beep-bridge.service"))
 BASE = f"http://{HOST}:8888"
 
 
@@ -104,6 +106,15 @@ def put_bridge(session: requests.Session, xsrf: str) -> None:
         )
         save_script.raise_for_status()
         print("uploaded: /home/pi/beep_bridge/save_slam_map.sh")
+    if SERVICE_SRC.exists():
+        service = session.put(
+            f"{BASE}/api/contents/beep_bridge/beep-bridge.service",
+            headers=headers,
+            json={"type": "file", "format": "text", "content": SERVICE_SRC.read_text()},
+            timeout=10,
+        )
+        service.raise_for_status()
+        print("uploaded: /home/pi/beep_bridge/beep-bridge.service")
 
 
 async def restart_bridge(session: requests.Session, xsrf: str) -> None:
@@ -113,7 +124,7 @@ async def restart_bridge(session: requests.Session, xsrf: str) -> None:
     kernel_id = kr.json()["id"]
     cookie = "; ".join([f"{c.name}={c.value}" for c in session.cookies])
     code = r'''
-import subprocess, os, time, pathlib, signal
+import subprocess, os, time, pathlib, signal, json, urllib.request
 base = pathlib.Path('/home/pi/beep_bridge')
 (base/'logs').mkdir(parents=True, exist_ok=True)
 (base/'maps').mkdir(parents=True, exist_ok=True)
@@ -123,6 +134,16 @@ p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(b
 print('py_compile', p.returncode, p.stderr)
 if p.returncode:
     raise SystemExit(p.returncode)
+unit = base/'beep-bridge.service'
+if unit.exists():
+    install = subprocess.run(['sudo','install','-m','0644',str(unit),'/etc/systemd/system/beep-bridge.service'], text=True, capture_output=True, timeout=10)
+    print('systemd_install', install.returncode, install.stderr)
+    if install.returncode:
+        raise SystemExit(install.returncode)
+    reload = subprocess.run(['sudo','systemctl','daemon-reload'], text=True, capture_output=True, timeout=10)
+    print('systemd_daemon_reload', reload.returncode, reload.stderr)
+    if reload.returncode:
+        raise SystemExit(reload.returncode)
 svc = subprocess.run(['bash','-lc','systemctl list-unit-files beep-bridge.service --no-legend 2>/dev/null | grep -q beep-bridge.service'], text=True)
 pidfile = base/'bridge.pid'
 if svc.returncode == 0:
@@ -135,6 +156,10 @@ if svc.returncode == 0:
             time.sleep(.5)
         except Exception as e:
             print('legacy pid cleanup skipped', repr(e))
+    enable = subprocess.run(['sudo','systemctl','enable','beep-bridge'], text=True, capture_output=True, timeout=20)
+    print('systemd_enable', enable.returncode, enable.stderr)
+    if enable.returncode:
+        raise SystemExit(enable.returncode)
     r = subprocess.run(['sudo','systemctl','restart','beep-bridge'], text=True, capture_output=True, timeout=20)
     print('systemd_restart', r.returncode, r.stderr)
     if r.returncode:
@@ -142,6 +167,17 @@ if svc.returncode == 0:
     time.sleep(2.0)
     active = subprocess.run(['systemctl','is-active','beep-bridge'], text=True, capture_output=True, timeout=5)
     print('systemd_active', active.stdout.strip())
+    if active.stdout.strip() != 'active':
+        raise SystemExit('beep-bridge did not become active')
+    config = json.load(urllib.request.urlopen('http://127.0.0.1:8766/config', timeout=5))
+    expected = {'version': '0.20.2-race-safe-deploy',
+                'motor_backend': 'sdk', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
+                'sdk_body_height': 108, 'sdk_shoulder_yaw': 0, 'sdk_imu': 0}
+    mismatches = {key: {'expected': value, 'actual': config.get(key)}
+                  for key, value in expected.items() if config.get(key) != value}
+    print('bridge_config', json.dumps(config, sort_keys=True))
+    if mismatches:
+        raise SystemExit('deployed bridge profile mismatch: ' + json.dumps(mismatches, sort_keys=True))
 else:
     log = open(base/'logs'/'bridge.log', 'ab', buffering=0)
     env = os.environ.copy()
@@ -206,6 +242,9 @@ else:
 def main() -> int:
     if not BRIDGE_SRC.exists():
         print(f"missing bridge source: {BRIDGE_SRC}", file=sys.stderr)
+        return 2
+    if not SERVICE_SRC.exists():
+        print(f"missing service source: {SERVICE_SRC}", file=sys.stderr)
         return 2
     session, xsrf = login()
     put_bridge(session, xsrf)

@@ -1,4 +1,5 @@
 import math
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -149,6 +150,108 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertIn("vendor action failure", result["error"])
         self.assertFalse(bridge.state["moving"])
         stop.assert_called_once_with(3)
+
+    def test_sdk_gesture_cannot_be_written_after_concurrent_stop(self):
+        commands = []
+        action_started = threading.Event()
+        allow_action_return = threading.Event()
+
+        class BlockingDog:
+            def action(self, action_id):
+                commands.append(("action", action_id))
+                action_started.set()
+                allow_action_return.wait(1.0)
+
+            def stop(self):
+                commands.append(("stop", None))
+
+            def move_x(self, value):
+                commands.append(("move_x", value))
+
+            def move_y(self, value):
+                commands.append(("move_y", value))
+
+            def turn(self, value):
+                commands.append(("turn", value))
+
+        dog = BlockingDog()
+        lease = bridge.begin_motion("gesture_race")
+        result = {}
+        try:
+            with patch.object(bridge, "MOTOR_BACKEND", "sdk"), \
+                 patch.object(bridge, "sdk_init", return_value=dog):
+                gesture = threading.Thread(
+                    target=lambda: result.update(bridge.sdk_trick(name="prey", settle_s=0)))
+                gesture.start()
+                self.assertTrue(action_started.wait(1.0))
+                stopper = threading.Thread(target=bridge.request_stop, args=("gesture_race_test",))
+                stopper.start()
+                self.assertTrue(lease.cancel_event.wait(1.0))
+                self.assertTrue(stopper.is_alive())
+                allow_action_return.set()
+                gesture.join(2.0)
+                stopper.join(2.0)
+            self.assertFalse(gesture.is_alive())
+            self.assertFalse(stopper.is_alive())
+            self.assertFalse(result["ok"])
+            first_stop = next(index for index, command in enumerate(commands) if command[0] == "stop")
+            self.assertEqual(commands[0][0], "action")
+            self.assertNotIn("action", [command[0] for command in commands[first_stop:]])
+        finally:
+            allow_action_return.set()
+            bridge.end_motion(lease)
+
+    def test_sdk_command_waiting_on_io_lock_is_skipped_after_cancellation(self):
+        commands = []
+
+        class RecordingDog:
+            def forward(self, value):
+                commands.append(("forward", value))
+
+            def stop(self):
+                commands.append(("stop", None))
+
+            def move_x(self, value):
+                commands.append(("move_x", value))
+
+            def move_y(self, value):
+                commands.append(("move_y", value))
+
+            def turn(self, value):
+                commands.append(("turn", value))
+
+        dog = RecordingDog()
+        lease = bridge.begin_motion("sdk_waiting_command")
+        errors = []
+        bridge.sdk_io_lock.acquire()
+        with patch.object(bridge, "MOTOR_BACKEND", "sdk"), \
+             patch.object(bridge, "sdk_init", return_value=dog):
+            try:
+                mover = threading.Thread(
+                    target=lambda: self._capture_exception(errors, bridge.sdk_send, "forward", 10))
+                mover.start()
+                stopper = threading.Thread(target=bridge.request_stop, args=("sdk_waiting_test",))
+                stopper.start()
+                self.assertTrue(lease.cancel_event.wait(1.0))
+            finally:
+                bridge.sdk_io_lock.release()
+            mover.join(2.0)
+            stopper.join(2.0)
+        try:
+            self.assertFalse(mover.is_alive())
+            self.assertFalse(stopper.is_alive())
+            self.assertTrue(any(isinstance(error, bridge.MotionCancelled) for error in errors))
+            self.assertNotIn("forward", [command[0] for command in commands])
+            self.assertIn("stop", [command[0] for command in commands])
+        finally:
+            bridge.end_motion(lease)
+
+    @staticmethod
+    def _capture_exception(errors, function, *args):
+        try:
+            function(*args)
+        except Exception as error:
+            errors.append(error)
 
     def test_continuous_approach_aborts_on_heading_drift(self):
         snapshots = iter([

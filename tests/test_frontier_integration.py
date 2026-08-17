@@ -480,6 +480,40 @@ class FrontierIntegrationTests(unittest.TestCase):
         app_straighten.assert_called_once_with(forward_step=10)
         sdk_straighten.assert_not_called()
 
+    def test_app_stop_waits_for_straighten_transaction_and_is_final(self):
+        commands = []
+        release_started = threading.Event()
+        allow_restart = threading.Event()
+
+        def app_send(action, step=None):
+            commands.append((action, step))
+            if action == "stop" and not release_started.is_set():
+                release_started.set()
+                allow_restart.wait(1.0)
+
+        lease = bridge.begin_motion("app_straighten_race")
+        try:
+            with patch.object(bridge, "MOTOR_BACKEND", "app"), \
+                 patch.object(bridge, "app_send", side_effect=app_send):
+                transition = threading.Thread(target=bridge.app_straighten, kwargs={"forward_step": 10})
+                transition.start()
+                self.assertTrue(release_started.wait(1.0))
+                stopper = threading.Thread(target=bridge.request_stop, args=("race_test",))
+                stopper.start()
+                self.assertTrue(lease.cancel_event.wait(1.0))
+                self.assertTrue(stopper.is_alive())
+                allow_restart.set()
+                transition.join(1.0)
+                stopper.join(2.0)
+            self.assertFalse(transition.is_alive())
+            self.assertFalse(stopper.is_alive())
+            self.assertEqual(commands[0], ("stop", None))
+            self.assertEqual(commands[-1], ("stop", None))
+            self.assertNotIn(("forward", 10), commands)
+        finally:
+            allow_restart.set()
+            bridge.end_motion(lease)
+
     def test_app_stop_uses_active_backend_without_sdk_when_release_succeeds(self):
         with patch.object(bridge, "MOTOR_BACKEND", "app"), \
              patch.object(bridge, "app_send") as app_send, \

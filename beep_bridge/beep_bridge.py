@@ -142,7 +142,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.20.1-backend-owned-motion",
+    "version": "0.20.2-race-safe-deploy",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -181,6 +181,10 @@ def remember(event, **data):
 
 
 class MotionBusy(RuntimeError):
+    pass
+
+
+class MotionCancelled(RuntimeError):
     pass
 
 
@@ -338,39 +342,42 @@ def app_send(action: str, step=None):
     action = aliases.get(action, action)
     if action not in CMD_PAYLOAD and action not in APP_ANALOG_PAYLOAD and action not in APP_REVERSE_ARC_TURN:
         raise ValueError(f"unknown app action {action!r}")
-    with app_io_lock, socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
-        s.settimeout(0.25)
-        try:
-            s.recv(256)
-        except Exception:
-            pass
-        # Standard/control mode, then command.  Stop only neutralizes velocity:
-        # width, pace and posture are persistent configuration in app V2.0.7.
-        s.sendall(pkt(0x0F, [0x01]))
-        time.sleep(0.025)
-        if action == "stop":
-            s.sendall(pkt(0x11, [0x00, 0x00]))
-            time.sleep(0.01)
-            s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
-        elif action in APP_REVERSE_ARC_TURN:
-            # Combine reverse translation and yaw without changing persistent
-            # width, pace, gait or posture.
-            s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD["backward"]))
+    with app_io_lock:
+        if action != "stop" and motion_is_cancelled():
+            raise MotionCancelled("motion cancelled before app command")
+        with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
+            s.settimeout(0.25)
+            try:
+                s.recv(256)
+            except Exception:
+                pass
+            # Standard/control mode, then command. Stop only neutralizes velocity:
+            # width, pace and posture are persistent configuration in app V2.0.7.
+            s.sendall(pkt(0x0F, [0x01]))
             time.sleep(0.025)
-            s.sendall(pkt(0x12, [APP_REVERSE_ARC_TURN[action]]))
-        elif action in APP_ANALOG_PAYLOAD:
-            x, y = APP_ANALOG_PAYLOAD[action]
-            if step is not None:
-                magnitude = min(100, max(1, abs(int(step))))
-                x = 0 if x == 0 else (magnitude if x < 128 else 256 - magnitude)
-                y = 0 if y == 0 else (magnitude if y < 128 else 256 - magnitude)
-            s.sendall(pkt(0x11, [x, y]))
-        else:
-            s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
-    with state_lock:
-        state["last_command"] = "app:" + action
-        state["last_command_at"] = time.time()
-        state["moving"] = action != "stop"
+            if action == "stop":
+                s.sendall(pkt(0x11, [0x00, 0x00]))
+                time.sleep(0.01)
+                s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
+            elif action in APP_REVERSE_ARC_TURN:
+                # Combine reverse translation and yaw without changing persistent
+                # width, pace, gait or posture.
+                s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD["backward"]))
+                time.sleep(0.025)
+                s.sendall(pkt(0x12, [APP_REVERSE_ARC_TURN[action]]))
+            elif action in APP_ANALOG_PAYLOAD:
+                x, y = APP_ANALOG_PAYLOAD[action]
+                if step is not None:
+                    magnitude = min(100, max(1, abs(int(step))))
+                    x = 0 if x == 0 else (magnitude if x < 128 else 256 - magnitude)
+                    y = 0 if y == 0 else (magnitude if y < 128 else 256 - magnitude)
+                s.sendall(pkt(0x11, [x, y]))
+            else:
+                s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
+        with state_lock:
+            state["last_command"] = "app:" + action
+            state["last_command_at"] = time.time()
+            state["moving"] = action != "stop"
     remember("app_send", action=action)
 
 
@@ -384,7 +391,8 @@ def motion_profile_snapshot():
             "applied": sdk_profile_key == sdk_motion_profile_key()}
 
 
-def configure_stationary_posture(body_height=None, shoulder_yaw=None, imu=None, apply=True):
+def configure_stationary_posture(body_height=None, shoulder_yaw=None, imu: object = None,
+                                 apply: object = True):
     """Adjust posture only while stationary; intended for commissioning."""
     global SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU
     # Exclude the race where a motion lease begins between the stationary check
@@ -401,11 +409,27 @@ def configure_stationary_posture(body_height=None, shoulder_yaw=None, imu=None, 
             raise ValueError("body_height must be in vendor-app range 76..110")
         if not -10 <= shoulder <= 10:
             raise ValueError("shoulder_yaw must be in vendor-app range -10..10")
-        imu_value = SDK_IMU if imu is None else (1 if truthy(imu) else 0)
+        imu_value = SDK_IMU if imu is None else (1 if strict_bool(imu, "imu") else 0)
+        apply_value = strict_bool(apply, "apply")
+        previous = (SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU)
         SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU = height, shoulder, imu_value
         sdk_mark_profile_dirty()
-        if apply:
-            sdk_apply_motion_profile(force=True)
+        if apply_value:
+            try:
+                sdk_apply_motion_profile(force=True)
+            except Exception as error:
+                SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU = previous
+                sdk_mark_profile_dirty()
+                rollback_error = None
+                try:
+                    sdk_apply_motion_profile(force=True)
+                except Exception as rollback:
+                    rollback_error = repr(rollback)
+                    sdk_mark_profile_dirty()
+                message = f"posture apply failed: {error!r}"
+                if rollback_error:
+                    message += f"; rollback failed: {rollback_error}"
+                raise RuntimeError(message) from error
         result = motion_profile_snapshot()
     remember("stationary_posture_configured", **result)
     return {"ok": True, "profile": result}
@@ -417,7 +441,7 @@ def sdk_mark_profile_dirty():
 
 
 def sdk_apply_motion_profile(g=None, force=False):
-    """Apply the vendor-app posture once, not before every velocity update."""
+    """Apply the vendor-derived posture baseline without per-command rewrites."""
     global sdk_profile_key
     if SDK_GAIT not in ("firmware", "trot", "walk", "high_walk"):
         raise ValueError(f"unsupported SDK gait {SDK_GAIT!r}")
@@ -444,20 +468,24 @@ def sdk_apply_motion_profile(g=None, force=False):
 
 def sdk_init():
     global sdk_dog, sdk_error
-    if sdk_dog is not None:
-        return sdk_dog
-    try:
-        import DOGZILLALib as dog
-        sdk_dog = dog.DOGZILLA()
-        sdk_apply_motion_profile(sdk_dog)
-        sdk_error = None
-        remember("sdk_init", gait=SDK_GAIT, pace=SDK_PACE)
-        return sdk_dog
-    except Exception as e:
-        sdk_error = repr(e)
-        with state_lock:
-            state["last_error"] = "sdk init failed: " + sdk_error
-        raise
+    with sdk_io_lock:
+        if sdk_dog is not None:
+            return sdk_dog
+        try:
+            import DOGZILLALib as dog
+            candidate = dog.DOGZILLA()
+            sdk_apply_motion_profile(candidate, force=True)
+            sdk_dog = candidate
+            sdk_error = None
+            remember("sdk_init", gait=SDK_GAIT, pace=SDK_PACE)
+            return sdk_dog
+        except Exception as e:
+            sdk_dog = None
+            sdk_mark_profile_dirty()
+            sdk_error = repr(e)
+            with state_lock:
+                state["last_error"] = "sdk init failed: " + sdk_error
+            raise
 
 
 def sdk_send(action: str, step=None):
@@ -467,6 +495,8 @@ def sdk_send(action: str, step=None):
     aliases = {"backward": "back", "turn_left": "turnleft", "turn_right": "turnright", "rotate_left": "turnleft", "rotate_right": "turnright"}
     action = aliases.get(action, action)
     with sdk_io_lock:
+        if action != "stop" and motion_is_cancelled():
+            raise MotionCancelled("motion cancelled before SDK command")
         if action == "stop":
             errors = []
             for method, value in ((g.stop, None), (g.move_x, 0), (g.move_y, 0), (g.turn, 0)):
@@ -493,14 +523,14 @@ def sdk_send(action: str, step=None):
             getattr(g, action)(step)
         else:
             raise ValueError(f"unknown sdk action {action!r}")
-    with state_lock:
-        was_moving = bool(state.get("moving"))
-        now = time.time()
-        state["last_command"] = "sdk:" + action
-        state["last_command_at"] = now
-        state["moving"] = action != "stop"
-        if action != "stop" or was_moving:
-            state["last_motion_at"] = now
+        with state_lock:
+            was_moving = bool(state.get("moving"))
+            now = time.time()
+            state["last_command"] = "sdk:" + action
+            state["last_command_at"] = now
+            state["moving"] = action != "stop"
+            if action != "stop" or was_moving:
+                state["last_motion_at"] = now
     remember("sdk_send", action=action, step=step)
 
 
@@ -511,16 +541,18 @@ def sdk_curve(direction, forward_step=20, yaw_step=30):
         raise ValueError("curve direction must be left or right")
     g = sdk_init()
     with sdk_io_lock:
+        if motion_is_cancelled():
+            raise MotionCancelled("motion cancelled before SDK curve")
         sdk_apply_motion_profile(g)
         g.move_x(abs(int(forward_step)))
         signed_yaw = abs(int(yaw_step)) if direction == "left" else -abs(int(yaw_step))
         g.turn(signed_yaw)
-    now = time.time()
-    with state_lock:
-        state["last_command"] = "sdk:curve_" + direction
-        state["last_command_at"] = now
-        state["last_motion_at"] = now
-        state["moving"] = True
+        now = time.time()
+        with state_lock:
+            state["last_command"] = "sdk:curve_" + direction
+            state["last_command_at"] = now
+            state["last_motion_at"] = now
+            state["moving"] = True
     remember("sdk_curve", direction=direction, forward_step=forward_step, yaw_step=signed_yaw)
 
 
@@ -528,13 +560,15 @@ def sdk_straighten():
     """Clear yaw velocity while preserving the active forward gait."""
     g = sdk_init()
     with sdk_io_lock:
+        if motion_is_cancelled():
+            raise MotionCancelled("motion cancelled before SDK straighten")
         g.turn(0)
-    now = time.time()
-    with state_lock:
-        state["last_command"] = "sdk:forward"
-        state["last_command_at"] = now
-        state["last_motion_at"] = now
-        state["moving"] = True
+        now = time.time()
+        with state_lock:
+            state["last_command"] = "sdk:forward"
+            state["last_command_at"] = now
+            state["last_motion_at"] = now
+            state["moving"] = True
     remember("sdk_straighten")
 
 
@@ -563,6 +597,20 @@ def truthy(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def strict_bool(value, field="value"):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"{field} must be a boolean")
+
+
 def tricks_payload():
     items = []
     for name, meta in sorted(TRICK_ACTIONS.items(), key=lambda kv: kv[1]["id"]):
@@ -580,19 +628,20 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
         remember("sdk_trick_dry_run", trick=trick)
         return {"ok": True, "dry_run": True, "trick": trick}
     with motion_lock:
-        if motion_is_cancelled():
-            return {"ok": False, "dry_run": False, "reason": "motion_cancelled", "trick": trick}
         g = sdk_init()
-        with state_lock:
-            state["last_command"] = "sdk_action:" + trick["name"]
-            state["last_command_at"] = time.time()
-            state["moving"] = True
-            state["last_error"] = None
-        remember("sdk_trick_start", trick=trick)
         completed = False
         error = None
         try:
-            g.action(int(trick["id"]))
+            with sdk_io_lock:
+                if motion_is_cancelled():
+                    return {"ok": False, "dry_run": False, "reason": "motion_cancelled", "trick": trick}
+                with state_lock:
+                    state["last_command"] = "sdk_action:" + trick["name"]
+                    state["last_command_at"] = time.time()
+                    state["moving"] = True
+                    state["last_error"] = None
+                remember("sdk_trick_start", trick=trick)
+                g.action(int(trick["id"]))
             completed = wait_motion(settle_s) if settle_s else not motion_is_cancelled()
         except Exception as exc:
             error = repr(exc)
@@ -616,30 +665,37 @@ def app_curve(direction, forward_step=10):
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
     magnitude = min(100, max(1, abs(int(forward_step))))
-    with app_io_lock, socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
-        s.settimeout(0.25)
-        try:
-            s.recv(256)
-        except Exception:
-            pass
-        s.sendall(pkt(0x0F, [0x01]))
-        time.sleep(0.025)
-        s.sendall(pkt(0x11, [0x00, magnitude]))
-        time.sleep(0.025)
-        s.sendall(pkt(0x12, [0x05 if direction == "left" else 0x06]))
-    with state_lock:
-        state["last_command"] = "app:curve_" + direction
-        state["last_command_at"] = time.time()
-        state["last_motion_at"] = time.time()
-        state["moving"] = True
+    with app_io_lock:
+        if motion_is_cancelled():
+            raise MotionCancelled("motion cancelled before app curve")
+        with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
+            s.settimeout(0.25)
+            try:
+                s.recv(256)
+            except Exception:
+                pass
+            s.sendall(pkt(0x0F, [0x01]))
+            time.sleep(0.025)
+            s.sendall(pkt(0x11, [0x00, magnitude]))
+            time.sleep(0.025)
+            s.sendall(pkt(0x12, [0x05 if direction == "left" else 0x06]))
+        with state_lock:
+            state["last_command"] = "app:curve_" + direction
+            state["last_command_at"] = time.time()
+            state["last_motion_at"] = time.time()
+            state["moving"] = True
 
 
 def app_straighten(forward_step=10):
     """Release retained app registers, then restart straight translation."""
     with app_io_lock:
         app_send("stop")
+        if motion_is_cancelled():
+            remember("app_straighten_cancelled", forward_step=int(forward_step))
+            return False
         app_send("forward", step=forward_step)
     remember("app_straighten", forward_step=int(forward_step))
+    return True
 
 
 def motor_send(action: str, step=None):
@@ -3113,7 +3169,7 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/motion/profile":
                 result = configure_stationary_posture(
                     body_height=body.get("body_height"), shoulder_yaw=body.get("shoulder_yaw"),
-                    imu=body.get("imu"), apply=bool(body.get("apply", True)))
+                    imu=body.get("imu"), apply=body.get("apply", True))
                 self.send_json(result)
             elif p.path == "/move":
                 action = body.get("action", "stop")

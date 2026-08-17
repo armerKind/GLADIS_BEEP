@@ -42,7 +42,9 @@ def load_observations(root: Path):
         sectors = status.get("sectors")
         if bridge.validated_sector_values(sectors) is None:
             continue
-        rows.append({"path": str(path), "sectors": sectors,
+        relative = path.relative_to(root)
+        run_id = relative.parts[0] if len(relative.parts) > 1 else str(path.parent)
+        rows.append({"path": str(path), "run_id": run_id, "sectors": sectors,
                      "recorded": status.get("last_command")})
     return rows
 
@@ -50,8 +52,13 @@ def load_observations(root: Path):
 def replay(rows):
     old_counts, new_counts, recorded_counts = Counter(), Counter(), Counter()
     old_current = new_current = None
+    current_run = None
     changed = []
     for row in rows:
+        run_id = row.get("run_id", "single-run")
+        if run_id != current_run:
+            old_current = new_current = None
+            current_run = run_id
         primary, _duration, _reason = bridge.choose_explore_action(row["sectors"])
         if primary == "forward":
             old_current = old_fluent_steering(row["sectors"], old_current)
@@ -69,6 +76,7 @@ def replay(rows):
     turning = lambda counts: sum(v for k, v in counts.items() if k.startswith("curve") or k.startswith("turn"))
     return {
         "observations": total,
+        "runs": len({row.get("run_id", "single-run") for row in rows}),
         "recorded_commands": dict(recorded_counts),
         "old_policy": dict(old_counts),
         "new_policy": dict(new_counts),

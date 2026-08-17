@@ -216,8 +216,10 @@ A completion reason of `coverage_complete_or_no_reachable_frontiers` must be rea
 
 ### Stationary motion-profile commissioning
 
-Normal SDK locomotion mirrors vendor app V2.0.7: preserve the firmware gait,
-use normal pace, body height 108, shoulder yaw 0, and IMU stabilization off.
+Normal SDK locomotion uses a posture baseline derived from vendor app V2.0.7:
+preserve the firmware gait, use normal pace, body height 108, shoulder yaw 0,
+and IMU stabilization off. This is not a claim that app width 50 equals SDK step
+10; those controls require powered calibration.
 The profile is applied once before locomotion and restored after gestures; it is
 not rewritten on every velocity update. A stop neutralizes velocity axes without
 mutating persistent pace, width, or posture.
@@ -232,8 +234,12 @@ Content-Type: application/json
 
 `body_height` is restricted to the vendor app's accepted range `76..110`, and
 `shoulder_yaw` to `-10..10`. The bridge rejects changes while `moving=true` or a
-motion lease exists. This endpoint is for commissioning on clear floor, not for
-live gait improvisation.
+motion lease exists. `imu` and `apply` must be JSON booleans (or recognized
+boolean strings/0/1); malformed values are rejected. If profile I/O fails, the
+bridge restores the previous software profile and attempts a physical rollback;
+a failed rollback remains an explicit error and leaves the profile dirty for the
+next safe initialization. This endpoint is for commissioning on clear floor, not
+for live gait improvisation.
 
 ### Asynchronous autonomous mission
 
