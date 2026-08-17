@@ -159,3 +159,31 @@ class WorldModel:
             "hazards": [dict(item) for item in self.hazards],
             "tracks": [asdict(self.tracks[key]) for key in sorted(self.tracks)],
         }
+
+    def to_dict(self) -> dict[str, Any]:
+        value = self.snapshot()
+        value.update({
+            "max_missed_packets": self.max_missed_packets,
+            "next_id": self._next_id,
+            "aliases": [{"kind": kind, "source_id": source_id, "track_id": track_id}
+                        for (kind, source_id), track_id in sorted(self.aliases.items())],
+        })
+        return value
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "WorldModel":
+        world = cls(max_missed_packets=int(value.get("max_missed_packets", 6)))
+        world.sequence = int(value.get("sequence", 0))
+        world._next_id = int(value.get("next_id", 1))
+        world.tracks = {item["track_id"]: EntityTrack(**item) for item in value.get("tracks", [])}
+        world.aliases = {(item["kind"], item["source_id"]): item["track_id"]
+                         for item in value.get("aliases", [])}
+        world.hazards = [dict(item) for item in value.get("hazards", [])]
+        world.attention_track_id = value.get("attention_track_id")
+        world.last_scene_summary = str(value.get("scene_summary", ""))
+        world.last_changes = list(value.get("changes", []))
+        world.last_packet_id = value.get("last_packet_id")
+        if world.tracks:
+            highest = max(int(track_id.rsplit("-", 1)[-1]) for track_id in world.tracks)
+            world._next_id = max(world._next_id, highest + 1)
+        return world

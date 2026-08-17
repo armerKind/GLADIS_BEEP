@@ -76,7 +76,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
                     "--base-url", f"http://127.0.0.1:{server.server_port}",
                     "--panel", "4", "--fps", "6", "--duration", "5",
                     "--inference-interval", "0.1",
-                    "--max-inferences", "1", "--mock-response", str(FIXTURE),
+                    "--max-inferences", "2", "--mock-response", str(FIXTURE),
                     "--output-root", directory,
                 ]
                 environment = dict(os.environ, PYTHONPATH=str(ROOT))
@@ -88,15 +88,20 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 run = run_directories[0]
                 summary = json.loads((run / "summary.json").read_text())
                 windows = list(run.glob("w*"))
-                self.assertEqual(summary["inferences"], 1)
+                self.assertEqual(summary["inferences"], 2)
                 self.assertEqual(summary["panel_count"], 4)
                 self.assertEqual(summary["inference_interval_s"], 0.1)
                 self.assertFalse(summary["dispatch_performed"])
+                self.assertEqual(len(windows), 2)
                 packet = json.loads((windows[0] / "observation_packet.json").read_text())
-                semantic = json.loads((windows[0] / "semantic_decision.json").read_text())
+                semantics = [json.loads((window / "semantic_decision.json").read_text())
+                             for window in sorted(windows)]
                 self.assertEqual(packet["capture_mode"], "moving_temporal_ring")
                 self.assertEqual(len(packet["frames"]), 4)
-                self.assertFalse(semantic["dispatch_performed"])
+                self.assertFalse(semantics[0]["dispatch_performed"])
+                self.assertEqual(semantics[0]["session_id"], semantics[1]["session_id"])
+                self.assertEqual(semantics[0]["mission_id"], "mission-1")
+                self.assertTrue((run / "agent_session.json").exists())
                 self.assertEqual(seen_posts, [])
         finally:
             server.shutdown()

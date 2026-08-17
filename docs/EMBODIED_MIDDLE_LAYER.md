@@ -81,6 +81,15 @@ Important compound intents:
 
 `beep_agent/executive.py` chooses one next semantic skill from a selected goal and persistent world state.
 
+`beep_agent/session.py` owns that state for the complete physical mission. One
+`AgentSession` binds robot ID, exact bridge mission ID, world model, selected goal,
+executive inspection history, and a unique session ID. `run_moving_eyes.py` reuses
+the same session for every temporal window and atomically writes
+`agent_session.json`. Resume rejects a different robot, a different mission, an
+unsupported schema, or stale state. A semantic decision remains shadow-only in
+the moving-eyes process; it cannot dispatch around the bridge's LiDAR, lease,
+watchdog, or exact-owner cancellation boundaries.
+
 For an investigate-and-mark goal:
 
 ```text

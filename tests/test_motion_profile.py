@@ -46,6 +46,19 @@ class MotionProfileTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bridge.configure_stationary_posture(body_height=75, apply=False)
 
+    def test_systemd_and_fallback_deployment_use_same_vendor_profile(self):
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "systemd" / "beep-bridge.service").read_text()
+        deploy = (root / "scripts" / "jupyter_deploy_bridge.py").read_text()
+        for expected in ("BEEP_MOTOR_BACKEND", "BEEP_SDK_GAIT", "BEEP_SDK_PACE",
+                         "BEEP_SDK_BODY_HEIGHT", "BEEP_SDK_SHOULDER_YAW", "BEEP_SDK_IMU"):
+            self.assertIn(expected, service)
+            self.assertIn(expected, deploy)
+        self.assertIn("Environment=BEEP_MOTOR_BACKEND=sdk", service)
+        self.assertIn("'BEEP_MOTOR_BACKEND': 'sdk'", deploy)
+        self.assertIn("Environment=BEEP_SDK_GAIT=firmware", service)
+        self.assertIn("'BEEP_SDK_GAIT': 'firmware'", deploy)
+
 
 class MotionPolicyReplayTests(unittest.TestCase):
     def test_saved_shape_replay_increases_forward_bias_without_changing_hazards(self):

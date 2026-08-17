@@ -15,7 +15,7 @@ from pathlib import Path
 import time
 import uuid
 
-from beep_agent import EmbodiedExecutive, GoalArbiter, WorldModel
+from beep_agent import AgentSession, EmbodiedGoal
 from beep_eyes.contact_sheet import fetch_json
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-no-mission", action="store_true", help="Permit stationary/bench capture")
     parser.add_argument("--max-inferences", type=int, default=0, help="Zero means until duration or mission end")
     parser.add_argument("--output-root", type=Path, default=Path("captures/eyes/moving"))
+    parser.add_argument("--goal", help="Bind one semantic goal to the whole moving mission")
+    parser.add_argument("--target", default="scene", help="Target query for --goal")
+    parser.add_argument("--mark", action="store_true")
+    parser.add_argument("--resume-session", type=Path,
+                        help="Resume only when robot, mission identity and freshness match")
     return parser.parse_args()
 
 
@@ -91,7 +96,17 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=False)
     trace_path = output_dir / "trace.jsonl"
     capture = ContinuousMovingCapture(args.base_url, fps=args.fps, max_frames=max(18, args.panel * 2), timeout_s=min(args.timeout, 8.0))
-    world = WorldModel()
+    mission_id = initial_mission.get("id") if isinstance(initial_mission, dict) else None
+    fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
+    if args.resume_session:
+        session = AgentSession.load(args.resume_session, expected_robot_id="BEEP", max_age_s=600.0)
+        if session.mission_id != mission_id:
+            raise SystemExit("resume session belongs to a different mission")
+        if fixed_goal is not None and session.fixed_goal != fixed_goal:
+            raise SystemExit("resume session goal conflicts with command-line goal")
+    else:
+        session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
+    session_path = output_dir / "agent_session.json"
     deadline = time.monotonic() + args.duration
     inference_count = 0
     last_inference_finished = 0.0
@@ -129,13 +144,19 @@ def main() -> int:
                 "newest_frame_id_at_completion": newest_latest,
                 "newer_window_available": newest_latest != requested_latest,
             }
-            world.update(response, observed_at=completed_at, packet_id=f"{run_id}-{inference_count:04d}")
-            selection = GoalArbiter().select(world)
+            current_mission_id = mission.get("id") if isinstance(mission, dict) else None
+            session.update(response, observed_at=completed_at,
+                           packet_id=f"{run_id}-{inference_count:04d}", mission_id=current_mission_id)
+            decision = session.decide(rollout_mode="shadow")
+            assert session.selection is not None
             semantic = {
-                "selection": asdict(selection),
-                "next_decision": EmbodiedExecutive(world, selection.goal).decide(rollout_mode="shadow").to_dict(),
+                "session_id": session.session_id,
+                "mission_id": session.mission_id,
+                "selection": asdict(session.selection),
+                "next_decision": decision.to_dict(),
                 "dispatch_performed": False,
             }
+            session.save(session_path)
             policy = evaluate_proposal(response, packet["bridge_status"], mode="shadow")
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
             write_window(window_dir, frames, sheet, packet, response, policy, semantic)
@@ -168,6 +189,9 @@ def main() -> int:
         "inferences": inference_count,
         "capture": capture.stats(),
         "dispatch_performed": False,
+        "agent_session": str(session_path),
+        "agent_session_id": session.session_id,
+        "mission_id": session.mission_id,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, sort_keys=True))

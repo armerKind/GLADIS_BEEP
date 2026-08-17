@@ -400,23 +400,36 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(reason, "impossible_moving_jump")
         self.assertEqual(guarded, moved)
 
-    def test_app_socket_timeout_does_not_invalidate_successful_sdk_stop(self):
-        with patch.object(bridge, "sdk_send") as sdk_send, \
-             patch.object(bridge, "app_send", side_effect=TimeoutError("camera socket")), \
+    def test_successful_sdk_stop_does_not_touch_app_backend(self):
+        with patch.object(bridge, "MOTOR_BACKEND", "sdk"), \
+             patch.object(bridge, "sdk_send") as sdk_send, \
+             patch.object(bridge, "app_send") as app_send, \
              patch.object(bridge.time, "sleep"):
             error = bridge.stop_burst(3)
 
         self.assertIsNone(error)
         self.assertEqual(sdk_send.call_count, 3)
+        app_send.assert_not_called()
         self.assertFalse(bridge.snapshot()["moving"])
 
-    def test_sdk_stop_failure_remains_a_motor_error(self):
-        with patch.object(bridge, "sdk_send", side_effect=RuntimeError("sdk unavailable")), \
-             patch.object(bridge, "app_send"), \
+    def test_sdk_stop_failure_uses_app_emergency_fallback(self):
+        with patch.object(bridge, "MOTOR_BACKEND", "sdk"), \
+             patch.object(bridge, "sdk_send", side_effect=RuntimeError("sdk unavailable")), \
+             patch.object(bridge, "app_send") as app_send, \
              patch.object(bridge.time, "sleep"):
             error = bridge.stop_burst(2)
 
-        self.assertIn("sdk unavailable", error)
+        self.assertIsNone(error)
+        self.assertEqual(app_send.call_count, 2)
+
+    def test_stop_failure_on_both_backends_remains_a_motor_error(self):
+        with patch.object(bridge, "MOTOR_BACKEND", "sdk"), \
+             patch.object(bridge, "sdk_send", side_effect=RuntimeError("sdk unavailable")), \
+             patch.object(bridge, "app_send", side_effect=TimeoutError("app unavailable")), \
+             patch.object(bridge.time, "sleep"):
+            error = bridge.stop_burst(2)
+
+        self.assertIn("app unavailable", error)
 
     def test_consecutive_forward_windows_start_gait_only_once(self):
         commands = []
@@ -456,6 +469,36 @@ class FrontierIntegrationTests(unittest.TestCase):
         motor.assert_called_once_with("forward", step=20)
         curve.assert_called_once_with("left", forward_step=20, yaw_step=18)
         straighten.assert_called_once_with()
+
+    def test_app_curve_to_forward_releases_app_yaw_and_never_calls_sdk(self):
+        with patch.object(bridge, "MOTOR_BACKEND", "app"), \
+             patch.object(bridge, "app_straighten") as app_straighten, \
+             patch.object(bridge, "sdk_straighten") as sdk_straighten:
+            action, changed = bridge.start_or_update_fluent_motion("curveleft", "forward", step=10)
+        self.assertTrue(changed)
+        self.assertEqual(action, "forward")
+        app_straighten.assert_called_once_with(forward_step=10)
+        sdk_straighten.assert_not_called()
+
+    def test_app_stop_uses_active_backend_without_sdk_when_release_succeeds(self):
+        with patch.object(bridge, "MOTOR_BACKEND", "app"), \
+             patch.object(bridge, "app_send") as app_send, \
+             patch.object(bridge, "sdk_send") as sdk_send, \
+             patch.object(bridge.time, "sleep"):
+            error = bridge.stop_burst(3)
+        self.assertIsNone(error)
+        self.assertEqual(app_send.call_count, 3)
+        sdk_send.assert_not_called()
+
+    def test_app_stop_falls_back_to_sdk_only_after_app_release_fails(self):
+        with patch.object(bridge, "MOTOR_BACKEND", "app"), \
+             patch.object(bridge, "app_send", side_effect=TimeoutError("app unavailable")) as app_send, \
+             patch.object(bridge, "sdk_send") as sdk_send, \
+             patch.object(bridge.time, "sleep"):
+            error = bridge.stop_burst(2)
+        self.assertIsNone(error)
+        self.assertEqual(app_send.call_count, 2)
+        self.assertEqual(sdk_send.call_count, 2)
 
     def test_bounded_frontier_loop_plans_motion_and_finishes_stopped(self):
         width = height = 15

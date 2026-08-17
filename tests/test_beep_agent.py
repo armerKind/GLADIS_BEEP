@@ -2,8 +2,9 @@ import copy
 import json
 import unittest
 from pathlib import Path
+import tempfile
 
-from beep_agent import EmbodiedExecutive, EmbodiedGoal, GoalArbiter, SkillCall, SkillValidationError, WorldModel, validate_skill_call
+from beep_agent import AgentSession, EmbodiedExecutive, EmbodiedGoal, GoalArbiter, SessionIdentityError, SkillCall, SkillValidationError, WorldModel, validate_skill_call
 
 FIXTURE = Path(__file__).parent / "fixtures" / "box_far_response.json"
 
@@ -77,6 +78,83 @@ class ExecutiveTests(unittest.TestCase):
         self.assertEqual(decision.skill_call.name, "explore")
         self.assertEqual(decision.skill_call.arguments["duration_s"], 90)
         self.assertIn("planning ahead", decision.skill_call.arguments["reason"])
+
+
+class AgentSessionTests(unittest.TestCase):
+    def near_response(self):
+        response = json.loads(FIXTURE.read_text())
+        response["scene"]["objects"][0].update(proximity="near", visible_features=["front_face"])
+        return response
+
+    def test_session_preserves_goal_and_executive_state_across_packets(self):
+        goal = EmbodiedGoal("investigate", "white box")
+        session = AgentSession(robot_id="BEEP", mission_id="mission-1", fixed_goal=goal)
+        session.update(self.near_response(), observed_at=1.0, packet_id="p1", mission_id="mission-1")
+        first = session.decide()
+        response = self.near_response()
+        response["scene"]["objects"][0]["id"] = "renamed-box"
+        response["attention"]["target_id"] = "renamed-box"
+        session.update(response, observed_at=2.0, packet_id="p2", mission_id="mission-1")
+        second = session.decide()
+        self.assertEqual(first.goal, second.goal)
+        self.assertEqual(first.target_id, second.target_id)
+        self.assertEqual(first.skill_call.arguments["strategy"], "left_view")
+        self.assertEqual(second.skill_call.arguments["strategy"], "right_view")
+
+    def test_session_round_trip_preserves_world_goal_and_inspection_attempts(self):
+        session = AgentSession(robot_id="BEEP", mission_id="mission-1",
+                               fixed_goal=EmbodiedGoal("investigate", "white box"), created_at=1.0)
+        session.update(self.near_response(), observed_at=2.0, packet_id="p1", mission_id="mission-1")
+        session.decide()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            session.save(path)
+            restored = AgentSession.load(path, expected_robot_id="BEEP",
+                                         expected_mission_id="mission-1", max_age_s=10, now=3.0)
+        self.assertEqual(restored.session_id, session.session_id)
+        self.assertEqual(restored.world.snapshot(), session.world.snapshot())
+        self.assertIsNotNone(restored.executive)
+        self.assertIsNotNone(session.executive)
+        self.assertEqual(restored.executive.inspect_attempts, session.executive.inspect_attempts)
+        self.assertEqual(restored.decide().skill_call.arguments["strategy"], "right_view")
+
+    def test_resume_rejects_stale_or_different_mission_identity(self):
+        session = AgentSession(robot_id="BEEP", mission_id="mission-1", created_at=1.0)
+        value = session.to_dict()
+        with self.assertRaises(SessionIdentityError):
+            AgentSession.from_dict(value, expected_mission_id="mission-2")
+        with self.assertRaises(SessionIdentityError):
+            AgentSession.from_dict(value, expected_robot_id="OTHER")
+        with self.assertRaises(SessionIdentityError):
+            AgentSession.from_dict(value, max_age_s=10, now=20.0)
+
+    def test_packet_from_different_mission_is_rejected_before_world_update(self):
+        session = AgentSession(robot_id="BEEP", mission_id="mission-1")
+        with self.assertRaises(SessionIdentityError):
+            session.update(self.near_response(), observed_at=1.0, packet_id="p1", mission_id="mission-2")
+        self.assertEqual(session.world.sequence, 0)
+
+    def test_same_target_escalates_without_discarding_executive_history(self):
+        session = AgentSession(robot_id="BEEP", mission_id="mission-1")
+        session.update(self.near_response(), observed_at=1.0, packet_id="p1", mission_id="mission-1")
+        self.assertEqual(session.decide().skill_call.arguments["strategy"], "left_view")
+        executive = session.executive
+        response = self.near_response()
+        response["scene"]["objects"][0]["visible_features"] = ["right_outward_corner"]
+        session.update(response, observed_at=2.0, packet_id="p2", mission_id="mission-1")
+        decision = session.decide()
+        self.assertIs(session.executive, executive)
+        self.assertEqual(session.selection.goal.name, "investigate_and_mark")
+        self.assertEqual(decision.skill_call.name, "mark_target")
+
+    def test_social_interruption_releases_back_to_curiosity(self):
+        session = AgentSession(robot_id="BEEP", mission_id="mission-1")
+        social = json.loads((Path(__file__).parent / "fixtures" / "eyes_response.json").read_text())
+        session.update(social, observed_at=1.0, packet_id="social", mission_id="mission-1")
+        self.assertEqual(session.selection.drive, "social")
+        session.update(json.loads(FIXTURE.read_text()), observed_at=2.0,
+                       packet_id="object", mission_id="mission-1")
+        self.assertEqual(session.selection.drive, "curiosity")
 
 
 class SkillTests(unittest.TestCase):

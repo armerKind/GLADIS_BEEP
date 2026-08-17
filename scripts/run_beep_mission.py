@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 
-from beep_agent import BridgeBodyAdapter, EmbodiedExecutive, EmbodiedGoal, GoalArbiter, WorldModel
+from beep_agent import AgentSession, BridgeBodyAdapter, EmbodiedGoal
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,27 +27,27 @@ def main() -> int:
     args = parse_args()
     if args.dispatch and args.mode != "supervised":
         raise SystemExit("--dispatch requires --mode supervised")
-    world = WorldModel()
     fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
-    arbiter = GoalArbiter()
-    executive = EmbodiedExecutive(world, fixed_goal) if fixed_goal else None
+    session = AgentSession(robot_id="BEEP", mission_id="replay", fixed_goal=fixed_goal)
     trace = []
     final_decision = None
     for sequence, path in enumerate(args.responses, 1):
         perception = json.loads(path.read_text())
-        snapshot = world.update(perception, observed_at=time.time(), packet_id=f"replay-{sequence}:{path.name}")
-        selection = None if fixed_goal else arbiter.select(world)
-        if selection is not None:
-            executive = EmbodiedExecutive(world, selection.goal)
-        assert executive is not None
-        decision = executive.decide(rollout_mode=args.mode)
+        snapshot = session.update(perception, observed_at=time.time(),
+                                  packet_id=f"replay-{sequence}:{path.name}", mission_id="replay")
+        decision = session.decide(rollout_mode=args.mode)
+        selection = session.selection
         final_decision = decision
         trace.append({"source": str(path), "world": snapshot, "goal_selection": None if selection is None else {"goal": selection.goal.name, "drive": selection.drive, "rationale": selection.rationale}, "decision": decision.to_dict(), "dispatch_performed": False})
     dispatch_result = None
     if args.dispatch:
         assert final_decision is not None
         dispatch_result = BridgeBodyAdapter(args.base_url).dispatch(final_decision.skill_call, rollout_mode=args.mode).to_dict()
-    result = {"goal": trace[-1]["decision"]["goal"], "target_query": args.target, "mode": args.mode, "trace": trace, "final_world": world.snapshot(), "dispatch_performed": bool(dispatch_result and dispatch_result["dispatched"]), "dispatch_result": dispatch_result}
+    result = {"goal": trace[-1]["decision"]["goal"], "target_query": args.target,
+              "session_id": session.session_id, "mode": args.mode, "trace": trace,
+              "final_world": session.world.snapshot(),
+              "dispatch_performed": bool(dispatch_result and dispatch_result["dispatched"]),
+              "dispatch_result": dispatch_result}
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True))

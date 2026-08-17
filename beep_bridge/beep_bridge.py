@@ -142,7 +142,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.20.0-vendor-motion-profile",
+    "version": "0.20.1-backend-owned-motion",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -616,7 +616,7 @@ def app_curve(direction, forward_step=10):
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
     magnitude = min(100, max(1, abs(int(forward_step))))
-    with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
+    with app_io_lock, socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
         s.settimeout(0.25)
         try:
             s.recv(256)
@@ -634,6 +634,14 @@ def app_curve(direction, forward_step=10):
         state["moving"] = True
 
 
+def app_straighten(forward_step=10):
+    """Release retained app registers, then restart straight translation."""
+    with app_io_lock:
+        app_send("stop")
+        app_send("forward", step=forward_step)
+    remember("app_straighten", forward_step=int(forward_step))
+
+
 def motor_send(action: str, step=None):
     if MOTOR_BACKEND == "sdk":
         return sdk_send(action, step=step)
@@ -643,29 +651,58 @@ def motor_send(action: str, step=None):
 def stop_burst(n=3):
     sdk_errors = []
     sdk_ok = False
-    for _ in range(n):
-        try:
-            sdk_send("stop")
-            sdk_ok = True
-        except Exception as e:
-            sdk_errors.append(repr(e))
-        time.sleep(0.06)
+    app_errors = []
+    app_ok = False
+    primary = MOTOR_BACKEND
+    if primary == "app":
+        with app_io_lock:
+            for _ in range(n):
+                try:
+                    app_send("stop")
+                    app_ok = True
+                except Exception as e:
+                    app_errors.append(repr(e))
+                time.sleep(0.06)
+        # Explicit emergency fallback only after the active backend fails.
+        if not app_ok:
+            with sdk_io_lock:
+                for _ in range(n):
+                    try:
+                        sdk_send("stop")
+                        sdk_ok = True
+                    except Exception as e:
+                        sdk_errors.append(repr(e))
+                    time.sleep(0.06)
+    else:
+        with sdk_io_lock:
+            for _ in range(n):
+                try:
+                    sdk_send("stop")
+                    sdk_ok = True
+                except Exception as e:
+                    sdk_errors.append(repr(e))
+                time.sleep(0.06)
+        # Explicit emergency fallback only after the active backend fails.
+        if not sdk_ok:
+            with app_io_lock:
+                for _ in range(n):
+                    try:
+                        app_send("stop")
+                        app_ok = True
+                    except Exception as e:
+                        app_errors.append(repr(e))
+                    time.sleep(0.06)
 
-    # The SDK is the authoritative motor path. The vendor app socket is only
-    # a best-effort secondary stop for camera/control state and must not turn a
-    # successful physical stop into a reported motor failure.
-    app_error = None
-    try:
-        app_send("stop")
-    except Exception as e:
-        app_error = repr(e)
-
-    err = None if sdk_ok else (sdk_errors[-1] if sdk_errors else "sdk_stop_not_confirmed")
+    stopped = (app_ok or sdk_ok)
+    errors = (app_errors + sdk_errors) if primary == "app" else (sdk_errors + app_errors)
+    err = None if stopped else (errors[-1] if errors else f"{primary}_stop_not_confirmed")
     with state_lock:
         state["moving"] = False
         if err:
             state["last_error"] = err
-    remember("stop_burst", n=n, error=err, app_error=app_error, sdk_ok=sdk_ok)
+    remember("stop_burst", n=n, error=err, primary_backend=primary,
+             app_error=app_errors[-1] if app_errors else None,
+             app_ok=app_ok, sdk_ok=sdk_ok)
     return err
 
 
@@ -2276,6 +2313,8 @@ def start_or_update_fluent_motion(current_action, desired_action, step=20, yaw_s
     if desired_action == "forward":
         if current_action is None:
             motor_send("forward", step=step)
+        elif MOTOR_BACKEND == "app":
+            app_straighten(forward_step=step)
         else:
             sdk_straighten()
     else:
@@ -3160,10 +3199,11 @@ def main():
     threading.Thread(target=ros_thread, daemon=True).start()
     stop_burst(1)
     httpd = ThreadingHTTPServer((HTTP_BIND, HTTP_PORT), Handler)
-    try:
-        sdk_init()
-    except Exception:
-        pass
+    if MOTOR_BACKEND == "sdk":
+        try:
+            sdk_init()
+        except Exception:
+            pass
     print(f"BEEP bridge {state['version']} listening on {HTTP_BIND}:{HTTP_PORT}, backend={MOTOR_BACKEND}, app={HOST}:{APP_PORT}, camera={CAMERA_URL}", flush=True)
     httpd.serve_forever()
 

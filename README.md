@@ -22,7 +22,9 @@ Release `0.19.2-supervised-arcs` adds LiDAR-supervised `turnleft`/`turnright` ca
 
 Release `0.19.3-fluent-steering` keeps compatible gait active while alternating straight and gentle curve registers from local six-sector LiDAR, adds firmware action `12` as the named `sit`/upward social-camera posture, and exposes the observed near-zero front/rear plus missing-sector pattern as `fall_suspected`. A powered run produced a genuinely changing nine-frame panel and semantic obstacle detection. BEEP's normal vendor-app remote movements in every direction are physically safe and have not caused falls. GLADIS's bridge recreation of reverse is unvalidated: one bridge-commanded high-walk sequence moved toward the obstacle and toppled BEEP, so that bridge path was removed pending faithful app-state reproduction and attitude supervision. Subsequent room trials reduced continuous gait speed, reassess safe curve stops, alternate ineffective turns, and cap consecutive escape maneuvers at four. A bridge command labelled right physically moved toward the frontal obstacle, so autonomous lateral escape also remains disabled until GLADIS reproduces the app correctly.
 
-The final powered run removed the bridge's forced high-walk/width-100 reverse setup, made app analog translation respect the requested joystick amplitude, and generated forward curves entirely through one app control state rather than mixing full-scale app translation with SDK yaw. BEEP then completed 8.2 seconds of uninterrupted forward/curved gait while passing the white cabinet. GLADIS's negative analog value still did not reproduce the app's safe reverse control, so autonomous reverse remains disabled until the exact app interaction is captured.
+The final powered run removed the bridge's forced high-walk/width-100 reverse setup, made app analog translation respect the requested joystick amplitude, and generated forward curves entirely through one app control state rather than mixing full-scale app translation with SDK yaw. BEEP then completed 8.2 seconds of uninterrupted forward/curved gait while passing the white cabinet. GLADIS's negative analog value still did not reproduce the app's safe reverse control, so autonomous reverse remains disabled until physical mapping is corrected.
+
+Current bridge `0.20.1-backend-owned-motion` reconstructs the vendor V2.0.7 normal profile (firmware gait selection, normal pace, body height 108, shoulder yaw 0, IMU off), keeps that profile stable across SDK steering updates, and deploys SDK as the single normal motor owner. The app backend is retained for compatibility, but a motion lease never crosses backends; the alternate backend is used only as a stop fallback after the active backend fails. Exact physical body height remains a commissioning measurement, not an offline assertion wearing a lab coat.
 
 Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
 
@@ -40,7 +42,7 @@ Current source implements the following. Core locomotion, mapping, asynchronous 
 - asynchronous guarded missions with responsive status/cancellation and an independent lease-deadline watchdog
 - continuous moving-camera capture into bounded chronological 4/6/9-frame panels without app-level motor-stop injection
 - optional local external-camera observer contracts with record-only default and authenticated exact-mission stop authority
-- strict Gemini semantic perception, persistent entity/world state, autonomous drive arbitration, and typed body-adapter dispatch
+- strict Gemini semantic perception, mission-bound persistent agent sessions, autonomous drive arbitration, atomic resume snapshots, and typed body-adapter dispatch
 - Jupyter-based deployment, SLAM reset/export, diagnostics, and speaker playback helpers
 - MAC-bound dual Wi-Fi boot configu...[truncated]
 
