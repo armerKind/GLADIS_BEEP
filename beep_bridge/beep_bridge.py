@@ -325,7 +325,7 @@ def pkt(cmd: int, payload=()):
     return ("$" + "".join(f"{v & 255:02X}" for v in vals) + "#").encode()
 
 
-def app_send(action: str):
+def app_send(action: str, step=None):
     action = str(action).lower()
     aliases = {"turn_left": "turnleft", "turn_right": "turnright",
                "rotate_left": "turnleft", "rotate_right": "turnright"}
@@ -358,12 +358,12 @@ def app_send(action: str):
             time.sleep(0.025)
             s.sendall(pkt(0x12, [APP_REVERSE_ARC_TURN[action]]))
         elif action in APP_ANALOG_PAYLOAD:
-            if action in ("back", "backward"):
-                s.sendall(pkt(0x13, [0x64]))
-                time.sleep(0.025)
-                s.sendall(pkt(0x14, [APP_REVERSE_PACE]))
-                time.sleep(0.025)
-            s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD[action]))
+            x, y = APP_ANALOG_PAYLOAD[action]
+            if step is not None:
+                magnitude = min(100, max(1, abs(int(step))))
+                x = 0 if x == 0 else (magnitude if x < 128 else 256 - magnitude)
+                y = 0 if y == 0 else (magnitude if y < 128 else 256 - magnitude)
+            s.sendall(pkt(0x11, [x, y]))
         else:
             s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
     with state_lock:
@@ -553,14 +553,33 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
     return {"ok": completed, "dry_run": False, "reason": reason, "error": error, "trick": trick, "settle_s": settle_s}
 
 
+def app_curve(direction, forward_step=10):
+    direction = str(direction).lower()
+    if direction not in ("left", "right"):
+        raise ValueError("curve direction must be left or right")
+    magnitude = min(100, max(1, abs(int(forward_step))))
+    with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
+        s.settimeout(0.25)
+        try:
+            s.recv(256)
+        except Exception:
+            pass
+        s.sendall(pkt(0x0F, [0x01]))
+        time.sleep(0.025)
+        s.sendall(pkt(0x11, [0x00, magnitude]))
+        time.sleep(0.025)
+        s.sendall(pkt(0x12, [0x05 if direction == "left" else 0x06]))
+    with state_lock:
+        state["last_command"] = "app:curve_" + direction
+        state["last_command_at"] = time.time()
+        state["last_motion_at"] = time.time()
+        state["moving"] = True
+
+
 def motor_send(action: str, step=None):
     if MOTOR_BACKEND == "sdk":
         return sdk_send(action, step=step)
-    if str(action).lower() in ("back", "backward", "arcbackleft", "arcbackright") and APP_REVERSE_GAIT:
-        if APP_REVERSE_GAIT not in ("trot", "walk", "high_walk"):
-            raise ValueError(f"unsupported app reverse gait {APP_REVERSE_GAIT!r}")
-        sdk_init().gait_type(APP_REVERSE_GAIT)
-    return app_send(action)
+    return app_send(action, step=step)
 
 
 def stop_burst(n=3):
@@ -1938,7 +1957,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         stop_burst(2)
                 elif action in ("back", "backward"):
                     stop_burst(2)
-                    supervised = {"ok": False, "reason": "bridge_reverse_mapping_unvalidated",
+                    supervised = {"ok": False, "reason": "bridge_reverse_analog_not_app_equivalent",
                                   "elapsed_s": 0.0, "attempts": []}
                 else:
                     motor_send(action, step=explore_step_for(action))
@@ -2201,8 +2220,11 @@ def start_or_update_fluent_motion(current_action, desired_action, step=20, yaw_s
         else:
             sdk_straighten()
     else:
-        sdk_curve("left" if desired_action == "curveleft" else "right",
-                  forward_step=step, yaw_step=yaw_step)
+        if MOTOR_BACKEND == "app":
+            app_curve("left" if desired_action == "curveleft" else "right", forward_step=step)
+        else:
+            sdk_curve("left" if desired_action == "curveleft" else "right",
+                      forward_step=step, yaw_step=yaw_step)
     return desired_action, True
 
 

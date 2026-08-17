@@ -62,7 +62,7 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(sent, [bridge.pkt(0x0F, [0x01])])
         self.assertNotIn(bridge.pkt(0x12, [bridge.CMD_PAYLOAD["stop"]]), sent)
 
-    def test_app_backward_uses_neutralized_negative_x_analog_packet(self):
+    def test_app_backward_uses_normal_gait_negative_analog_packet(self):
         sock = MagicMock()
         sock.recv.side_effect = TimeoutError()
         connection = MagicMock()
@@ -72,10 +72,18 @@ class FrontierIntegrationTests(unittest.TestCase):
         sent = [entry.args[0] for entry in sock.sendall.call_args_list]
         self.assertEqual(sent, [
             bridge.pkt(0x0F, [0x01]),
-            bridge.pkt(0x13, [0x64]),
-            bridge.pkt(0x14, [bridge.APP_REVERSE_PACE]),
             bridge.pkt(0x11, [0x00, 0x9C]),
         ])
+
+    def test_app_translation_respects_requested_joystick_amplitude(self):
+        sock = MagicMock()
+        sock.recv.side_effect = TimeoutError()
+        connection = MagicMock()
+        connection.__enter__.return_value = sock
+        with patch.object(bridge.socket, "create_connection", return_value=connection):
+            bridge.app_send("forward", step=10)
+        sent = [entry.args[0] for entry in sock.sendall.call_args_list]
+        self.assertEqual(sent[-1], bridge.pkt(0x11, [0x00, 0x0A]))
 
     def test_app_reverse_arc_combines_negative_x_and_yaw(self):
         sock = MagicMock()
@@ -109,15 +117,11 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.pkt(0x14, [0x02]),
         ])
 
-    def test_app_reverse_selects_high_walk_before_analog_command(self):
-        dog = MagicMock()
+    def test_app_reverse_does_not_change_gait_profile(self):
         with patch.object(bridge, "MOTOR_BACKEND", "app"), \
-             patch.object(bridge, "APP_REVERSE_GAIT", "high_walk"), \
-             patch.object(bridge, "sdk_init", return_value=dog), \
              patch.object(bridge, "app_send") as app:
-            bridge.motor_send("backward")
-        dog.gait_type.assert_called_once_with("high_walk")
-        app.assert_called_once_with("backward")
+            bridge.motor_send("backward", step=10)
+        app.assert_called_once_with("backward", step=10)
 
     def test_reverse_arc_rejects_turn_sweep_breach_before_motor_command(self):
         status = {
