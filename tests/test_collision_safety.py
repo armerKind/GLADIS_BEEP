@@ -117,6 +117,7 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(action, "turnleft")
         self.assertEqual(reason, "front_breach_sweep_left")
 
+
     def test_front_breach_uses_bounded_right_shift_to_open_turn_margin(self):
         constrained_left = {
             "front": 0.47, "front_left": 0.43, "front_right": 0.49,
@@ -142,7 +143,7 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertTrue(bridge.turn_window_stalled(0.75, math.radians(4.0)))
         self.assertFalse(bridge.turn_window_stalled(0.75, math.radians(12.0)))
 
-    def test_local_exploration_uses_measured_yaw_turn_instead_of_open_loop_pulse(self):
+    def test_local_exploration_alternates_ineffective_measured_yaw_turn(self):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
@@ -159,12 +160,15 @@ class CollisionSafetyTests(unittest.TestCase):
                 patch.object(bridge, "motor_send") as motor, \
                 patch.object(bridge, "stop_burst"):
             result = bridge.lidar_walk(max_duration=1.2, save=False)
-        self.assertEqual(result["reason"], "repeated_escape_action_stop")
-        self.assertEqual(turn.call_count, 2)
-        kwargs = turn.call_args.kwargs
-        self.assertEqual((kwargs["turn"], kwargs["degrees"], kwargs["step"]), ("left", 20.0, 30))
-        self.assertGreaterEqual(kwargs["max_duration"], 1.0)
-        self.assertLessEqual(kwargs["max_duration"], 1.2)
+        self.assertEqual(result["reason"], "escape_attempt_limit")
+        self.assertEqual(turn.call_count, 4)
+        turns = [call.kwargs["turn"] for call in turn.call_args_list]
+        self.assertEqual(turns, ["left", "right", "left", "right"])
+        for call in turn.call_args_list:
+            kwargs = call.kwargs
+            self.assertEqual((kwargs["degrees"], kwargs["step"]), (20.0, 30))
+            self.assertGreaterEqual(kwargs["max_duration"], 1.0)
+            self.assertLessEqual(kwargs["max_duration"], 1.2)
         motor.assert_not_called()
 
     def test_legacy_forward_endpoint_delegates_to_six_sector_guard(self):

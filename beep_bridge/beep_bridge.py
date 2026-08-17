@@ -1825,6 +1825,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     current_action = None
     last_escape_action = None
     consecutive_escape_actions = 0
+    total_escape_actions = 0
+    forced_turn_action = None
     coverage_samples = deque()
     initial_known_cells = None
     final_known_cells = None
@@ -1865,6 +1867,9 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
                 remaining = max_duration - (time.time() - started)
+                if forced_turn_action and min(sec.values()) >= TURN_SWEEP_M:
+                    action, duration, why = forced_turn_action, 2.5, "alternate_after_ineffective_turn"
+                    forced_turn_action = None
                 if (current_action in ("curveleft", "curveright") and
                         min(sec.values()) >= TURN_SWEEP_M and
                         min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M):
@@ -1878,9 +1883,10 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 if action == "forward":
                     last_escape_action = None
                     consecutive_escape_actions = 0
+                    total_escape_actions = 0
                     desired_action = choose_fluent_steering(sec, current_action=current_action)
                     current_action, gait_started = start_or_update_fluent_motion(
-                        current_action, desired_action, step=20, yaw_step=18)
+                        current_action, desired_action, step=10, yaw_step=18)
                     supervised = (supervise_lidar_motion(current_action, min(0.50, remaining))
                                   if current_action in ("curveleft", "curveright")
                                   else supervise_lidar_forward(min(0.50, remaining)))
@@ -1890,7 +1896,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     if not supervised["ok"]:
                         stop_burst(2)
                         current_action = None
-                        if supervised["reason"] == "obstacle_during_lidar_walk":
+                        if supervised["reason"] in ("obstacle_during_lidar_walk", "fluent_curve_envelope_breach"):
                             trace.append({"action": "stop_reassess", "why": supervised["reason"],
                                           "sectors": snapshot().get("sectors") or {}})
                             time.sleep(0.10)
@@ -1898,6 +1904,10 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         reason = str(supervised["reason"])
                         break
                     continue
+                total_escape_actions += 1
+                if total_escape_actions > 4:
+                    reason = "escape_attempt_limit"
+                    break
                 if current_action is not None:
                     stop_burst(2)
                     current_action = None
@@ -1927,7 +1937,9 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         supervised = supervise_lidar_motion(action, min(2.5, remaining))
                         stop_burst(2)
                 elif action in ("back", "backward"):
-                    supervised = yaw_corrected_reverse_escape(sec, before_pose)
+                    stop_burst(2)
+                    supervised = {"ok": False, "reason": "autonomous_reverse_untrusted",
+                                  "elapsed_s": 0.0, "attempts": []}
                 else:
                     motor_send(action, step=explore_step_for(action))
                     supervised = supervise_lidar_motion(
@@ -1955,6 +1967,13 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 if not supervised["ok"]:
                     reason = str(supervised["reason"])
                     break
+                if action in ("turnleft", "turnright"):
+                    before_front = sum(float(sec[name]) for name in
+                                       ("front", "front_left", "front_right")) / 3.0
+                    after_front = sum(float(after_sectors[name]) for name in
+                                      ("front", "front_left", "front_right")) / 3.0
+                    if after_front < before_front + 0.03:
+                        forced_turn_action = "turnright" if action == "turnleft" else "turnleft"
                 if not progress:
                     reason = "escape_no_progress"
                     break
