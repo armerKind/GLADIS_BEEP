@@ -95,8 +95,6 @@ class FrontierIntegrationTests(unittest.TestCase):
         sent = [entry.args[0] for entry in sock.sendall.call_args_list]
         self.assertEqual(sent, [
             bridge.pkt(0x0F, [0x01]),
-            bridge.pkt(0x13, [0x64]),
-            bridge.pkt(0x14, [bridge.APP_REVERSE_PACE]),
             bridge.pkt(0x11, [0x00, 0x9C]),
             bridge.pkt(0x12, [0x06]),
         ])
@@ -113,8 +111,6 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.pkt(0x0F, [0x01]),
             bridge.pkt(0x11, [0x00, 0x00]),
             bridge.pkt(0x12, [0x00]),
-            bridge.pkt(0x13, [0x32]),
-            bridge.pkt(0x14, [0x02]),
         ])
 
     def test_app_reverse_does_not_change_gait_profile(self):
@@ -339,11 +335,15 @@ class FrontierIntegrationTests(unittest.TestCase):
         dog = MagicMock()
         original = dict(bridge.state)
         try:
-            with patch.object(bridge, "sdk_init", return_value=dog):
+            with patch.object(bridge, "sdk_init", return_value=dog), \
+                 patch.object(bridge, "sdk_profile_key", None):
                 bridge.sdk_curve("right", forward_step=20, yaw_step=30)
                 bridge.sdk_straighten()
-            dog.gait_type.assert_called_once_with(bridge.SDK_GAIT)
+            dog.gait_type.assert_not_called()
             dog.pace.assert_called_once_with(bridge.SDK_PACE)
+            dog.translation.assert_called_once_with("z", 108)
+            dog.attitude.assert_called_once_with("y", 0)
+            dog.imu.assert_called_once_with(0)
             dog.move_x.assert_called_once_with(20)
             self.assertEqual(dog.turn.call_args_list, [call(-30), call(0)])
             self.assertTrue(bridge.state["moving"])
@@ -437,8 +437,11 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(bridge.choose_fluent_steering(mirrored), "curveright")
         open_corridor = dict(base, front=1.8, front_left=1.0, front_right=0.95, left=0.9, right=0.9)
         self.assertEqual(bridge.choose_fluent_steering(open_corridor), "forward")
+        ordinary_asymmetry = dict(base, front=1.0, front_left=0.80, front_right=0.60,
+                                  left=0.80, right=0.60)
+        self.assertEqual(bridge.choose_fluent_steering(ordinary_asymmetry), "forward")
         tight_curve = dict(base, front=0.70, front_left=0.70, front_right=1.2, left=0.65, right=0.8)
-        self.assertEqual(bridge.choose_fluent_steering(tight_curve, current_action="curveleft"), "curveleft")
+        self.assertEqual(bridge.choose_fluent_steering(tight_curve, current_action="curveleft"), "forward")
 
     def test_fluent_motion_changes_yaw_without_stop(self):
         with patch.object(bridge, "motor_send") as motor, \

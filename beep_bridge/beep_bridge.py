@@ -85,11 +85,14 @@ APP_ANALOG_PAYLOAD = {
     "right": (0x9C, 0x00),
 }
 APP_REVERSE_ARC_TURN = {"arcbackleft": 0x05, "arcbackright": 0x06}
-APP_REVERSE_PACE = min(3, max(1, int(os.environ.get("BEEP_APP_REVERSE_PACE", "2"))))
-APP_REVERSE_GAIT = os.environ.get("BEEP_APP_REVERSE_GAIT", "high_walk").strip()
 SDK_STEP_DEFAULT = int(os.environ.get("BEEP_SDK_STEP", "10"))
-SDK_GAIT = os.environ.get("BEEP_SDK_GAIT", "walk")
+# The vendor app does not write a gait for normal driving.  Preserve the
+# firmware gait unless an operator explicitly requests an override.
+SDK_GAIT = os.environ.get("BEEP_SDK_GAIT", "firmware").strip().lower()
 SDK_PACE = os.environ.get("BEEP_SDK_PACE", "normal")
+SDK_BODY_HEIGHT = min(110, max(76, int(os.environ.get("BEEP_SDK_BODY_HEIGHT", "108"))))
+SDK_SHOULDER_YAW = min(10, max(-10, int(os.environ.get("BEEP_SDK_SHOULDER_YAW", "0"))))
+SDK_IMU = 1 if os.environ.get("BEEP_SDK_IMU", "0").strip().lower() in ("1", "true", "yes", "on") else 0
 MOTOR_BACKEND = os.environ.get("BEEP_MOTOR_BACKEND", "sdk")  # sdk or app
 MAP_DIR = Path(os.environ.get("BEEP_MAP_DIR", "/home/pi/beep_bridge/maps"))
 MAP_RES_M = float(os.environ.get("BEEP_MAP_RES_M", "0.05"))
@@ -124,10 +127,13 @@ for _trick_name, _trick_meta in TRICK_ACTIONS.items():
         TRICK_ALIASES[str(_alias).lower()] = _trick_name
 sdk_dog = None
 sdk_error = None
+sdk_profile_key = None
 
 state_lock = threading.RLock()
 motion_lock = threading.RLock()
 motion_owner_lock = threading.RLock()
+sdk_io_lock = threading.RLock()
+app_io_lock = threading.RLock()
 motion_context = threading.local()
 _active_motion_lease = None
 _motion_lease_sequence = 0
@@ -136,7 +142,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.19.3-fluent-steering",
+    "version": "0.20.0-vendor-motion-profile",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -332,28 +338,23 @@ def app_send(action: str, step=None):
     action = aliases.get(action, action)
     if action not in CMD_PAYLOAD and action not in APP_ANALOG_PAYLOAD and action not in APP_REVERSE_ARC_TURN:
         raise ValueError(f"unknown app action {action!r}")
-    with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
+    with app_io_lock, socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
         s.settimeout(0.25)
         try:
             s.recv(256)
         except Exception:
             pass
-        # Standard/control mode, then command.
+        # Standard/control mode, then command.  Stop only neutralizes velocity:
+        # width, pace and posture are persistent configuration in app V2.0.7.
         s.sendall(pkt(0x0F, [0x01]))
         time.sleep(0.025)
         if action == "stop":
             s.sendall(pkt(0x11, [0x00, 0x00]))
             time.sleep(0.01)
             s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
-            time.sleep(0.01)
-            s.sendall(pkt(0x13, [0x32]))
-            time.sleep(0.01)
-            s.sendall(pkt(0x14, [0x02]))
         elif action in APP_REVERSE_ARC_TURN:
-            s.sendall(pkt(0x13, [0x64]))
-            time.sleep(0.025)
-            s.sendall(pkt(0x14, [APP_REVERSE_PACE]))
-            time.sleep(0.025)
+            # Combine reverse translation and yaw without changing persistent
+            # width, pace, gait or posture.
             s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD["backward"]))
             time.sleep(0.025)
             s.sendall(pkt(0x12, [APP_REVERSE_ARC_TURN[action]]))
@@ -373,20 +374,71 @@ def app_send(action: str, step=None):
     remember("app_send", action=action)
 
 
-def sdk_apply_motion_profile(g=None):
-    """Reapply configured gait and pace before newly directed motion.
+def sdk_motion_profile_key():
+    return (SDK_GAIT, SDK_PACE, SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU)
 
-    Vendor actions may overwrite persistent gait/pace registers. Reapplying
-    the profile here makes post-gesture speed deterministic.
-    """
-    if SDK_GAIT not in ("trot", "walk", "high_walk"):
+
+def motion_profile_snapshot():
+    return {"gait": SDK_GAIT, "pace": SDK_PACE, "body_height": SDK_BODY_HEIGHT,
+            "shoulder_yaw": SDK_SHOULDER_YAW, "imu": SDK_IMU,
+            "applied": sdk_profile_key == sdk_motion_profile_key()}
+
+
+def configure_stationary_posture(body_height=None, shoulder_yaw=None, imu=None, apply=True):
+    """Adjust posture only while stationary; intended for commissioning."""
+    global SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU
+    # Exclude the race where a motion lease begins between the stationary check
+    # and the posture write.
+    with motion_owner_lock:
+        lease = active_motion_lease()
+        with state_lock:
+            moving = bool(state.get("moving"))
+        if lease is not None or moving:
+            raise MotionBusy("posture cannot change during active motion")
+        height = SDK_BODY_HEIGHT if body_height is None else int(body_height)
+        shoulder = SDK_SHOULDER_YAW if shoulder_yaw is None else int(shoulder_yaw)
+        if not 76 <= height <= 110:
+            raise ValueError("body_height must be in vendor-app range 76..110")
+        if not -10 <= shoulder <= 10:
+            raise ValueError("shoulder_yaw must be in vendor-app range -10..10")
+        imu_value = SDK_IMU if imu is None else (1 if truthy(imu) else 0)
+        SDK_BODY_HEIGHT, SDK_SHOULDER_YAW, SDK_IMU = height, shoulder, imu_value
+        sdk_mark_profile_dirty()
+        if apply:
+            sdk_apply_motion_profile(force=True)
+        result = motion_profile_snapshot()
+    remember("stationary_posture_configured", **result)
+    return {"ok": True, "profile": result}
+
+
+def sdk_mark_profile_dirty():
+    global sdk_profile_key
+    sdk_profile_key = None
+
+
+def sdk_apply_motion_profile(g=None, force=False):
+    """Apply the vendor-app posture once, not before every velocity update."""
+    global sdk_profile_key
+    if SDK_GAIT not in ("firmware", "trot", "walk", "high_walk"):
         raise ValueError(f"unsupported SDK gait {SDK_GAIT!r}")
     if SDK_PACE not in ("normal", "slow", "high"):
         raise ValueError(f"unsupported SDK pace {SDK_PACE!r}")
     g = sdk_init() if g is None else g
-    g.gait_type(SDK_GAIT)
-    g.pace(SDK_PACE)
-    remember("sdk_motion_profile", gait=SDK_GAIT, pace=SDK_PACE)
+    profile = sdk_motion_profile_key()
+    with sdk_io_lock:
+        if not force and sdk_profile_key == profile:
+            return g
+        # App V2.0.7: firmware gait, normal pace, z=108, shoulder yaw=0,
+        # stabilization off.  A gait command is opt-in because the app sends none.
+        if SDK_GAIT != "firmware":
+            g.gait_type(SDK_GAIT)
+        g.pace(SDK_PACE)
+        g.translation('z', SDK_BODY_HEIGHT)
+        g.attitude('y', SDK_SHOULDER_YAW)
+        g.imu(SDK_IMU)
+        sdk_profile_key = profile
+    remember("sdk_motion_profile", gait=SDK_GAIT, pace=SDK_PACE,
+             body_height=SDK_BODY_HEIGHT, shoulder_yaw=SDK_SHOULDER_YAW, imu=SDK_IMU)
     return g
 
 
@@ -414,32 +466,33 @@ def sdk_send(action: str, step=None):
     g = sdk_init()
     aliases = {"backward": "back", "turn_left": "turnleft", "turn_right": "turnright", "rotate_left": "turnleft", "rotate_right": "turnright"}
     action = aliases.get(action, action)
-    if action == "stop":
-        errors = []
-        for method, value in ((g.stop, None), (g.move_x, 0), (g.move_y, 0), (g.turn, 0)):
-            try:
-                method() if value is None else method(value)
-            except Exception as exc:
-                errors.append(repr(exc))
-        if errors:
-            raise RuntimeError("SDK stop/axis neutralization failed: " + "; ".join(errors))
-    elif action in ("forward", "back"):
-        sdk_apply_motion_profile(g)
-        g.move_y(0)
-        g.turn(0)
-        getattr(g, action)(step)
-    elif action in ("left", "right"):
-        sdk_apply_motion_profile(g)
-        g.move_x(0)
-        g.turn(0)
-        getattr(g, action)(step)
-    elif action in ("turnleft", "turnright"):
-        sdk_apply_motion_profile(g)
-        g.move_x(0)
-        g.move_y(0)
-        getattr(g, action)(step)
-    else:
-        raise ValueError(f"unknown sdk action {action!r}")
+    with sdk_io_lock:
+        if action == "stop":
+            errors = []
+            for method, value in ((g.stop, None), (g.move_x, 0), (g.move_y, 0), (g.turn, 0)):
+                try:
+                    method() if value is None else method(value)
+                except Exception as exc:
+                    errors.append(repr(exc))
+            if errors:
+                raise RuntimeError("SDK stop/axis neutralization failed: " + "; ".join(errors))
+        elif action in ("forward", "back"):
+            sdk_apply_motion_profile(g)
+            g.move_y(0)
+            g.turn(0)
+            getattr(g, action)(step)
+        elif action in ("left", "right"):
+            sdk_apply_motion_profile(g)
+            g.move_x(0)
+            g.turn(0)
+            getattr(g, action)(step)
+        elif action in ("turnleft", "turnright"):
+            sdk_apply_motion_profile(g)
+            g.move_x(0)
+            g.move_y(0)
+            getattr(g, action)(step)
+        else:
+            raise ValueError(f"unknown sdk action {action!r}")
     with state_lock:
         was_moving = bool(state.get("moving"))
         now = time.time()
@@ -457,10 +510,11 @@ def sdk_curve(direction, forward_step=20, yaw_step=30):
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
     g = sdk_init()
-    sdk_apply_motion_profile(g)
-    g.move_x(abs(int(forward_step)))
-    signed_yaw = abs(int(yaw_step)) if direction == "left" else -abs(int(yaw_step))
-    g.turn(signed_yaw)
+    with sdk_io_lock:
+        sdk_apply_motion_profile(g)
+        g.move_x(abs(int(forward_step)))
+        signed_yaw = abs(int(yaw_step)) if direction == "left" else -abs(int(yaw_step))
+        g.turn(signed_yaw)
     now = time.time()
     with state_lock:
         state["last_command"] = "sdk:curve_" + direction
@@ -473,7 +527,8 @@ def sdk_curve(direction, forward_step=20, yaw_step=30):
 def sdk_straighten():
     """Clear yaw velocity while preserving the active forward gait."""
     g = sdk_init()
-    g.turn(0)
+    with sdk_io_lock:
+        g.turn(0)
     now = time.time()
     with state_lock:
         state["last_command"] = "sdk:forward"
@@ -546,6 +601,9 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
         finally:
             if not completed:
                 stop_burst(3)
+            # Vendor actions can alter persistent gait and posture registers.
+            # The next locomotion command must restore the known profile.
+            sdk_mark_profile_dirty()
             with state_lock:
                 state["moving"] = False
             remember("sdk_trick_done", trick=trick, settle_s=settle_s, cancelled=not completed, error=error)
@@ -601,12 +659,6 @@ def stop_burst(n=3):
         app_send("stop")
     except Exception as e:
         app_error = repr(e)
-
-    if APP_REVERSE_GAIT and sdk_ok:
-        try:
-            sdk_apply_motion_profile()
-        except Exception as e:
-            remember("reverse_gait_restore_failed", error=repr(e))
 
     err = None if sdk_ok else (sdk_errors[-1] if sdk_errors else "sdk_stop_not_confirmed")
     with state_lock:
@@ -2195,14 +2247,21 @@ def choose_fluent_steering(sectors, current_action=None):
         return "forward"
     left_open = min(values["front_left"], values["left"])
     right_open = min(values["front_right"], values["right"])
-    if current_action in ("curveleft", "curveright") and values["front"] < 1.15:
+    imbalance = left_open - right_open
+    # Forward is the default.  The previous thresholds reacted to ordinary
+    # LiDAR asymmetry every 0.5 s and made exploration look like nervous
+    # circling.  Curves now require a meaningful corridor imbalance or a
+    # genuinely near frontal obstacle, and persist only while still justified.
+    if current_action == "curveleft" and values["front"] < 0.95 and imbalance >= 0.12:
         return current_action
-    correction_needed = values["front"] < 1.15 or abs(left_open - right_open) >= 0.16
+    if current_action == "curveright" and values["front"] < 0.95 and imbalance <= -0.12:
+        return current_action
+    correction_needed = values["front"] < 0.85 or abs(imbalance) >= 0.30
     if not correction_needed:
         return "forward"
-    if left_open >= right_open + 0.08:
+    if imbalance >= 0.16:
         return "curveleft"
-    if right_open >= left_open + 0.08:
+    if imbalance <= -0.16:
         return "curveright"
     return "forward"
 
@@ -2829,6 +2888,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"mission": mission_snapshot(), "status": snapshot()})
             elif p.path == "/config":
                 self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
+                                "sdk_body_height": SDK_BODY_HEIGHT, "sdk_shoulder_yaw": SDK_SHOULDER_YAW, "sdk_imu": SDK_IMU,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
                                 "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M,
@@ -2853,6 +2913,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "external_observer": {"stop": "POST /observer/stop", "enabled": bool(OBSERVER_STOP_TOKEN),
                                                       "exact_mission_required": True, "min_interval_s": OBSERVER_STOP_MIN_INTERVAL_S},
                                 "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
+            elif p.path == "/motion/profile":
+                self.send_json({"ok": True, "profile": motion_profile_snapshot(),
+                                "constraint": "stationary_only"})
             elif p.path == "/events":
                 self.send_json({"events": list(events)[-80:]})
             elif p.path in ("/actions", "/tricks"):
@@ -3008,6 +3071,11 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/mission/cancel":
                 result = cancel_autonomous_mission(body.get("mission_id"), source="http_mission_cancel")
                 self.send_json(result, 200 if result.get("ok") else 409)
+            elif p.path == "/motion/profile":
+                result = configure_stationary_posture(
+                    body_height=body.get("body_height"), shoulder_yaw=body.get("shoulder_yaw"),
+                    imu=body.get("imu"), apply=bool(body.get("apply", True)))
+                self.send_json(result)
             elif p.path == "/move":
                 action = body.get("action", "stop")
                 duration = float(body.get("duration", 0.2))

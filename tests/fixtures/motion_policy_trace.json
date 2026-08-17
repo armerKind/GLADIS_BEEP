@@ -1,0 +1,7 @@
+[
+  {"front": 1.00, "front_left": 1.10, "front_right": 0.70, "left": 1.00, "right": 0.60, "rear": 0.90},
+  {"front": 1.00, "front_left": 0.66, "front_right": 0.76, "left": 0.66, "right": 0.51, "rear": 0.66},
+  {"front": 1.80, "front_left": 1.10, "front_right": 1.05, "left": 0.95, "right": 0.95, "rear": 0.90},
+  {"front": 0.50, "front_left": 0.49, "front_right": 0.69, "left": 0.65, "right": 0.90, "rear": 0.69},
+  {"front": 1.20, "front_left": 0.90, "front_right": 0.90, "left": 0.80, "right": 0.80, "rear": 0.90}
+]

@@ -81,7 +81,26 @@ curl -s http://beep.tailb08b32.ts.net:8766/health | python3 -m json.tool
 curl -s http://beep.tailb08b32.ts.net:8766/stop | python3 -m json.tool
 ```
 
-Require `/health` field `status.version == "0.17.3-moving-camera-handshake"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
+## Motion-profile commissioning gate
+
+Do not start autonomous exploration immediately after deploying a changed motion
+profile. On a full battery and clear level floor:
+
+1. Confirm `/status` reports `moving=false` and no motion lease.
+2. Apply the vendor baseline with `POST /motion/profile` using body height `108`,
+   shoulder yaw `0`, and IMU `false`.
+3. Observe the stationary stance, then run one bounded 1.5-second forward command
+   at SDK step `10`; stop and inspect stability and straightness.
+4. If the stance is visibly unstable, repeat the same single pass at heights
+   `105`, then `95`. Change only height, never gait and height together.
+5. Accept a profile only after two straight passes without stumble, lateral drift,
+   or persistent yaw. Then run one 8-second supervised forward-biased mission.
+6. Autonomous room exploration remains blocked until that gate passes.
+
+This isolates posture from navigation policy. It also prevents the traditional
+robotics method of changing five variables and learning nothing.
+
+Require `/health` field `status.version == "0.20.0-vendor-motion-profile"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
 
 ## Install the bridge systemd unit
 

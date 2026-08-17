@@ -94,6 +94,8 @@ maps/              placeholder for ignored generated bridge maps
 ```text
 GET /health                     liveness plus nested runtime status snapshot
 GET /stop                       repeated SDK stop attempts plus app-stop telemetry
+GET /motion/profile             current gait, pace, body-height, shoulder and IMU profile
+POST /motion/profile            stationary-only posture commissioning
 POST /mission/start             begin asynchronous fluent autonomous navigation
 GET /mission                    inspect active or latest mission without blocking
 POST /mission/cancel            cancel the exact active autonomous mission
@@ -118,6 +120,7 @@ scripts/jupyter_reset_slam.py           # Start a clean Cartographer trajectory
 scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
 scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency, and Pi resources
+scripts/replay_motion_policy.py          # Replay captured LiDAR observations through old/current steering
 scripts/run_beep_eyes.py                 # Temporal camera/replay → Gemini → typed shadow policy
 scripts/run_moving_eyes.py               # Continuous 4/6/9-frame moving vision → world-model planning
 scripts/run_beep_mission.py              # Persistent world → autonomous goal → optional typed dispatch

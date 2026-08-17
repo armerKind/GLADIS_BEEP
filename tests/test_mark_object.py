@@ -176,20 +176,24 @@ class MarkObjectPlanTests(unittest.TestCase):
         class FakeDog:
             def gait_type(self, value): calls.append(("gait_type", value))
             def pace(self, value): calls.append(("pace", value))
+            def translation(self, axis, value): calls.append(("translation", axis, value))
+            def attitude(self, axis, value): calls.append(("attitude", axis, value))
+            def imu(self, value): calls.append(("imu", value))
             def move_x(self, value): calls.append(("move_x", value))
             def move_y(self, value): calls.append(("move_y", value))
             def turn(self, value): calls.append(("turn", value))
             def forward(self, value): calls.append(("forward", value))
             def turnleft(self, value): calls.append(("turnleft", value))
 
-        with patch.object(bridge, "sdk_init", return_value=FakeDog()):
+        with patch.object(bridge, "sdk_init", return_value=FakeDog()), \
+             patch.object(bridge, "sdk_profile_key", None):
             bridge.sdk_send("forward", step=10)
             bridge.sdk_send("turnleft", step=10)
 
         self.assertEqual(calls, [
-            ("gait_type", bridge.SDK_GAIT), ("pace", bridge.SDK_PACE),
+            ("pace", bridge.SDK_PACE),
+            ("translation", "z", 108), ("attitude", "y", 0), ("imu", 0),
             ("move_y", 0), ("turn", 0), ("forward", 10),
-            ("gait_type", bridge.SDK_GAIT), ("pace", bridge.SDK_PACE),
             ("move_x", 0), ("move_y", 0), ("turnleft", 10),
         ])
 

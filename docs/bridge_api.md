@@ -26,6 +26,8 @@ Autonomous navigation and positive-duration primitive endpoints are synchronous:
 | `GET /status?full=1` | Status plus full last-run data |
 | `GET /last_run` | Full trace from the last autonomous routine |
 | `GET /config` | Runtime configuration and motor backend |
+| `GET /motion/profile` | Current firmware-gait, pace, body-height, shoulder-yaw and IMU profile |
+| `POST /motion/profile` | Apply a posture profile while stationary; HTTP 409 during motion |
 | `GET /events` | Recent rolling event log |
 | `GET /pose` | Current accepted pose |
 
@@ -211,6 +213,27 @@ Behavior:
 `chaos` is clamped to `0..1`; `seed` makes weighted selection repeatable. `max_duration` is clamped to 300 seconds.
 
 A completion reason of `coverage_complete_or_no_reachable_frontiers` must be read with the trace. If map updates eliminate routes during turns and no forward motion occurred, it means “no currently reachable planner frontier,” not “the robot traversed the whole room.”
+
+### Stationary motion-profile commissioning
+
+Normal SDK locomotion mirrors vendor app V2.0.7: preserve the firmware gait,
+use normal pace, body height 108, shoulder yaw 0, and IMU stabilization off.
+The profile is applied once before locomotion and restored after gestures; it is
+not rewritten on every velocity update. A stop neutralizes velocity axes without
+mutating persistent pace, width, or posture.
+
+```http
+GET /motion/profile
+POST /motion/profile
+Content-Type: application/json
+
+{"body_height":105,"shoulder_yaw":0,"imu":false,"apply":true}
+```
+
+`body_height` is restricted to the vendor app's accepted range `76..110`, and
+`shoulder_yaw` to `-10..10`. The bridge rejects changes while `moving=true` or a
+motion lease exists. This endpoint is for commissioning on clear floor, not for
+live gait improvisation.
 
 ### Asynchronous autonomous mission
 
