@@ -258,7 +258,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - polls all six local LiDAR sectors approximately every 80 ms,
 - requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
 - uses gentle in-gait forward curves for heading correction while keeping autonomous lateral and reverse-arc escape disabled,
-- stops and reassesses a curve-envelope breach, alternates an ineffective measured turn, and stops after four consecutive escape maneuvers; autonomous reverse returns `autonomous_reverse_untrusted` rather than commanding the motors,
+- stops and reassesses a curve-envelope breach, alternates an ineffective measured turn, and stops after four consecutive escape maneuvers; the autonomous worker returns `bridge_reverse_mapping_unvalidated` rather than using GLADIS's incorrect bridge recreation of the app's safe reverse movement,
 - retains the legacy yaw-corrected segmented reverse helper only for explicit diagnostics; the fluent autonomous worker never invokes it,
 - keeps the historical reverse worsening and heading-drift guards in that diagnostic path,
 - requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,

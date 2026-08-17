@@ -1938,7 +1938,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         stop_burst(2)
                 elif action in ("back", "backward"):
                     stop_burst(2)
-                    supervised = {"ok": False, "reason": "autonomous_reverse_untrusted",
+                    supervised = {"ok": False, "reason": "bridge_reverse_mapping_unvalidated",
                                   "elapsed_s": 0.0, "attempts": []}
                 else:
                     motor_send(action, step=explore_step_for(action))
