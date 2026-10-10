@@ -98,7 +98,7 @@ Supported primitive names:
 forward  back  left  right  turnleft  turnright  stop
 ```
 
-Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A positive non-stop primitive attempts `stop_burst()` after sleeping for the bounded duration. `/move` performs no LiDAR freshness or clearance check. Autonomous controllers use reverse only as a 0.30-second LiDAR-supervised front-obstacle backoff; they do not use autonomous lateral motion. Primitive access is a supervised diagnostic/manual interface, not a substitute for navigation.
+Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A primitive issues one bounded movement command, waits continuously, then attempts `stop_burst()`. `/move` performs no LiDAR freshness or clearance check. Autonomous recovery is different: reverse is a single low-speed command supervised continuously against fresh six-sector LiDAR and usable SLAM, stopping at 0.08 m frontal-clearance gain or aborting on 0.02 m loss, 5-degree yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds. A failed attempt is not retried automatically. In-place turns likewise hold one yaw command and poll sensors/SLAM until the requested angle is reached (with at least 10 degrees required for reported success) or a guard stops motion.
 
 ## Vendor preset actions
 
@@ -286,19 +286,16 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - adjusts yaw in gait with `curveleft`/`curveright`, then clears yaw without neutralizing forward motion,
 - polls all six local LiDAR sectors approximately every 80 ms,
 - requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
-- uses gentle in-gait forward curves for heading correction while keeping autonomous lateral and reverse-arc escape disabled,
-- stops and reassesses a curve-envelope breach, alternates an ineffective measured turn, and stops after four consecutive escape maneuvers; the autonomous worker returns `bridge_reverse_mapping_unvalidated` rather than using GLADIS's incorrect bridge recreation of the app's safe reverse movement,
-- retains the legacy yaw-corrected segmented reverse helper only for explicit diagnostics; the fluent autonomous worker never invokes it,
-- keeps the historical reverse worsening and heading-drift guards in that diagnostic path,
+- preserves fluent forward gait across compatible clear windows and steers with in-gait curves rather than stop/start nudges,
+- uses a single continuous in-place yaw command (step 30) with live LiDAR/SLAM monitoring; no 0.30-second pivot bursts, and reports a turn only after at least 10 degrees of settled yaw confirmed across three samples,
+- uses one continuous low-speed reverse command (step 12 by default) with live six-sector LiDAR and usable-SLAM guards; it ends at 0.08 m frontal-clearance gain or aborts on 0.02 m frontal loss, 5 degrees yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds,
+- keeps reverse bounded and one-shot: no automatic retries or yaw-correction bursts; frontier exploration drops a blocked route after a successful reverse and replans a new route,
+- uses autonomous lateral movement only as a narrowly bounded right-shift turn setup when its front/diagonal/side/rear guards pass; no reverse arcs,
 - requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,
-- The vendor app D-pad translation buttons are not used for autonomous motion because they update only one persistent motion axis. App-backend translation uses analog command `0x11`, writes both axes on every request, and scales the signed value to the requested joystick amplitude instead of forcing full scale. Forward curves keep translation and yaw in the app control state. Stop sends `(0, 0)` and button stop. The legacy supervised reverse-arc diagnostic still owns its separate high-walk profile; ordinary autonomous reverse is disabled because GLADIS has not yet reproduced the app's safe reverse interaction.
-- Supervised reverse arcs use `arcbackleft` and `arcbackright`: width `100`, normal pace, high-walk analog negative X, then persistent yaw button `5` or `6`. The full six-sector 0.42 m turn-sweep floor remains active together with reverse rear, side, and frontal-progress guards. Supervised turn calibration also accepts `turnleft` and `turnright`; app-backed measured pivots use 0.90-second segments before stop-and-measure.
-- Named stationary action `sit` (firmware action `12`, aliases `sit_down`, `social_sit`, `look_up`) raises the camera for social observation. Status exposes `fall_suspected` when required sectors are missing while both front and rear collapse below 0.10 m. This is a fail-closed diagnostic, not proof of orientation; physical attitude sensing or an external view remains required.
-- permits a narrowly bounded rightward turn-setup shift only when front clearance is at least 0.46 m, both diagonals remain above the 0.42 m sweep floor, right clearance exceeds 0.55 m, and rear/side guards pass; the 0.35-second step-5 shift aborts on more than 0.02 m frontal loss or 5 degrees heading drift and must gain at least 0.008 m left clearance,
-- executes turns as 0.90-second clearance-supervised pivots with a full stop and settled SLAM yaw measurement after each segment; two consecutive segments without at least 2 degrees of additional settled progress abort the turn,
-- fails closed on missing sectors, boxed-in geometry, failed progress, or more than two repeated identical escape actions,
-- clamps duration to 180 seconds,
-- attempts final SDK stop cleanup.
+- fails closed on missing sectors, boxed-in geometry, failed progress, or repeated identical escapes; people in view trigger yielding and route replanning, not terminal semantic-goal failure,
+- retains the firmware gait/normal pace and does not add per-command posture writes.
+
+The continuous reverse/turn rewrite is currently local-source code and unit-tested; it is not deployed or physically commissioned. A successful unit test is not a locomotion result. Live reverse and 10-degree pivot trials remain required before promoting the new control path to autonomous semantic navigation.
 
 ### Coverage-driven exploration
 

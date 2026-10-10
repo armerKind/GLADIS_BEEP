@@ -240,6 +240,7 @@ class CollisionSafetyTests(unittest.TestCase):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "slam": {"usable": True},
             "sectors": {
                 "front": 0.20, "front_left": 0.22, "front_right": 0.24,
                 "left": 0.5, "right": 0.5, "rear": 0.31,
@@ -254,6 +255,7 @@ class CollisionSafetyTests(unittest.TestCase):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "slam": {"usable": True},
             "sectors": dict(FRONT_BLOCKED_REAR_CLEAR, left=0.34),
         }
         with patch.object(bridge, "snapshot", return_value=state):
@@ -267,6 +269,7 @@ class CollisionSafetyTests(unittest.TestCase):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "slam": {"usable": True},
             "sectors": worsened,
             "pose": {"yaw": 0.01},
         }
@@ -281,6 +284,7 @@ class CollisionSafetyTests(unittest.TestCase):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "slam": {"usable": True},
             "sectors": baseline,
             "pose": {"yaw": math.radians(6.0)},
         }
@@ -297,6 +301,7 @@ class CollisionSafetyTests(unittest.TestCase):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "slam": {"usable": True},
             "sectors": improved,
             "pose": {"yaw": 0.0},
         }
@@ -310,7 +315,7 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(result["front_clearance_gain_m"], 0.08)
         self.assertLess(result["elapsed_s"], bridge.REVERSE_ESCAPE_MAX_S)
 
-    def test_reverse_recovery_corrects_yaw_between_bounded_segments(self):
+    def test_reverse_recovery_uses_one_continuous_command(self):
         baseline = {
             "front": 0.64, "front_left": 0.63, "front_right": 0.48,
             "left": 0.57, "right": 0.44, "rear": 1.12,
@@ -324,30 +329,29 @@ class CollisionSafetyTests(unittest.TestCase):
                          "pose_age_s": 0.01, "map_age_s": 0.01},
             }
 
-        first_after = dict(baseline, front=0.66, front_left=0.65, front_right=0.48)
-        corrected = dict(first_after, right=0.46)
-        gained = dict(corrected, front=0.73, front_left=0.72, front_right=0.56)
+        gained = dict(baseline, front=0.73, front_left=0.72, front_right=0.56)
         segment_results = [
-            {"ok": False, "reason": "heading_drift_during_backoff", "elapsed_s": 0.5},
-            {"ok": True, "reason": "reverse_clearance_gain_reached", "elapsed_s": 0.4},
+            {"ok": True, "reason": "reverse_clearance_gain_reached", "elapsed_s": 0.8,
+             "front_clearance_gain_m": bridge.ESCAPE_CLEARANCE_GAIN_M},
         ]
         turn_result = {"ok": True, "reason": "target_reached:5.1deg", "elapsed_s": 0.5}
         with patch.object(bridge, "snapshot", side_effect=[
-                state(baseline, 0.0), state(first_after, math.radians(6.0)),
-                state(corrected, 0.0), state(gained, math.radians(1.0)),
+                state(baseline, 0.0), state(gained, 0.0),
                 ]), \
                 patch.object(bridge, "supervise_lidar_motion", side_effect=segment_results), \
                 patch.object(bridge, "guarded_slam_turn", return_value=turn_result) as correction, \
                 patch.object(bridge, "motor_send") as motor, \
                 patch.object(bridge, "stop_burst"):
-            result = bridge.yaw_corrected_reverse_escape(baseline, {"yaw": 0.0})
+            result = bridge.continuous_reverse_escape(baseline, {"yaw": 0.0})
         self.assertTrue(result["ok"])
         self.assertEqual(result["reason"], "reverse_clearance_gain_reached")
-        self.assertEqual(motor.call_count, 2)
-        correction.assert_called_once()
-        self.assertEqual(correction.call_args.kwargs["turn"], "right")
+        self.assertEqual(result["control"], "single_continuous_reverse")
+        self.assertEqual(motor.call_count, 1)
+        self.assertEqual(motor.call_args.args, ("back",))
+        self.assertEqual(motor.call_args.kwargs["step"], bridge.REVERSE_ESCAPE_STEP)
+        correction.assert_not_called()
 
-    def test_reverse_worsening_falls_back_to_guarded_turn_when_sweep_opens(self):
+    def test_reverse_worsening_aborts_without_turn_retry(self):
         baseline = {
             "front": 0.62, "front_left": 0.62, "front_right": 0.50,
             "left": 0.57, "right": 0.43, "rear": 1.0,
@@ -372,11 +376,10 @@ class CollisionSafetyTests(unittest.TestCase):
                     "elapsed_s": 0.4}), \
                 patch.object(bridge, "guarded_slam_turn", return_value=turn_result) as turn, \
                 patch.object(bridge, "motor_send"), patch.object(bridge, "stop_burst"):
-            result = bridge.yaw_corrected_reverse_escape(baseline, {"yaw": 0.0})
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["reason"], "reverse_worsened_turn_recovery")
-        self.assertEqual(result["recovery_action"], "turn")
-        self.assertEqual(turn.call_args.kwargs["turn"], "left")
+            result = bridge.continuous_reverse_escape(baseline, {"yaw": 0.0})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
+        turn.assert_not_called()
 
     def test_autonomous_mission_refuses_boxed_in_preflight(self):
         status = {
@@ -396,6 +399,7 @@ class CollisionSafetyTests(unittest.TestCase):
         status = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "slam": {"usable": True},
             "sectors": {
                 "front_left": 0.8, "front_right": 0.8,
                 "left": 0.7, "right": 0.7, "rear": 0.7,

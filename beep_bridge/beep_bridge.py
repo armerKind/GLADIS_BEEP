@@ -48,12 +48,30 @@ FRONT_STOP_M = float(os.environ.get("BEEP_FRONT_STOP_M", "0.35"))
 SIDE_STOP_M = float(os.environ.get("BEEP_SIDE_STOP_M", "0.22"))
 SCAN_STALE_S = float(os.environ.get("BEEP_SCAN_STALE_S", "0.60"))
 HARD_CLEARANCE_M = max(0.18, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.18")))
-FOOTPRINT_FRONT_M = max(0.55, float(os.environ.get("BEEP_FOOTPRINT_FRONT_M", "0.55")))
-FOOTPRINT_DIAGONAL_M = max(0.42, float(os.environ.get("BEEP_FOOTPRINT_DIAGONAL_M", "0.42")))
-FOOTPRINT_SIDE_M = max(0.35, float(os.environ.get("BEEP_FOOTPRINT_SIDE_M", "0.35")))
-FOOTPRINT_REAR_M = max(0.45, float(os.environ.get("BEEP_FOOTPRINT_REAR_M", "0.45")))
-FORWARD_CORRIDOR_M = max(0.65, float(os.environ.get("BEEP_FORWARD_CORRIDOR_M", "0.65")))
-TURN_SWEEP_M = max(0.42, float(os.environ.get("BEEP_TURN_SWEEP_M", "0.42")))
+# Startup-only commissioning hypothesis, never a live safety override. Distances
+# are LiDAR-origin ranges, not distances from a physically measured body edge.
+CLEARANCE_PROFILE = os.environ.get("BEEP_CLEARANCE_PROFILE", "conservative")
+if CLEARANCE_PROFILE not in ("conservative", "commissioning_030"):
+    raise ValueError("unknown BEEP_CLEARANCE_PROFILE")
+# A recovery reverse is one sustained, low-speed SDK/app gait command, not repeated
+# stop/start pulses. The range stays inside the vendor SDK's documented move-Y span.
+REVERSE_ESCAPE_STEP = min(18, max(5, int(os.environ.get("BEEP_REVERSE_STEP", "12"))))
+def clearance_setting(name, conservative):
+    floor = 0.30 if CLEARANCE_PROFILE == "commissioning_030" else conservative
+    value = float(os.environ.get(name, str(floor)))
+    if not math.isfinite(value):
+        raise ValueError("nonfinite clearance: " + name)
+    if name in ("BEEP_FOOTPRINT_DIAGONAL_M", "BEEP_FOOTPRINT_SIDE_M", "BEEP_TURN_SWEEP_M") and CLEARANCE_PROFILE == "commissioning_030":
+        return max(0.25, value)
+    return max(floor, value)
+
+
+FOOTPRINT_FRONT_M = clearance_setting("BEEP_FOOTPRINT_FRONT_M", 0.55)
+FOOTPRINT_DIAGONAL_M = clearance_setting("BEEP_FOOTPRINT_DIAGONAL_M", 0.42)
+FOOTPRINT_SIDE_M = clearance_setting("BEEP_FOOTPRINT_SIDE_M", 0.35)
+FOOTPRINT_REAR_M = clearance_setting("BEEP_FOOTPRINT_REAR_M", 0.45)
+FORWARD_CORRIDOR_M = max(FOOTPRINT_FRONT_M, clearance_setting("BEEP_FORWARD_CORRIDOR_M", 0.65))
+TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.42)
 TURN_START_CLEARANCE_M = max(TURN_SWEEP_M + 0.03,
                              float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.45")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
@@ -63,16 +81,12 @@ BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
 )
 REVERSE_ESCAPE_MAX_S = min(1.2, max(
     0.30, float(os.environ.get("BEEP_REVERSE_ESCAPE_MAX_S", "1.2"))))
-REVERSE_CORRECTION_SEGMENT_S = min(0.60, max(
-    0.30, float(os.environ.get("BEEP_REVERSE_CORRECTION_SEGMENT_S", "0.60"))))
-REVERSE_CORRECTION_ATTEMPTS = min(3, max(
-    1, int(os.environ.get("BEEP_REVERSE_CORRECTION_ATTEMPTS", "3"))))
-REVERSE_CORRECTION_STEP = min(10, max(
-    5, int(os.environ.get("BEEP_REVERSE_CORRECTION_STEP", "8"))))
 ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
-TURN_SEGMENT_S = min(1.20, max(0.50, float(os.environ.get("BEEP_TURN_SEGMENT_S", "0.90"))))
+TURN_SETTLE_SAMPLES = 3
+TURN_SETTLE_YAW_TOLERANCE_RAD = math.radians(2.0)
+TURN_SETTLE_MAX_S = 0.35
 OBSERVER_STOP_TOKEN = os.environ.get("BEEP_OBSERVER_STOP_TOKEN", "")
 OBSERVER_STOP_MIN_INTERVAL_S = max(0.5, float(os.environ.get("BEEP_OBSERVER_STOP_MIN_INTERVAL_S", "2.0")))
 
@@ -1622,39 +1636,33 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                 reason = "slam_pose_unavailable_before_start"
                 return {"ok": False, "mode": "explore_room", "reason": reason, "status": s0, "map": map_summary(m), "trace_tail": []}
             update_map_from_scan(m, scan_match=False)
-            if rotate_scan:
-                # Rotate only when the complete body sweep is clear and each pulse
-                # produces measurable heading progress.
-                for i in range(6):
-                    if motion_is_cancelled():
-                        reason = "motion_cancelled"
-                        break
-                    if time.time() - started >= max_duration:
-                        break
-                    before_state = snapshot()
-                    before_sectors = before_state.get("sectors") or {}
-                    if len(before_sectors) < 6 or min(float(before_sectors.get(name) or 0.0) for name in
-                                                      ("front", "front_left", "front_right", "left", "right", "rear")) < TURN_SWEEP_M:
-                        reason = "rotation_sweep_clearance_rejected"
-                        break
-                    before_pose = pose_copy()
-                    supervised = guarded_slam_turn(
-                        turn="left", degrees=20.0, max_duration=2.0, step=30)
-                    after_state = snapshot()
-                    after_sectors = after_state.get("sectors") or {}
-                    after_pose = pose_copy()
-                    progress = bool(supervised["ok"])
-                    trace.append({"phase": "rotate_scan", "i": i + 1,
-                                  "supervisor_reason": supervised["reason"], "progress": progress,
-                                  "sectors_before": before_sectors, "sectors_after": after_sectors})
-                    if not supervised["ok"]:
-                        reason = str(supervised["reason"])
-                        break
-                    if not progress:
-                        reason = "rotation_no_progress"
-                        break
-                    time.sleep(0.08)
-                    update_map_from_scan(m, scan_match=False)
+            if rotate_scan and not motion_is_cancelled() and time.time() - started < max_duration:
+                before_state = snapshot()
+                before_sectors = sector_values(
+                    before_state, ("front", "front_left", "front_right", "left", "right", "rear"))
+                if before_sectors is None or min(before_sectors.values()) < TURN_START_CLEARANCE_M:
+                    reason = "rotation_sweep_clearance_rejected"
+                else:
+                    remaining = max_duration - (time.time() - started)
+                    if remaining < 1.0:
+                        reason = "max_duration"
+                    else:
+                        # One continuous 120-degree scan turn replaces six short
+                        # pivot bursts; sensors remain live throughout the turn.
+                        supervised = guarded_slam_turn(
+                            turn="left", degrees=120.0, max_duration=min(8.0, remaining),
+                            tolerance_degrees=5.0, step=30)
+                        after_state = snapshot()
+                        trace.append({"phase": "rotate_scan", "target_degrees": 120.0,
+                                      "measured_degrees": supervised.get("measured_settled_degrees"),
+                                      "supervisor_reason": supervised["reason"],
+                                      "progress": bool(supervised.get("ok")),
+                                      "sectors_before": before_sectors,
+                                      "sectors_after": after_state.get("sectors") or {}})
+                        if not supervised.get("ok"):
+                            reason = str(supervised.get("reason"))
+                        else:
+                            update_map_from_scan(m, scan_match=False)
             while reason == "max_duration" and time.time() - started < max_duration:
                 if motion_is_cancelled():
                     reason = "motion_cancelled"
@@ -1693,7 +1701,7 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                         turn="left" if action == "turnleft" else "right",
                         degrees=20.0, max_duration=min(2.0, remaining), step=step)
                 elif action in ("back", "backward"):
-                    supervised = yaw_corrected_reverse_escape(sec, before_pose)
+                    supervised = continuous_reverse_escape(sec, before_pose)
                 else:
                     motor_send(action, step=step)
                     supervised = supervise_lidar_motion(
@@ -1811,6 +1819,9 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
                 return {"ok": False, "reason": "front_clearance_worsening_during_reverse_arc",
                         "elapsed_s": time.time() - started}
         elif action in ("back", "backward"):
+            if not slam_ok(st):
+                return {"ok": False, "reason": "slam_unusable_during_backoff",
+                        "elapsed_s": time.time() - started}
             if sec["rear"] < FOOTPRINT_REAR_M:
                 return {"ok": False, "reason": "rear_clearance_breach", "elapsed_s": time.time() - started}
             if min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
@@ -1821,20 +1832,23 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
             elif baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M:
                 return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
                         "elapsed_s": time.time() - started}
-            elif (stop_on_front_gain_m is not None and
-                  current_front - baseline_front >= float(stop_on_front_gain_m)):
-                return {"ok": True, "reason": "reverse_clearance_gain_reached",
-                        "elapsed_s": time.time() - started,
-                        "front_clearance_gain_m": current_front - baseline_front}
             yaw = ((st.get("pose") or {}).get("yaw"))
-            if baseline_yaw is None and yaw is not None:
+            if yaw is None:
+                return {"ok": False, "reason": "reverse_yaw_unavailable",
+                        "elapsed_s": time.time() - started}
+            if baseline_yaw is None:
                 baseline_yaw = float(yaw)
-            elif baseline_yaw is not None and yaw is not None:
+            else:
                 drift = abs(norm_angle(float(yaw) - baseline_yaw))
                 if drift > BACKOFF_MAX_HEADING_DRIFT_RAD:
                     return {"ok": False, "reason": "heading_drift_during_backoff",
                             "elapsed_s": time.time() - started,
                             "heading_drift_degrees": round(math.degrees(drift), 2)}
+            if (stop_on_front_gain_m is not None and
+                    current_front - baseline_front >= float(stop_on_front_gain_m)):
+                return {"ok": True, "reason": "reverse_clearance_gain_reached",
+                        "elapsed_s": time.time() - started,
+                        "front_clearance_gain_m": current_front - baseline_front}
         elif action == "right":
             if (sec["front"] < 0.44 or min(sec["front_left"], sec["front_right"]) < TURN_SWEEP_M or
                     sec["left"] < FOOTPRINT_SIDE_M or sec["right"] < 0.45 or
@@ -1875,97 +1889,71 @@ def supervise_lidar_forward(duration, poll_s=0.08):
     return result
 
 
-def yaw_corrected_reverse_escape(baseline_sectors, baseline_pose):
-    """Reverse in bounded segments, correcting measured yaw between segments."""
+def continuous_reverse_escape(baseline_sectors, baseline_pose):
+    """Run one uninterrupted, low-speed reverse until clearance gain or abort."""
     baseline_values = validated_sector_values(baseline_sectors)
     if baseline_values is None or not baseline_pose or baseline_pose.get("yaw") is None:
         return {"ok": False, "reason": "reverse_baseline_invalid", "elapsed_s": 0.0,
                 "attempts": [], "status": snapshot()}
-    target_yaw = float(baseline_pose["yaw"])
-    baseline_front = sum(
-        baseline_values[name] for name in ("front", "front_left", "front_right")) / 3.0
-    started = time.time()
-    attempts = []
 
-    for attempt in range(1, REVERSE_CORRECTION_ATTEMPTS + 1):
-        if motion_is_cancelled():
-            return {"ok": False, "reason": "motion_cancelled", "elapsed_s": time.time() - started,
-                    "attempts": attempts, "status": snapshot()}
-        before = snapshot()
-        required = sector_values(before, ("front", "front_left", "front_right", "left", "right", "rear"))
-        pose = before.get("pose") or {}
-        if (required is None or pose.get("yaw") is None or not scan_ok(before) or not slam_ok(before)):
-            return {"ok": False, "reason": "reverse_guard_invalid_before_segment",
-                    "elapsed_s": time.time() - started, "attempts": attempts, "status": before}
-        if required["rear"] < FOOTPRINT_REAR_M or min(required["left"], required["right"]) < FOOTPRINT_SIDE_M:
-            return {"ok": False, "reason": "reverse_envelope_rejected_before_segment",
-                    "elapsed_s": time.time() - started, "attempts": attempts, "status": before}
+    before = snapshot()
+    required = sector_values(before, ("front", "front_left", "front_right", "left", "right", "rear"))
+    pose = before.get("pose") or {}
+    if not scan_ok(before) or required is None:
+        return {"ok": False, "reason": "reverse_guard_invalid_before_start",
+                "elapsed_s": 0.0, "attempts": [], "status": before}
+    if not slam_ok(before) or pose.get("yaw") is None:
+        return {"ok": False, "reason": "reverse_slam_invalid_before_start",
+                "elapsed_s": 0.0, "attempts": [], "status": before}
+    if required["rear"] < FOOTPRINT_REAR_M or min(required["left"], required["right"]) < FOOTPRINT_SIDE_M:
+        return {"ok": False, "reason": "reverse_envelope_rejected_before_start",
+                "elapsed_s": 0.0, "attempts": [], "status": before}
+    if motion_is_cancelled():
+        return {"ok": False, "reason": "motion_cancelled", "elapsed_s": 0.0,
+                "attempts": [], "status": before}
 
-        motor_send("back", step=REVERSE_CORRECTION_STEP)
-        segment = supervise_lidar_motion(
-            "back", REVERSE_CORRECTION_SEGMENT_S,
-            baseline_sectors=baseline_values, baseline_pose={"yaw": target_yaw},
-            stop_on_front_gain_m=ESCAPE_CLEARANCE_GAIN_M)
-        stop_burst(2)
-        after = snapshot()
-        after_required = sector_values(
-            after, ("front", "front_left", "front_right", "left", "right", "rear"))
-        after_pose = after.get("pose") or {}
-        gain = None
-        drift = None
-        if after_required is not None:
-            gain = (sum(after_required[name] for name in ("front", "front_left", "front_right")) / 3.0 -
-                    baseline_front)
-        if after_pose.get("yaw") is not None:
-            drift = norm_angle(float(after_pose["yaw"]) - target_yaw)
-        item = {"attempt": attempt, "segment": segment,
-                "front_clearance_gain_m": gain,
-                "heading_drift_degrees": None if drift is None else math.degrees(drift)}
-        attempts.append(item)
+    started = time.monotonic()
+    supervised = {"ok": False, "reason": "reverse_not_started", "elapsed_s": 0.0}
+    error = None
+    try:
+        # A single persistent gait command avoids the unstable stop/start pattern.
+        motor_send("back", step=REVERSE_ESCAPE_STEP)
+        supervised = supervise_lidar_motion(
+            "back", REVERSE_ESCAPE_MAX_S, poll_s=0.05,
+            baseline_sectors=baseline_values,
+            baseline_pose={"yaw": float(baseline_pose["yaw"])},
+            stop_on_front_gain_m=ESCAPE_CLEARANCE_GAIN_M,
+        )
+        if supervised.get("reason") == "window_complete":
+            supervised = dict(supervised, ok=False,
+                              reason="reverse_clearance_gain_not_reached")
+    except Exception as exc:
+        error = repr(exc)
+        supervised = {"ok": False, "reason": "reverse_exception", "error": error}
+        with state_lock:
+            state["last_error"] = error
+    finally:
+        stop_burst(3)
 
-        if segment.get("ok") and (segment.get("reason") == "reverse_clearance_gain_reached" or
-                                  (gain is not None and gain >= ESCAPE_CLEARANCE_GAIN_M)):
-            return {"ok": True, "reason": "reverse_clearance_gain_reached",
-                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
-        if segment.get("reason") == "front_clearance_worsening_during_backoff":
-            if after_required is not None and min(after_required.values()) >= TURN_START_CLEARANCE_M:
-                fallback_direction = ("left" if max(after_required["left"], after_required["front_left"]) >=
-                                      max(after_required["right"], after_required["front_right"]) else "right")
-                fallback = guarded_slam_turn(
-                    turn=fallback_direction, degrees=20.0,
-                    max_duration=2.0, tolerance_degrees=5.0, step=30)
-                item["fallback_turn"] = fallback
-                if fallback.get("ok"):
-                    return {"ok": True, "reason": "reverse_worsened_turn_recovery",
-                            "recovery_action": "turn", "elapsed_s": time.time() - started,
-                            "attempts": attempts, "status": fallback.get("status") or snapshot()}
-                return {"ok": False,
-                        "reason": "reverse_worsened_turn_failed:" + str(fallback.get("reason")),
-                        "elapsed_s": time.time() - started, "attempts": attempts,
-                        "status": fallback.get("status") or snapshot()}
-            return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
-                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
-        if segment.get("reason") not in ("window_complete", "heading_drift_during_backoff"):
-            return {"ok": False, "reason": str(segment.get("reason")),
-                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
-        if drift is None:
-            return {"ok": False, "reason": "reverse_heading_unavailable",
-                    "elapsed_s": time.time() - started, "attempts": attempts, "status": after}
-
-        if abs(drift) >= math.radians(2.0):
-            corrected = guarded_slam_turn(
-                turn="right" if drift > 0.0 else "left",
-                degrees=max(10.0, abs(math.degrees(drift))),
-                max_duration=1.5, tolerance_degrees=5.0, step=20)
-            item["correction"] = corrected
-            if not corrected.get("ok"):
-                return {"ok": False,
-                        "reason": "reverse_yaw_correction_failed:" + str(corrected.get("reason")),
-                        "elapsed_s": time.time() - started, "attempts": attempts,
-                        "status": corrected.get("status") or snapshot()}
-
-    return {"ok": False, "reason": "reverse_clearance_gain_not_reached",
-            "elapsed_s": time.time() - started, "attempts": attempts, "status": snapshot()}
+    after = snapshot()
+    after_pose = after.get("pose") or {}
+    drift = None if after_pose.get("yaw") is None else norm_angle(
+        float(after_pose["yaw"]) - float(baseline_pose["yaw"]))
+    item = {
+        "attempt": 1,
+        "control": "single_continuous_reverse",
+        "step": REVERSE_ESCAPE_STEP,
+        "supervisor": supervised,
+        "heading_drift_degrees": None if drift is None else round(math.degrees(drift), 2),
+    }
+    reason = str(supervised.get("reason", "reverse_failed"))
+    ok = bool(supervised.get("ok")) and reason == "reverse_clearance_gain_reached"
+    result = {"ok": ok, "reason": reason, "elapsed_s": round(time.monotonic() - started, 3),
+              "attempts": [item], "control": "single_continuous_reverse",
+              "status": after}
+    if error:
+        result["error"] = error
+    return result
 
 
 def coverage_has_plateaued(samples, now, window_s, min_growth_cells):
@@ -2101,9 +2089,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         supervised = supervise_lidar_motion(action, min(2.5, remaining))
                         stop_burst(2)
                 elif action in ("back", "backward"):
-                    stop_burst(2)
-                    supervised = {"ok": False, "reason": "bridge_reverse_analog_not_app_equivalent",
-                                  "elapsed_s": 0.0, "attempts": []}
+                    supervised = continuous_reverse_escape(sec, before_pose)
+                    current_action = None
                 else:
                     motor_send(action, step=explore_step_for(action))
                     supervised = supervise_lidar_motion(
@@ -2396,9 +2383,6 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     selected_meta = None
     stall_count = 0
     gait_action = None
-    turn_streak_action = None
-    turn_streak_count = 0
-    turn_streak_start_yaw = None
     reason = "max_duration"
     active_explore = {"active": True, "mode": "frontier_explore", "started_at": started, "name": name, "chaos": chaos, "seed": actual_seed}
 
@@ -2431,9 +2415,22 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     reason = "lidar_sector_missing"
                     break
                 reactive_action, _, reactive_reason = choose_explore_action(sec)
-                if reactive_action in ("back", "stop"):
+                if reactive_action == "stop":
                     reason = "frontier_footprint_clearance_stop:" + reactive_reason
                     break
+                if reactive_action in ("back", "backward"):
+                    reverse = continuous_reverse_escape(sec, pose_copy())
+                    trace.append({"event": "continuous_reverse_replan", "reason": reactive_reason,
+                                  "result": reverse})
+                    if not reverse.get("ok"):
+                        reason = "frontier_reverse_failed:" + str(reverse.get("reason"))
+                        break
+                    if selected_target_world is not None:
+                        excluded_world.append(selected_target_world)
+                    selected_target_world = None
+                    selected_meta = None
+                    stall_count = 0
+                    continue
 
                 path = None
                 target_cell = None
@@ -2473,9 +2470,6 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                         reason = "coverage_complete_or_no_reachable_frontiers"
                         break
                     selected_target_world = tuple(plan["target_world"])
-                    turn_streak_action = None
-                    turn_streak_count = 0
-                    turn_streak_start_yaw = None
                     selected_meta = {
                         "cluster_size": plan["cluster_size"],
                         "frontier_clusters": plan["frontier_clusters"],
@@ -2513,9 +2507,6 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 before_pose = pose_tuple
                 motion_window = {"ok": True, "reason": "bounded_turn", "elapsed_s": float(decision["duration"])}
                 if decision["action"] == "forward":
-                    turn_streak_action = None
-                    turn_streak_count = 0
-                    turn_streak_start_yaw = None
                     gait_action, gait_started = start_or_continue_fluent_forward(gait_action, decision["step"])
                     motion_window = supervise_fluent_forward(float(decision["duration"]))
                     motion_window["gait_started"] = gait_started
@@ -2526,25 +2517,18 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     if gait_action is not None:
                         stop_burst(1)
                         gait_action = None
-                    if min(sec.values()) < TURN_SWEEP_M:
-                        reason = "turn_sweep_clearance_rejected"
+                    remaining = max_duration - (time.time() - started)
+                    if remaining < 1.0:
+                        reason = "max_duration"
                         break
-                    if turn_streak_action == decision["action"]:
-                        turn_streak_count += 1
-                    else:
-                        turn_streak_action = decision["action"]
-                        turn_streak_count = 1
-                        turn_streak_start_yaw = float(before_pose[2])
-                    turn_duration = min(0.30, float(decision["duration"]))
-                    decision["duration"] = turn_duration
-                    motor_send(decision["action"], step=decision["step"])
-                    motion_window = supervise_lidar_motion(decision["action"], turn_duration)
-                    if not motion_window["ok"]:
-                        reason = str(motion_window["reason"])
-                        stop_burst(2)
-                        break
-                    stop_burst(1)
-                    time.sleep(rng.uniform(0.04, 0.10))
+                    target_degrees = (20.0 if str(decision.get("reason", "")).startswith("reactive_")
+                                      else max(10.0, min(45.0, abs(math.degrees(float(decision.get("heading_error", 0.0)))))))
+                    motion_window = guarded_slam_turn(
+                        turn="left" if decision["action"] == "turnleft" else "right",
+                        degrees=target_degrees,
+                        max_duration=min(2.5, remaining),
+                        tolerance_degrees=3.0, step=30)
+                    decision["duration"] = motion_window.get("elapsed_s", decision["duration"])
                 after_pose_dict = pose_copy()
                 after_pose = (float(after_pose_dict["x"]), float(after_pose_dict["y"]), float(after_pose_dict["yaw"]))
                 after_sectors = (snapshot().get("sectors") or {})
@@ -2574,32 +2558,19 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 })
 
                 if decision["action"] in ("turnleft", "turnright"):
-                    turn_progress = escape_made_progress(
-                        decision["action"], sec, after_sectors,
-                        {"yaw": before_pose[2]}, {"yaw": after_pose[2]},
+                    if not motion_window.get("ok"):
+                        stop_burst(2)
+                        gait_action = None
+                        reason = str(motion_window.get("reason", "turn_failed"))
+                        break
+                    turn_progress = (
+                        abs(norm_angle(after_pose[2] - before_pose[2])) >= math.radians(10.0)
                     )
                     trace[-1]["turn_progress"] = turn_progress
                     if not turn_progress:
                         stop_burst(2)
                         gait_action = None
                         reason = "turn_no_progress"
-                        break
-                    streak_start_yaw = float(after_pose[2] if turn_streak_start_yaw is None else turn_streak_start_yaw)
-                    turn_yaw_delta = abs(norm_angle(float(after_pose[2]) - streak_start_yaw))
-                    trace[-1]["turn_streak_count"] = turn_streak_count
-                    trace[-1]["turn_yaw_delta"] = round(turn_yaw_delta, 4)
-                    if ((turn_streak_count >= 4 and turn_yaw_delta < 0.18) or turn_streak_count >= 8):
-                        stop_burst(2)
-                        gait_action = None
-                        reason = "turn_progress_stalled"
-                        trace.append({
-                            "event": "turn_progress_stalled",
-                            "action": decision["action"],
-                            "turn_streak_count": turn_streak_count,
-                            "turn_yaw_delta": round(turn_yaw_delta, 4),
-                            "heading_error": decision.get("heading_error"),
-                            "pose": after_pose_dict,
-                        })
                         break
 
                 if not motion_window["ok"]:
@@ -2766,7 +2737,7 @@ def forward_continuous_until(target_front=FOOTPRINT_FRONT_M, max_duration=5.0, m
 
 def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_S,
                       tolerance_degrees=5.0, poll_interval=0.05, step=None):
-    """Turn through clearance-supervised micro-pivots and settled SLAM measurements."""
+    """Hold one in-place yaw command through target angle; stop only on guard/target."""
     global last_run
     turn = str(turn).lower()
     if turn not in ("left", "right"):
@@ -2775,96 +2746,162 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
     tolerance_degrees = max(2.0, min(float(tolerance_degrees), 15.0))
     max_duration = max(1.0, min(float(max_duration), 8.0))
     poll_interval = max(0.02, min(float(poll_interval), 0.20))
-    target_rad = math.radians(degrees)
-    tolerance_rad = math.radians(tolerance_degrees)
-    started = time.time()
+    required_progress = math.radians(max(10.0, degrees - tolerance_degrees))
+    turn_step = max(30, min(50, int(step or 30)))
+    started = time.monotonic()
     reason = "max_duration"
     trace = []
-    final_state = snapshot()
 
     with motion_lock:
-        slam = final_state.get("slam") or {}
-        pose = final_state.get("pose") or {}
+        initial = snapshot()
+        final_state = initial
+        pose = initial.get("pose") or {}
         if motion_is_cancelled():
-            return {"ok": False, "mode": "guarded_slam_turn", "reason": "motion_cancelled", "status": final_state, "trace_tail": []}
-        if not scan_ok(final_state):
-            return {"ok": False, "mode": "guarded_slam_turn", "reason": "scan_stale_or_missing_before_start", "status": final_state, "trace_tail": []}
-        if not slam_ok(final_state) or pose.get("yaw") is None:
-            return {"ok": False, "mode": "guarded_slam_turn", "reason": "slam_invalid_before_start", "status": final_state, "trace_tail": []}
-        required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "motion_cancelled",
+                    "status": initial, "trace_tail": []}
+        if not scan_ok(initial):
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "scan_stale_or_missing_before_start",
+                    "status": initial, "trace_tail": []}
+        if not slam_ok(initial) or pose.get("yaw") is None:
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "slam_invalid_before_start",
+                    "status": initial, "trace_tail": []}
+        required = sector_values(initial, ("front", "front_left", "front_right", "left", "right", "rear"))
         if required is None:
-            return {"ok": False, "mode": "guarded_slam_turn", "reason": "lidar_sector_missing_before_start", "status": final_state, "trace_tail": []}
-        if min(required.values()) < TURN_SWEEP_M:
-            return {"ok": False, "mode": "guarded_slam_turn", "reason": "clearance_breach_before_start", "status": final_state, "trace_tail": []}
+            return {"ok": False, "mode": "guarded_slam_turn", "reason": "lidar_sector_missing_before_start",
+                    "status": initial, "trace_tail": []}
+        if min(required.values()) < TURN_START_CLEARANCE_M:
+            nearest = min(required.values())
+            return {"ok": False, "mode": "guarded_slam_turn",
+                    "reason": f"turn_start_clearance_rejected:{nearest:.3f}m<{TURN_START_CLEARANCE_M:.3f}m",
+                    "status": initial, "trace_tail": []}
+
         start_yaw = float(pose["yaw"])
         action = "turnleft" if turn == "left" else "turnright"
-        best_progress = 0.0
-        stalled_segments = 0
+        window_started = started
+        window_start_progress = 0.0
         try:
-            while time.time() - started < max_duration:
+            # SDK turn is a persistent yaw register. Dispatch once and keep the
+            # gait continuous while fresh LiDAR/SLAM are sampled independently.
+            motor_send(action, step=turn_step)
+            window_started = time.monotonic()
+            while time.monotonic() - started < max_duration:
                 if motion_is_cancelled():
                     reason = "motion_cancelled"
                     break
-                motor_send(action, step=step)
-                segment = supervise_lidar_motion(
-                    action, min(TURN_SEGMENT_S, max_duration - (time.time() - started)), poll_s=poll_interval)
-                stop_burst(2)
-                if not segment.get("ok"):
-                    reason = str(segment.get("reason"))
-                    break
-                time.sleep(0.10)
                 final_state = snapshot()
-                slam = final_state.get("slam") or {}
-                pose = final_state.get("pose") or {}
-                sectors = final_state.get("sectors") or {}
                 if not scan_ok(final_state):
-                    reason = "scan_stale_or_missing"
+                    reason = "scan_stale_during_turn"
                     break
-                if not slam_ok(final_state) or pose.get("yaw") is None:
+                if not slam_ok(final_state):
                     reason = "slam_invalid_during_turn"
                     break
-                required = sector_values(final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
-                if required is None:
-                    reason = "lidar_sector_missing"
+                required_sectors = sector_values(
+                    final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
+                if required_sectors is None:
+                    reason = "lidar_sector_missing_during_turn"
                     break
-                nearest = min(required.values())
+                nearest = min(required_sectors.values())
                 if nearest < TURN_SWEEP_M:
                     reason = f"clearance_too_close:{nearest:.3f}"
                     break
+                pose = final_state.get("pose") or {}
+                if pose.get("yaw") is None:
+                    reason = "slam_pose_missing_during_turn"
+                    break
                 yaw = float(pose["yaw"])
-                signed_delta = math.atan2(math.sin(yaw - start_yaw), math.cos(yaw - start_yaw))
-                progress = signed_delta if turn == "left" else -signed_delta
-                trace.append({"elapsed_s": round(time.time() - started, 3), "yaw": round(yaw, 4),
+                directed_delta = (yaw - start_yaw) if turn == "left" else (start_yaw - yaw)
+                progress = directed_delta % math.tau
+                if progress > math.pi:
+                    progress -= math.tau
+                elapsed = time.monotonic() - started
+                trace.append({"elapsed_s": round(elapsed, 3), "yaw": round(yaw, 4),
                               "progress_degrees": round(math.degrees(progress), 2),
-                              "nearest_m": round(nearest, 3),
-                              "segment_elapsed_s": round(float(segment.get("elapsed_s", 0.0)), 3)})
-                if progress >= target_rad - tolerance_rad:
+                              "nearest_m": round(nearest, 3)})
+                if progress >= required_progress:
                     reason = f"target_reached:{math.degrees(progress):.1f}deg"
                     break
                 if progress < -math.radians(5.0):
                     reason = f"wrong_direction:{math.degrees(progress):.1f}deg"
                     break
-                if progress >= best_progress + math.radians(2.0):
-                    best_progress = progress
-                    stalled_segments = 0
-                else:
-                    stalled_segments += 1
-                    if stalled_segments >= 2:
-                        reason = f"turn_no_settled_progress:{math.degrees(progress):.1f}deg"
+                if elapsed - window_started >= TURN_PROGRESS_WINDOW_S:
+                    window_delta = max(0.0, progress - window_start_progress)
+                    if window_delta < TURN_PROGRESS_MIN_RAD:
+                        reason = f"turn_no_progress_in_window:{math.degrees(window_delta):.1f}deg"
                         break
-        except Exception as e:
-            reason = "exception:" + repr(e)
+                    window_started = elapsed
+                    window_start_progress = progress
+                time.sleep(poll_interval)
+        except Exception as exc:
+            reason = "exception:" + repr(exc)
             with state_lock:
-                state["last_error"] = repr(e)
+                state["last_error"] = repr(exc)
         finally:
             stop_burst(3)
 
-    elapsed = time.time() - started
-    reached = reason.startswith("target_reached")
-    result = {"ok": reached, "mode": "guarded_slam_turn", "turn": turn, "target_degrees": degrees,
-              "reason": reason, "elapsed_s": round(elapsed, 2), "trace_tail": trace[-60:], "status": snapshot()}
+    # Confirm the stopped pose over three fresh samples; a single snapshot can
+    # catch gait sway or a delayed SLAM update and is not a settled measurement.
+    final_state = snapshot()
+    settled_yaws = []
+    settle_error = None
+    settle_deadline = time.monotonic() + TURN_SETTLE_MAX_S
+    while len(settled_yaws) < TURN_SETTLE_SAMPLES and time.monotonic() <= settle_deadline:
+        final_state = snapshot()
+        if not scan_ok(final_state) or not slam_ok(final_state):
+            settle_error = "settled_sensor_stale"
+            break
+        settled_sectors = sector_values(
+            final_state, ("front", "front_left", "front_right", "left", "right", "rear"))
+        if settled_sectors is None:
+            settle_error = "settled_lidar_sector_missing"
+            break
+        if min(settled_sectors.values()) < TURN_SWEEP_M:
+            settle_error = "settled_clearance_below_turn_floor"
+            break
+        settled_pose = final_state.get("pose") or {}
+        if settled_pose.get("yaw") is None:
+            settle_error = "settled_pose_missing"
+            break
+        yaw = float(settled_pose["yaw"])
+        if settled_yaws and abs(norm_angle(yaw - settled_yaws[-1])) > TURN_SETTLE_YAW_TOLERANCE_RAD:
+            settled_yaws = [yaw]
+        else:
+            settled_yaws.append(yaw)
+        if len(settled_yaws) < TURN_SETTLE_SAMPLES:
+            time.sleep(min(poll_interval, max(0.0, settle_deadline - time.monotonic())))
+
+    final_progress_degrees = None
+    if len(settled_yaws) == TURN_SETTLE_SAMPLES:
+        settled_yaw = settled_yaws[-1]
+        directed_settled_delta = (
+            settled_yaw - start_yaw if turn == "left" else start_yaw - settled_yaw
+        )
+        final_progress_degrees = math.degrees(directed_settled_delta % math.tau)
+        if final_progress_degrees > 180.0:
+            final_progress_degrees -= 360.0
+        trace.append({"elapsed_s": round(time.monotonic() - started, 3),
+                      "progress_degrees": round(final_progress_degrees, 2),
+                      "settled_samples": len(settled_yaws), "phase": "settled"})
+    reached = (reason.startswith("target_reached") and
+               final_progress_degrees is not None and
+               final_progress_degrees >= math.degrees(required_progress))
+    if reason.startswith("target_reached") and not reached:
+        if settle_error:
+            reason = "settled_verification_failed:" + settle_error
+        elif final_progress_degrees is None:
+            reason = "settled_pose_unstable"
+        else:
+            reason = f"settled_turn_below_minimum:{final_progress_degrees:.1f}deg"
+    result = {"ok": reached, "mode": "guarded_slam_turn", "turn": turn,
+              "target_degrees": degrees, "minimum_progress_degrees": math.degrees(required_progress),
+              "measured_settled_degrees": final_progress_degrees,
+              "settled_sample_count": len(settled_yaws), "settled_error": settle_error,
+              "reason": reason, "elapsed_s": round(time.monotonic() - started, 2),
+              "trace_tail": trace[-60:], "status": final_state,
+              "control": "single_continuous_in_place_turn"}
     last_run = result
-    remember("guarded_slam_turn_done", turn=turn, target_degrees=degrees, reason=reason, elapsed_s=round(elapsed, 2))
+    remember("guarded_slam_turn_done", turn=turn, target_degrees=degrees,
+             measured_settled_degrees=final_progress_degrees, reason=reason,
+             elapsed_s=result["elapsed_s"])
     return result
 
 
@@ -2989,18 +3026,24 @@ class Handler(BaseHTTPRequestHandler):
                                 "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M,
                                 "footprint_clearance_m": {"front": FOOTPRINT_FRONT_M, "front_diagonal": FOOTPRINT_DIAGONAL_M,
                                                            "side": FOOTPRINT_SIDE_M, "rear": FOOTPRINT_REAR_M,
-                                                           "forward_corridor": FORWARD_CORRIDOR_M, "turn_sweep": TURN_SWEEP_M,
+                                                           "forward_corridor": FORWARD_CORRIDOR_M,
+                                                           "turn_sweep": TURN_SWEEP_M,
                                                            "turn_start_clearance": TURN_START_CLEARANCE_M,
-                                                           "map_radius": ROBOT_FOOTPRINT_RADIUS_M,
-                                                           "escape_gain": ESCAPE_CLEARANCE_GAIN_M,
-                                                           "reverse_escape_max_s": REVERSE_ESCAPE_MAX_S,
-                                                           "reverse_correction_segment_s": REVERSE_CORRECTION_SEGMENT_S,
-                                                           "reverse_correction_attempts": REVERSE_CORRECTION_ATTEMPTS,
-                                                           "reverse_correction_step": REVERSE_CORRECTION_STEP,
-                                                           "backoff_max_front_loss": BACKOFF_MAX_FRONT_LOSS_M,
-                                                           "backoff_max_heading_drift_deg": math.degrees(BACKOFF_MAX_HEADING_DRIFT_RAD),
-                                                           "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,
-                                                           "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD)},
+                                                           "map_radius": ROBOT_FOOTPRINT_RADIUS_M},
+                                "motion_control": {
+                                    "reverse_mode": "single_continuous_command",
+                                    "reverse_step": REVERSE_ESCAPE_STEP,
+                                    "reverse_duration_max_s": REVERSE_ESCAPE_MAX_S,
+                                    "reverse_gain_target_m": ESCAPE_CLEARANCE_GAIN_M,
+                                    "reverse_front_loss_max_m": BACKOFF_MAX_FRONT_LOSS_M,
+                                    "reverse_yaw_abort_deg": math.degrees(BACKOFF_MAX_HEADING_DRIFT_RAD),
+                                    "turn_mode": "single_continuous_in_place_command",
+                                    "turn_minimum_progress_deg": 10.0,
+                                    "turn_settle_samples": TURN_SETTLE_SAMPLES,
+                                    "turn_settle_yaw_tolerance_deg": math.degrees(TURN_SETTLE_YAW_TOLERANCE_RAD),
+                                    "turn_settle_max_s": TURN_SETTLE_MAX_S,
+                                    "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,
+                                    "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD)},
                                 "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,

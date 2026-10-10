@@ -76,9 +76,79 @@ class MarkObjectPlanTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["reason"].startswith("target_reached"))
-        self.assertEqual(commands, [("turnleft", None)])
-        self.assertEqual(stops, [2, 3])
+        self.assertEqual(commands, [("turnleft", 30)])
+        self.assertEqual(stops, [3])
         self.assertGreaterEqual(result["trace_tail"][-1]["progress_degrees"], 85.0)
+        self.assertEqual(result["measured_settled_degrees"], math.degrees(1.50))
+        self.assertEqual(result["control"], "single_continuous_in_place_turn")
+
+    def test_ten_degree_turn_requires_ten_measured_degrees_and_one_dispatch(self):
+        yaws = iter([0.0, 0.0, 0.06, 0.12, 0.18, 0.18])
+        commands = []
+        status = {"scan_seen": True, "scan_age_s": 0.01,
+                  "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
+                  "slam": {"active": True, "pose_valid": True, "usable": True},
+                  "pose": {"yaw": 0.0}}
+
+        def fake_snapshot(*args, **kwargs):
+            state = dict(status)
+            state["pose"] = {"yaw": next(yaws, 0.18)}
+            return state
+
+        with (
+            patch.object(bridge, "snapshot", side_effect=fake_snapshot),
+            patch.object(bridge, "motor_send", side_effect=lambda action, step=None: commands.append((action, step))),
+            patch.object(bridge, "stop_burst"),
+            patch.object(bridge.time, "sleep", return_value=None),
+        ):
+            result = bridge.guarded_slam_turn(turn="left", degrees=10, max_duration=2)
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["measured_settled_degrees"], 10.0)
+        self.assertEqual(result["settled_sample_count"], 3)
+        self.assertEqual(commands, [("turnleft", 30)])
+
+    def test_ten_degree_right_turn_uses_signed_yaw_and_one_dispatch(self):
+        yaws = iter([0.0, 0.0, -0.06, -0.12, -0.18, -0.18])
+        commands = []
+        status = {"scan_seen": True, "scan_age_s": 0.01,
+                  "sectors": {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")},
+                  "slam": {"active": True, "pose_valid": True, "usable": True},
+                  "pose": {"yaw": 0.0}}
+
+        def fake_snapshot(*args, **kwargs):
+            state = dict(status)
+            state["pose"] = {"yaw": next(yaws, -0.18)}
+            return state
+
+        with (
+            patch.object(bridge, "snapshot", side_effect=fake_snapshot),
+            patch.object(bridge, "motor_send", side_effect=lambda action, step=None: commands.append((action, step))),
+            patch.object(bridge, "stop_burst"),
+            patch.object(bridge.time, "sleep", return_value=None),
+        ):
+            result = bridge.guarded_slam_turn(turn="right", degrees=10, max_duration=2)
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["measured_settled_degrees"], 10.0)
+        self.assertEqual(commands, [("turnright", 30)])
+
+    def test_turn_rejects_clearance_below_start_margin_before_command(self):
+        sectors = {name: 0.8 for name in ("front", "front_left", "front_right", "left", "right", "rear")}
+        sectors["right"] = bridge.TURN_START_CLEARANCE_M - 0.01
+        status = {"scan_seen": True, "scan_age_s": 0.01, "sectors": sectors,
+                  "slam": {"active": True, "pose_valid": True, "usable": True},
+                  "pose": {"yaw": 0.0}}
+        with (
+            patch.object(bridge, "snapshot", return_value=status),
+            patch.object(bridge, "motor_send") as motor,
+        ):
+            result = bridge.guarded_slam_turn(turn="right", degrees=10)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["reason"].startswith("turn_start_clearance_rejected"))
+        motor.assert_not_called()
+
+
 
     def test_guarded_slam_turn_rejects_wrong_direction(self):
         yaws = iter([0.0, -0.25, -0.25])
@@ -116,8 +186,8 @@ class MarkObjectPlanTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["reason"].startswith("wrong_direction"))
-        self.assertEqual(commands, [("turnleft", None)])
-        self.assertEqual(stops, [2, 3])
+        self.assertEqual(commands, [("turnleft", 30)])
+        self.assertEqual(stops, [3])
 
     def test_guarded_slam_turn_rejects_missing_sector_before_motor_command(self):
         status = {
