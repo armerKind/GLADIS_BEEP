@@ -457,7 +457,8 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(bridge.choose_fluent_steering(tight_curve, current_action="curveleft"), "forward")
 
     def test_fluent_motion_changes_yaw_without_stop(self):
-        with patch.object(bridge, "motor_send") as motor, \
+        with patch.object(bridge, "MOTOR_BACKEND", "sdk"), \
+             patch.object(bridge, "motor_send") as motor, \
              patch.object(bridge, "sdk_curve") as curve, \
              patch.object(bridge, "sdk_straighten") as straighten:
             action, changed = bridge.start_or_update_fluent_motion(None, "forward", step=20)

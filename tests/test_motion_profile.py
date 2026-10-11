@@ -111,8 +111,8 @@ class MotionProfileTests(unittest.TestCase):
                          "BEEP_SDK_BODY_HEIGHT", "BEEP_SDK_SHOULDER_YAW", "BEEP_SDK_IMU"):
             self.assertIn(expected, service)
             self.assertIn(expected, deploy)
-        self.assertIn("Environment=BEEP_MOTOR_BACKEND=sdk", service)
-        self.assertIn("'BEEP_MOTOR_BACKEND': 'sdk'", deploy)
+        self.assertIn("Environment=BEEP_MOTOR_BACKEND=app", service)
+        self.assertIn("'BEEP_MOTOR_BACKEND': 'app'", deploy)
         self.assertIn("Environment=BEEP_SDK_GAIT=firmware", service)
         self.assertIn("'BEEP_SDK_GAIT': 'firmware'", deploy)
         self.assertIn("beep-bridge.service", deploy)

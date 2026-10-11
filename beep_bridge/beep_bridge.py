@@ -107,7 +107,7 @@ SDK_PACE = os.environ.get("BEEP_SDK_PACE", "normal")
 SDK_BODY_HEIGHT = min(110, max(76, int(os.environ.get("BEEP_SDK_BODY_HEIGHT", "108"))))
 SDK_SHOULDER_YAW = min(10, max(-10, int(os.environ.get("BEEP_SDK_SHOULDER_YAW", "0"))))
 SDK_IMU = 1 if os.environ.get("BEEP_SDK_IMU", "0").strip().lower() in ("1", "true", "yes", "on") else 0
-MOTOR_BACKEND = os.environ.get("BEEP_MOTOR_BACKEND", "sdk")  # sdk or app
+MOTOR_BACKEND = os.environ.get("BEEP_MOTOR_BACKEND", "app")  # app-parity locomotion; sdk is explicit opt-in
 MAP_DIR = Path(os.environ.get("BEEP_MAP_DIR", "/home/pi/beep_bridge/maps"))
 MAP_RES_M = float(os.environ.get("BEEP_MAP_RES_M", "0.05"))
 MAP_SIZE_M = float(os.environ.get("BEEP_MAP_SIZE_M", "8.0"))
@@ -156,7 +156,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.20.2-race-safe-deploy",
+    "version": "0.20.3-vendor-app-reverse",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,

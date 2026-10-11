@@ -100,12 +100,13 @@ profile. On a full battery and clear level floor:
 This isolates posture from navigation policy. It also prevents the traditional
 robotics method of changing five variables and learning nothing.
 
-Require `/health` field `status.version == "0.20.2-race-safe-deploy"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
+Require `/health` field `status.version == "0.20.3-vendor-app-reverse"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
 
 The Jupyter deployment helper uploads and installs the checked-in systemd unit,
 runs `daemon-reload`, explicitly restarts the service, and rejects a live `/config`
-that does not match the SDK posture baseline. Both systemd and the legacy fallback
-select `BEEP_MOTOR_BACKEND=sdk`. The selected backend owns the complete
+that does not match the configured motion profile. Both systemd and the legacy fallback
+select `BEEP_MOTOR_BACKEND=app`, matching the vendor app's control protocol for the
+entire locomotion lease, including reverse. The selected backend owns the complete
 motion lease. The alternate backend is contacted only if the owner's repeated
 stop attempts fail; it is not used for ordinary steering or successful stops.
 

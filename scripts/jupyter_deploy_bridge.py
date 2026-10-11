@@ -170,8 +170,8 @@ if svc.returncode == 0:
     if active.stdout.strip() != 'active':
         raise SystemExit('beep-bridge did not become active')
     config = json.load(urllib.request.urlopen('http://127.0.0.1:8766/config', timeout=5))
-    expected = {'version': '0.20.2-race-safe-deploy',
-                'motor_backend': 'sdk', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
+    expected = {'version': '0.20.3-vendor-app-reverse',
+                'motor_backend': 'app', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
                 'sdk_body_height': 108, 'sdk_shoulder_yaw': 0, 'sdk_imu': 0}
     mismatches = {key: {'expected': value, 'actual': config.get(key)}
                   for key, value in expected.items() if config.get(key) != value}
@@ -187,7 +187,7 @@ else:
         'BEEP_APP_HOST': '192.168.8.88',
         'BEEP_CAMERA_URL': 'http://192.168.8.88:6500/video_feed',
         'BEEP_FORWARD_UNTIL_MAX_S': '12',
-        'BEEP_MOTOR_BACKEND': 'sdk',
+        'BEEP_MOTOR_BACKEND': 'app',
         'BEEP_SDK_STEP': '10',
         'BEEP_SDK_GAIT': 'firmware',
         'BEEP_SDK_PACE': 'normal',
