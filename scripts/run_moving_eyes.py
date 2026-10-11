@@ -20,6 +20,7 @@ from beep_eyes.contact_sheet import fetch_json
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
 from beep_eyes.policy import evaluate_proposal
+from beep_eyes.course import recommend_course
 from beep_eyes.schema import validate_perception_response
 
 
@@ -157,9 +158,21 @@ def main() -> int:
                 "dispatch_performed": False,
             }
             session.save(session_path)
-            policy = evaluate_proposal(response, packet["bridge_status"], mode="shadow")
+            latest_status = fetch_json(args.base_url, "/status", args.timeout)
+            latest_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
+            mission_valid = (
+                isinstance(latest_mission, dict)
+                and latest_mission.get("id") == current_mission_id
+                and latest_mission.get("state") in {"starting", "running"}
+            )
+            course = recommend_course(response, latest_status, mission_valid=mission_valid)
+            policy = evaluate_proposal(response, latest_status, mode="shadow")
+            semantic["camera_assisted_course"] = course
+            semantic["dispatch_performed"] = False
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
             write_window(window_dir, frames, sheet, packet, response, policy, semantic)
+            (window_dir / "course_recommendation.json").write_text(
+                json.dumps(course, indent=2, sort_keys=True))
             event = {
                 "window": inference_count,
                 "latest_frame_id": requested_latest,
@@ -168,6 +181,8 @@ def main() -> int:
                 "scene": response["scene"]["summary"],
                 "confidence": response["confidence"],
                 "next_skill": semantic["next_decision"]["skill_call"]["name"],
+                "course_recommendation": course["recommendation"],
+                "course_reason": course["reason"],
                 "dispatch_performed": False,
             }
             with trace_path.open("a") as trace:

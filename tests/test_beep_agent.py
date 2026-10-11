@@ -79,6 +79,17 @@ class ExecutiveTests(unittest.TestCase):
         self.assertEqual(decision.skill_call.arguments["duration_s"], 90)
         self.assertIn("planning ahead", decision.skill_call.arguments["reason"])
 
+    def test_shared_space_person_keeps_search_goal_and_requests_reroute(self):
+        response = json.loads((Path(__file__).parent / "fixtures" / "eyes_response.json").read_text())
+        response["scene"]["hazards"].append({
+            "type": "person", "description": "person in current route", "position": "center", "confidence": 0.95,
+        })
+        self.world.update(response, observed_at=1.0, packet_id="shared-space")
+        decision = EmbodiedExecutive(self.world, EmbodiedGoal("find", "green cap")).decide()
+        self.assertEqual(decision.skill_call.name, "explore")
+        self.assertEqual(decision.rationale, "shared_space_re_route")
+        self.assertIn("green cap", decision.skill_call.arguments["reason"])
+
 
 class AgentSessionTests(unittest.TestCase):
     def near_response(self):

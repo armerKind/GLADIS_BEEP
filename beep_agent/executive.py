@@ -56,7 +56,12 @@ class EmbodiedExecutive:
             if hazard["position"] == "center" and float(hazard["confidence"]) >= 0.5 and hazard["type"] in {"person", "animal", "vehicle"}
         }
         if central_living_hazards:
-            return self._decision(None, skill("observe", reason="A living or moving hazard occupies the intended path."), "yield_to_living_hazard")
+            return self._decision(
+                None,
+                skill("explore", duration_s=90,
+                      reason=f"Yield to shared-space traffic and choose a validated alternate route while continuing the search for {self.goal.target_query}."),
+                "shared_space_re_route",
+            )
 
         if self.goal.name == "acknowledge_person":
             person = self.world.find_person(self.goal.target_query)
