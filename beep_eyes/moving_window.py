@@ -13,7 +13,8 @@ import threading
 import time
 from typing import Any
 
-from .contact_sheet import CapturedFrame, build_contact_sheet, fetch_jpeg, fetch_json, frame_quality
+from .contact_sheet import (CapturedFrame, build_navigation_contact_sheet, fetch_jpeg, fetch_json,
+                            frame_quality, summarize_navigation_context)
 
 PANEL_COUNTS = frozenset({4, 6, 9})
 
@@ -33,6 +34,14 @@ class MovingFrameSample:
                 "motion_lease_id": status.get("motion_lease_id"),
                 "last_command": status.get("last_command"),
                 "scan_age_s": status.get("scan_age_s"),
+            },
+            "pose": status.get("pose"),
+            "localization": {
+                "pose_valid": (status.get("slam") or {}).get("pose_valid"),
+                "usable": (status.get("slam") or {}).get("usable"),
+                "pose_age_s": (status.get("slam") or {}).get("pose_age_s"),
+                "map_age_s": (status.get("slam") or {}).get("map_age_s"),
+                "pose_guard_reason": (status.get("slam") or {}).get("pose_guard_reason"),
             },
         }
 
@@ -151,27 +160,33 @@ class ContinuousMovingCapture:
                 "buffered": len(self.ring),
             }
 
-    def temporal_window(self, count: int = 9) -> tuple[list[CapturedFrame], bytes, dict[str, Any]]:
+    def temporal_window(self, count: int = 9, *, slam_map: dict[str, Any] | None = None) -> tuple[list[CapturedFrame], bytes, dict[str, Any]]:
         samples = self.ring.latest(count)
         frames = [sample.frame for sample in samples]
         metadata = []
         for index, sample in enumerate(samples):
             metadata.append(sample.metadata(frames[index - 1] if index else None))
         latest_status = samples[-1].bridge_status
+        frame_statuses = [sample.bridge_status for sample in samples]
         packet = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "capture_mode": "moving_temporal_ring",
             "captured_at": frames[-1].captured_at,
             "panel_count": count,
             "frame_span_s": round(frames[-1].captured_at - frames[0].captured_at, 3),
             "frames": metadata,
             "bridge_status": latest_status,
+            "navigation_context": summarize_navigation_context(latest_status, slam_map),
             "capture_stats": self.stats(),
             "evidence_policy": {
                 "chronological": True,
                 "motion_blur_tolerated": True,
                 "missing_single_frame_is_not_a_stop_reason": True,
+                "map_pose_heading_are_visualized_in_contact_sheet": True,
             },
         }
         columns = 2 if count == 4 else 3
-        return frames, build_contact_sheet(frames, columns=columns), packet
+        panel = build_navigation_contact_sheet(
+            frames, frame_statuses=frame_statuses, current_status=latest_status,
+            slam_map=slam_map, columns=columns)
+        return frames, panel, packet

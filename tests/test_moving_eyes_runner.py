@@ -34,14 +34,27 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 if self.path.startswith("/frame.jpg"):
                     body = frame
                     content_type = "image/jpeg"
+                elif self.path == "/slam_map":
+                    body = json.dumps({
+                        "ok": True, "frame_id": "map", "width": 4, "height": 4,
+                        "resolution_m": 0.1, "origin_x": -0.2, "origin_y": -0.2,
+                        "origin_yaw": 0.0, "map_age_s": 0.1, "known_cells": 12,
+                        "occupied_cells": 4,
+                        "data": [0, 0, 100, 100, -1, -1, 50, 100,
+                                 0, 0, -1, -1, 0, 0, 0, 100],
+                    }).encode()
+                    content_type = "application/json"
                 elif self.path == "/status":
                     body = json.dumps({
                         "moving": True,
                         "motion_lease_id": "lease-1",
                         "last_command": "forward",
                         "scan_age_s": 0.02,
+                        "pose": {"x": 0.1, "y": 0.2, "yaw": 0.3, "confidence": 0.9,
+                                 "source": "guarded_cartographer_slam"},
                         "sectors": {"front": 1.2},
-                        "slam": {"usable": True},
+                        "slam": {"usable": True, "pose_valid": True, "pose_age_s": 0.03,
+                                 "map_age_s": 0.1, "pose_guard_reason": "moving_update"},
                     }).encode()
                     content_type = "application/json"
                 elif self.path == "/mission":
@@ -98,6 +111,12 @@ class MovingEyesRunnerTests(unittest.TestCase):
                              for window in sorted(windows)]
                 self.assertEqual(packet["capture_mode"], "moving_temporal_ring")
                 self.assertEqual(len(packet["frames"]), 4)
+                self.assertTrue(packet["navigation_context"]["map_available"])
+                self.assertTrue(packet["navigation_context"]["pose_valid"])
+                self.assertAlmostEqual(packet["navigation_context"]["view_heading_deg"], 17.2, places=1)
+                self.assertTrue(Path(packet["artifacts"]["slam_map"]).exists())
+                with Image.open(run / windows[0].name / "contact_sheet.jpg") as panel:
+                    self.assertEqual(panel.size, (960, 1160))
                 self.assertFalse(semantics[0]["dispatch_performed"])
                 self.assertFalse(semantics[0]["camera_assisted_course"]["dispatch_performed"])
                 self.assertEqual(semantics[0]["camera_assisted_course"]["recommendation"], "hold_and_reobserve")

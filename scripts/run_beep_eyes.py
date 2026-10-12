@@ -11,7 +11,9 @@ import time
 import uuid
 from pathlib import Path
 
-from beep_eyes.contact_sheet import build_contact_sheet, capture_sequence, fetch_json, load_replay_sequence, write_capture_artifacts
+from beep_eyes.contact_sheet import (build_navigation_contact_sheet, capture_sequence, fetch_json,
+                                     fetch_slam_map, load_replay_sequence, summarize_navigation_context,
+                                     write_capture_artifacts)
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.policy import evaluate_proposal
 from beep_eyes.schema import validate_perception_response
@@ -39,10 +41,28 @@ def main() -> int:
     output_dir = args.output_root / run_id
     if args.replay_dir:
         frames, status = load_replay_sequence(args.replay_dir, args.frames)
+        map_path = args.replay_dir / "slam_map.json"
+        if map_path.exists():
+            slam_map = json.loads(map_path.read_text())
+        else:
+            slam_map = {"ok": False, "reason": "replay_slam_map_missing"}
     else:
         frames, status = capture_sequence(args.base_url, args.frames, args.interval, args.timeout)
-    contact_sheet = build_contact_sheet(frames)
+        try:
+            slam_map = fetch_slam_map(args.base_url, args.timeout)
+        except Exception as exc:
+            slam_map = {"ok": False, "reason": f"fetch_failed:{type(exc).__name__}"}
+    frame_statuses = [status for _ in frames]
+    contact_sheet = build_navigation_contact_sheet(
+        frames, frame_statuses=frame_statuses, current_status=status, slam_map=slam_map,
+        columns=2 if len(frames) <= 4 else 3)
     packet = write_capture_artifacts(output_dir, frames, status, contact_sheet)
+    packet["navigation_context"] = summarize_navigation_context(status, slam_map)
+    if isinstance(slam_map, dict) and slam_map.get("ok") is True:
+        saved_map = output_dir / "slam_map.json"
+        saved_map.write_text(json.dumps(slam_map, separators=(",", ":")))
+        packet["artifacts"]["slam_map"] = str(saved_map)
+    (output_dir / "observation_packet.json").write_text(json.dumps(packet, indent=2, sort_keys=True))
     prompt_packet = {key: value for key, value in packet.items() if key != "artifacts"}
 
     if args.mock_response:

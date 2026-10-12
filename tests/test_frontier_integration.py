@@ -44,6 +44,29 @@ class FrontierIntegrationTests(unittest.TestCase):
             bridge.motion_lease_watchdog(lease)
         stop.assert_not_called()
 
+    def test_slam_map_http_endpoint_exports_authoritative_grid(self):
+        grid = OccupancyGrid(2, 2, 0.05, -0.1, -0.1, [0, 50, -1, 100])
+        server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with patch.object(bridge, "slam_grid", grid), patch.object(
+                bridge, "snapshot", return_value={"slam": {"map_age_s": 0.2, "map_at": 123.0,
+                                                              "frame_id": "cartographer_map",
+                                                              "known_cells": 3, "occupied_cells": 2}}
+            ):
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/slam_map", timeout=1.0) as response:
+                    payload = json.load(response)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["frame_id"], "cartographer_map")
+            self.assertEqual((payload["width"], payload["height"]), (2, 2))
+            self.assertEqual(payload["data"], [0, 50, -1, 100])
+            self.assertEqual(payload["map_age_s"], 0.2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(1.0)
+
     def test_camera_capture_during_motion_never_sends_app_stop(self):
         jpeg = b"\xff\xd8moving-frame\xff\xd9"
         control_socket = MagicMock()

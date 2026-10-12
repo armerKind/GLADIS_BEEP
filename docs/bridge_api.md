@@ -50,6 +50,7 @@ Cartographer's five-second stationary motion filter can make the generic `slam.a
 | `GET /frame.jpg` | Single JPEG; active leases bypass app-control preparation so capture cannot inject a motor stop |
 | `GET /camera.jpg` | Camera alias |
 | `GET /observe` | Status plus legacy map and camera metadata |
+| `GET /slam_map` | Current authoritative Cartographer occupancy grid with origin pose, resolution, age, and cells |
 | `GET /local_map` | Robot-frame local safety-map summary |
 | `GET /local_map.svg` | Robot-frame local map rendering |
 
@@ -339,6 +340,7 @@ Coverage returns:
 |---|---|
 | `GET /map` | Legacy bridge-map summary |
 | `GET /map?full=1` | Full legacy sparse map |
+| `GET /slam_map` | Authoritative ROS occupancy grid (flat row-major data; `-1` unknown, `0..49` free, `50..100` occupied) plus origin and freshness |
 | `GET /map.svg` | Legacy map rendering |
 | `GET /map_reset?name=<room>` | Reset legacy pose/map only |
 | `POST /map_reset` | Reset legacy pose/map with JSON pose/name |

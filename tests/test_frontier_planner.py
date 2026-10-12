@@ -11,6 +11,11 @@ from beep_bridge.frontier_planner import (
 
 
 class FrontierPlannerTests(unittest.TestCase):
+    def test_rotated_map_origin_round_trips_world_and_cell_coordinates(self):
+        grid = OccupancyGrid(8, 8, 0.1, 1.0, -2.0, [-1] * 64, origin_yaw=math.pi / 2)
+        cell = (3, 5)
+        self.assertEqual(grid.world_to_cell(*grid.cell_to_world(cell)), cell)
+
     def room_grid(self):
         width = height = 15
         data = [-1] * (width * height)

@@ -10,12 +10,13 @@ TURN_DURATION_SCALE = 2.0
 
 
 class OccupancyGrid:
-    def __init__(self, width, height, resolution, origin_x, origin_y, data):
+    def __init__(self, width, height, resolution, origin_x, origin_y, data, origin_yaw=0.0):
         self.width = int(width)
         self.height = int(height)
         self.resolution = float(resolution)
         self.origin_x = float(origin_x)
         self.origin_y = float(origin_y)
+        self.origin_yaw = float(origin_yaw)
         self.data = tuple(int(v) for v in data)
         if len(self.data) != self.width * self.height:
             raise ValueError("occupancy data size does not match width*height")
@@ -29,13 +30,18 @@ class OccupancyGrid:
         return self.data[int(y) * self.width + int(x)]
 
     def world_to_cell(self, x, y):
-        return (int(math.floor((float(x) - self.origin_x) / self.resolution + 1e-9)),
-                int(math.floor((float(y) - self.origin_y) / self.resolution + 1e-9)))
+        dx, dy = float(x) - self.origin_x, float(y) - self.origin_y
+        c, s = math.cos(self.origin_yaw), math.sin(self.origin_yaw)
+        local_x, local_y = c * dx + s * dy, -s * dx + c * dy
+        return (int(math.floor(local_x / self.resolution + 1e-9)),
+                int(math.floor(local_y / self.resolution + 1e-9)))
 
     def cell_to_world(self, cell):
         x, y = cell
-        return (self.origin_x + (x + 0.5) * self.resolution,
-                self.origin_y + (y + 0.5) * self.resolution)
+        local_x, local_y = (x + 0.5) * self.resolution, (y + 0.5) * self.resolution
+        c, s = math.cos(self.origin_yaw), math.sin(self.origin_yaw)
+        return (self.origin_x + c * local_x - s * local_y,
+                self.origin_y + s * local_x + c * local_y)
 
 
 _NEIGHBORS_4 = ((1, 0), (-1, 0), (0, 1), (0, -1))

@@ -105,7 +105,10 @@ class GeminiVisionClient:
     def analyze(self, packet: dict[str, Any], contact_sheet_jpeg: bytes, latest_frame_jpeg: bytes) -> dict[str, Any]:
         prompt = (
             "You are the visual perception route for BEEP, a quadruped robot. "
-            "The first image is a chronological contact sheet; the second is the latest full frame. "
+            "The first image is a chronological camera contact sheet with a top-down Cartographer map/context band; the second is the latest full-resolution camera frame. "
+            "In the context band, white means observed free, black occupied, and gray unknown; blue numbered markers trace the matching camera frames and the red arrow marks the latest body-forward/camera-axis estimate. "
+            "Read per-frame position/yaw labels only when SLAM pose is explicitly valid. If the map is labelled stale/unavailable or pose is invalid, do not infer a current robot location or view direction from it. "
+            "The camera axis is approximated by body yaw; optical pan/tilt and lens field of view are not calibrated. "
             "The metadata declares whether the camera was moving. During moving capture, expect viewpoint change, vibration, and occasional blur; "
             "use agreement across the chronological panels and the sharpest supported evidence rather than rejecting the whole window. "
             "Do not request a stop merely because one panel is blurred, and do not misclassify normal camera motion as an independently moving hazard. "

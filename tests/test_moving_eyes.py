@@ -56,7 +56,7 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
                 CapturedFrame(f"m{index:06d}", 100.0 + index, jpeg((index * 10, 20, 30))),
                 {"moving": True, "motion_lease_id": "lease-1"},
             ))
-        for count, expected_size in ((6, (1440, 780)), (9, (1440, 1170))):
+        for count, expected_size in ((6, (1440, 1160)), (9, (1440, 1560))):
             frames, panel, packet = capture.temporal_window(count)
             self.assertEqual(len(frames), count)
             self.assertEqual(packet["panel_count"], count)
@@ -87,7 +87,7 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
         self.assertTrue(packet["bridge_status"]["moving"])
         self.assertTrue(packet["evidence_policy"]["motion_blur_tolerated"])
         image = Image.open(io.BytesIO(panel))
-        self.assertEqual(image.size, (960, 780))
+        self.assertEqual(image.size, (960, 1160))
 
 
 if __name__ == "__main__":

@@ -170,7 +170,7 @@ if svc.returncode == 0:
     if active.stdout.strip() != 'active':
         raise SystemExit('beep-bridge did not become active')
     config = json.load(urllib.request.urlopen('http://127.0.0.1:8766/config', timeout=5))
-    expected = {'version': '0.20.3-vendor-app-reverse',
+    expected = {'version': '0.20.4-slam-map-panel',
                 'motor_backend': 'app', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
                 'sdk_body_height': 108, 'sdk_shoulder_yaw': 0, 'sdk_imu': 0}
     mismatches = {key: {'expected': value, 'actual': config.get(key)}
@@ -178,6 +178,13 @@ if svc.returncode == 0:
     print('bridge_config', json.dumps(config, sort_keys=True))
     if mismatches:
         raise SystemExit('deployed bridge profile mismatch: ' + json.dumps(mismatches, sort_keys=True))
+    try:
+        slam_map = json.load(urllib.request.urlopen('http://127.0.0.1:8766/slam_map', timeout=5))
+    except Exception as exc:
+        raise SystemExit(f'/slam_map endpoint check failed: {type(exc).__name__}')
+    if not isinstance(slam_map, dict) or 'ok' not in slam_map:
+        raise SystemExit('/slam_map returned an invalid schema')
+    print('slam_map_endpoint', 'grid-ready' if slam_map.get('ok') else 'route-live/map-pending')
 else:
     log = open(base/'logs'/'bridge.log', 'ab', buffering=0)
     env = os.environ.copy()

@@ -16,7 +16,7 @@ import time
 import uuid
 
 from beep_agent import AgentSession, EmbodiedGoal
-from beep_eyes.contact_sheet import fetch_json
+from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
 from beep_eyes.policy import evaluate_proposal
@@ -64,11 +64,18 @@ def gemini_client(args: argparse.Namespace) -> GeminiVisionClient:
 
 
 def write_window(directory: Path, frames, contact_sheet: bytes, packet: dict, response: dict,
-                 decision: dict, semantic: dict) -> None:
+                 decision: dict, semantic: dict, slam_map: dict | None = None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for frame in frames:
         (directory / f"{frame.frame_id}.jpg").write_bytes(frame.jpeg)
     (directory / "contact_sheet.jpg").write_bytes(contact_sheet)
+    artifacts = {"contact_sheet": str(directory / "contact_sheet.jpg"),
+                 "latest_frame": str(directory / f"{frames[-1].frame_id}.jpg")}
+    if isinstance(slam_map, dict) and slam_map.get("ok") is True:
+        map_path = directory / "slam_map.json"
+        map_path.write_text(json.dumps(slam_map, separators=(",", ":")))
+        artifacts["slam_map"] = str(map_path)
+    packet["artifacts"] = artifacts
     (directory / "observation_packet.json").write_text(json.dumps(packet, indent=2, sort_keys=True))
     (directory / "model_response.json").write_text(json.dumps(response, indent=2, sort_keys=True))
     (directory / "policy_decision.json").write_text(json.dumps(decision, indent=2, sort_keys=True))
@@ -126,7 +133,11 @@ def main() -> int:
                 not isinstance(mission, dict) or mission.get("state") not in {"starting", "running"}
             ):
                 break
-            frames, sheet, packet = capture.temporal_window(args.panel)
+            try:
+                slam_map = fetch_slam_map(args.base_url, args.timeout)
+            except Exception as exc:
+                slam_map = {"ok": False, "reason": f"fetch_failed:{type(exc).__name__}"}
+            frames, sheet, packet = capture.temporal_window(args.panel, slam_map=slam_map)
             packet["mission"] = mission
             requested_latest = frames[-1].frame_id
             started_at = time.time()
@@ -170,7 +181,7 @@ def main() -> int:
             semantic["camera_assisted_course"] = course
             semantic["dispatch_performed"] = False
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
-            write_window(window_dir, frames, sheet, packet, response, policy, semantic)
+            write_window(window_dir, frames, sheet, packet, response, policy, semantic, slam_map)
             (window_dir / "course_recommendation.json").write_text(
                 json.dumps(course, indent=2, sort_keys=True))
             event = {

@@ -156,7 +156,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.20.3-vendor-app-reverse",
+    "version": "0.20.4-slam-map-panel",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -861,6 +861,8 @@ def occupancy_callback(msg):
     data = list(msg.data)
     known = sum(1 for value in data if int(value) >= 0)
     occupied = sum(1 for value in data if int(value) >= 50)
+    origin_q = msg.info.origin.orientation
+    origin_yaw = quaternion_to_yaw(float(origin_q.x), float(origin_q.y), float(origin_q.z), float(origin_q.w))
     slam_grid = FrontierGrid(
         int(msg.info.width),
         int(msg.info.height),
@@ -868,12 +870,14 @@ def occupancy_callback(msg):
         float(msg.info.origin.position.x),
         float(msg.info.origin.position.y),
         data,
+        origin_yaw=origin_yaw,
     )
     with state_lock:
         slam = dict(state.get("slam") or {})
         slam.update({
             "map_at": now,
             "map_age_s": 0.0,
+            "frame_id": str(getattr(msg.header, "frame_id", "") or "map"),
             "map_width": int(msg.info.width),
             "map_height": int(msg.info.height),
             "resolution_m": float(msg.info.resolution),
@@ -1748,6 +1752,29 @@ def slam_grid_copy():
     # FrontierGrid is immutable after construction, so sharing the latest complete
     # callback snapshot is atomic enough under CPython and avoids copying thousands of cells.
     return slam_grid
+
+
+def slam_map_snapshot():
+    """Export the authoritative Cartographer occupancy grid for visual context."""
+    grid = slam_grid_copy()
+    if grid is None:
+        return {"ok": False, "reason": "slam_grid_unavailable"}
+    slam = snapshot().get("slam") or {}
+    return {
+        "ok": True,
+        "frame_id": slam.get("frame_id") or "map",
+        "width": grid.width,
+        "height": grid.height,
+        "resolution_m": grid.resolution,
+        "origin_x": grid.origin_x,
+        "origin_y": grid.origin_y,
+        "origin_yaw": grid.origin_yaw,
+        "data": list(grid.data),
+        "map_at": slam.get("map_at"),
+        "map_age_s": slam.get("map_age_s"),
+        "known_cells": slam.get("known_cells"),
+        "occupied_cells": slam.get("occupied_cells"),
+    }
 
 
 def save_frontier_trace(name, result):
@@ -3045,6 +3072,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,
                                     "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD)},
                                 "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
+                                "maps": {"authoritative_slam_grid": "/slam_map", "bridge_trace": "/map?full=1", "robot_frame_scan": "/local_map"},
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
                                 "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "modes": ["coverage", "local"]},
@@ -3067,6 +3095,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(local_map_svg(), "image/svg+xml")
             elif p.path == "/map":
                 self.send_json({"summary": map_summary(room_map), "map": room_map if (qs.get("full") or ["0"])[0] == "1" else None})
+            elif p.path == "/slam_map":
+                self.send_json(slam_map_snapshot())
             elif p.path == "/map.svg":
                 self.send_bytes(map_svg(room_map), "image/svg+xml")
             elif p.path == "/pose":
@@ -3163,7 +3193,7 @@ class Handler(BaseHTTPRequestHandler):
                     save=(qs.get("save") or ["1"])[0] != "0", dry_run=dry)
                 self.send_json(callback() if dry else run_owned_motion("http_get_frontier_explore", callback, max_duration=duration + 2.0))
             else:
-                self.send_json({"error": "not found", "paths": ["/health", "/status", "/mission", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/slam_turn", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
+                self.send_json({"error": "not found", "paths": ["/health", "/status", "/mission", "/last_run", "/config", "/events", "/scan", "/observe", "/frame.jpg", "/stop", "/move", "/actions", "/action", "/mark_object", "/slam_turn", "/forward_until", "/explore_room", "/lidar_walk", "/frontier_explore", "/coverage_explore", "/map", "/slam_map", "/map.svg", "/local_map", "/local_map.svg", "/pose"]}, 404)
         except MotionBusy as e:
             lease = active_motion_lease()
             self.send_json({"ok": False, "error": str(e), "busy": True,

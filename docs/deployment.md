@@ -2,7 +2,7 @@
 
 ## Source and deployment state
 
-Repository bridge source and verified deployment are `0.17.3-moving-camera-handshake`. Asynchronous exact-ID mission cancellation, camera-timeout isolation, and four-frame moving temporal Gemini perception passed the powered gate. Host-side `beep_agent`, `beep_eyes`, and runner scripts execute on GLADIS and are not uploaded by the bridge deployment helper.
+Last verified live bridge was `0.20.3-vendor-app-reverse`. Repository source is now `0.20.4-slam-map-panel`, adding a `/slam_map` Cartographer export for LLM panels; it has not been deployed or power-tested because BEEP's battery is depleted. Host-side `beep_agent`, `beep_eyes`, and runner scripts execute on GLADIS and are not uploaded by the bridge deployment helper.
 
 ## Pi paths
 
@@ -25,7 +25,7 @@ YahboomStart.service
 tailscaled.service
 ```
 
-The repository units are in `systemd/`. The bridge service sources ROS 2 Foxy and the Cartographer overlay, uses `ROS_DOMAIN_ID=16`, selects the SDK motor backend, and restarts automatically.
+The repository units are in `systemd/`. The bridge service sources ROS 2 Foxy and the Cartographer overlay, uses `ROS_DOMAIN_ID=16`, and the last verified live bridge selected the vendor app motor backend. The new source is not deployed yet.
 
 `YahboomStart.service` is the authoritative vendor launch for the MS200 LiDAR on `/dev/ttyAMA1`. Keep the redundant `XGO_Start.service` disabled: both vendor units launch `oradar_scan`, and two publishers competing for the same serial port can leave `/scan` advertised but silent.
 
@@ -100,7 +100,7 @@ profile. On a full battery and clear level floor:
 This isolates posture from navigation policy. It also prevents the traditional
 robotics method of changing five variables and learning nothing.
 
-Require `/health` field `status.version == "0.20.3-vendor-app-reverse"`, `status.moving == false`, and no active motion lease before proceeding. A successful upload without matching live version is not a deployment. It is file transfer with aspirations.
+Before declaring the current repository source deployed, require `/health` field `status.version == "0.20.4-slam-map-panel"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema (a pending map is acceptable at service startup). The last verified live bridge was `0.20.3-vendor-app-reverse`. A successful upload without these checks is not a deployment. It is file transfer with aspirations.
 
 The Jupyter deployment helper uploads and installs the checked-in systemd unit,
 runs `daemon-reload`, explicitly restarts the service, and rejects a live `/config`

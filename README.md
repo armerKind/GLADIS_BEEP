@@ -24,9 +24,9 @@ Release `0.19.3-fluent-steering` keeps compatible gait active while alternating 
 
 Historical note: the final powered run removed the forced high-walk/width-100 setup and showed that GLADIS's guessed negative analog value did not yet reproduce app reverse. That blocker is superseded by the later packet capture and `0.20.3-vendor-app-reverse` bridge configuration below; the app-backed bridge path still needs a guarded physical validation.
 
-Current bridge `0.20.3-vendor-app-reverse` selects the vendor app protocol as the single locomotion owner for each lease. A captured manual reverse session repeatedly sent analog command `0x11` with a full negative reverse axis (`0x9C`, signed -100); the bridge's `backward` action now uses that app path and the same normal/control-mode setup, while preserving the existing continuous LiDAR/SLAM supervisor. This is protocol parity plus known-good manual app evidence—not yet a physical bridge-reverse validation. SDK locomotion is explicit opt-in; leases do not mix backends, and the alternate backend is used only as a stop fallback after the active backend fails. Exact physical body height remains a commissioning measurement, not an offline assertion wearing a lab coat.
+Last verified live bridge was `0.20.3-vendor-app-reverse`, which uses the vendor app protocol as the single locomotion owner for each lease. The repository now contains offline source `0.20.4-slam-map-panel`: it exposes the authoritative Cartographer grid at `/slam_map` and appends map, per-frame pose, and body-forward/view-heading context to the LLM contact sheet. The new panel/endpoint have offline tests only and were not deployed or hardware-tested; BEEP's battery is depleted per the user's report. The camera lens FOV and optical pan/tilt remain uncalibrated.
 
-Current source implements the following. Core locomotion, mapping, asynchronous missions, exact cancellation, stationary and four-frame moving temporal vision, microphone, and speaker paths have been exercised on BEEP.
+Existing core locomotion, mapping, asynchronous missions, exact cancellation, camera, microphone, and speaker paths have been exercised on BEEP. The new map-context panel and `/slam_map` export are currently verified offline only.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers
@@ -41,6 +41,7 @@ Current source implements the following. Core locomotion, mapping, asynchronous 
 - coverage-driven room exploration that stops when mapped known-space growth plateaus
 - asynchronous guarded missions with responsive status/cancellation and an independent lease-deadline watchdog
 - continuous moving-camera capture into bounded chronological 4/6/9-frame panels without app-level motor-stop injection
+- LLM panels include the Cartographer occupancy grid, per-frame guarded poses/view yaw, and a current heading marker; invalid/stale localization is explicitly marked, and lens FOV is not claimed
 - optional local external-camera observer contracts with record-only default and authenticated exact-mission stop authority
 - strict Gemini semantic perception, mission-bound persistent agent sessions, autonomous drive arbitration, atomic resume snapshots, and typed body-adapter dispatch
 - Jupyter-based deployment, SLAM reset/export, diagnostics, and speaker playback helpers
@@ -107,6 +108,10 @@ GET /coverage_explore           explore until guarded map growth plateaus
 GET /action?name=stretch        named vendor preset
 GET /mark_object?dry_run=1      preview approach → turn sideways → pee sequence
 GET /frame.jpg                  camera frame
+GET /map                        legacy bridge-map summary; `?full=1` returns sparse bridge trace
+GET /slam_map                   authoritative Cartographer grid, origin, resolution, age, occupancy
+GET /local_map                  robot-frame local LiDAR safety map
+GET /map.svg                    legacy bridge-map rendering
 ```
 
 See [`docs/bridge_api.md`](docs/bridge_api.md) for parameters and safety semantics.
