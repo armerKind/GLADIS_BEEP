@@ -6,10 +6,12 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 
 ## Current state
 
+**Fresh-agent entry point: [docs/HANDOFF.md](docs/HANDOFF.md).** It records the verified offline checkpoint, unresolved perception-to-action integration, and next acceptance tests. Historical trials below are not current deployment guarantees.
+
 Current repository bridge source:
 
 ```text
-0.19.3-fluent-steering
+0.20.4-slam-map-panel
 ```
 
 Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
@@ -24,9 +26,9 @@ Release `0.19.3-fluent-steering` keeps compatible gait active while alternating 
 
 Historical note: the final powered run removed the forced high-walk/width-100 setup and showed that GLADIS's guessed negative analog value did not yet reproduce app reverse. That blocker is superseded by the later packet capture and `0.20.3-vendor-app-reverse` bridge configuration below; the app-backed bridge path still needs a guarded physical validation.
 
-Last verified live bridge was `0.20.3-vendor-app-reverse`, which uses the vendor app protocol as the single locomotion owner for each lease. Repository source also includes offline-tested map-context panels and `/slam_map`; not deployed. Current live gate: DOGZILLA_WIFI/Tailscale reach the Pi and Jupyter `:8888`; bridge `:8766` and camera `:6500` refuse connections. Jupyter requires authenticated maintenance; direct SSH offers password/public-key auth but no authorized key/login is available. I have not restarted, rebooted, deployed source, or issued movement. Diagnose bridge using a currently authenticated maintenance session, then verify deployed identity, stopped/no-lease, fresh camera, LiDAR/SLAM before navigation. No reboot requested yet.
+Last reported live bridge was `0.20.3-vendor-app-reverse`, using the vendor app protocol as locomotion owner. The preceding Telegram session reported restoring the stopped bridge through authenticated Jupyter without reboot or movement, then verifying stopped/no lease, fresh LiDAR and usable SLAM. These are recovered session reports, not fresh checks in this documentation checkpoint. Repository source includes offline-tested map-context panels and `/slam_map`; those changes remain undeployed.
 
-Existing core locomotion, mapping, asynchronous missions, exact cancellation, camera, microphone, and speaker paths have been exercised on BEEP. The bridge HTTP service is currently down although the Pi's Jupyter service is reachable; current network, service and credential-gate evidence is recorded in `docs/deployment.md`. No robot reboot, bridge restart, source deployment, or motion has occurred in this session.
+Current power/connectivity and sensor state must be rechecked before hardware work. The closed-loop semantic executor is still missing: moving-eyes produces shadow recommendations, not live dispatch. See `docs/HANDOFF.md` for precise gaps and the 195-test offline checkpoint.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers

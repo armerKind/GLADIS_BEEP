@@ -2,7 +2,11 @@
 
 ## Source and deployment state
 
-The last verified live bridge was `0.20.3-vendor-app-reverse`. Repository source is `0.20.4-slam-map-panel`, adding a `/slam_map` Cartographer export and context-rich LLM panel; offline-tested only, not deployed. Live check 2026-11-06: DOGZILLA_WIFI/Tailscale reach the Pi; Jupyter `:8888` responds, bridge `:8766` and camera `:6500` refuse connections. Direct SSH port 22 accepts connections but `pi`/`yahboom` public-key/password authentication is rejected; Tailscale SSH times out. No authorized SSH key or saved Jupyter password was found in the current execution context. Do not guess the vendor password. No robot reboot, service restart, code deployment, or motion has occurred. Continue diagnostics through an already-authorized maintenance session if one exists; if none, ask for the smallest authorization action only after confirming that fact. A reboot is not the first-line repair.
+See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and unresolved executor integration.
+
+Last reported live bridge: `0.20.3-vendor-app-reverse`. Repository source: `0.20.4-slam-map-panel`, adding `/slam_map` and context-rich LLM panels; offline-tested, not deployed. Earlier checks on 2026-11-06 found the bridge and camera unavailable, but the preceding Telegram session subsequently reported restarting only `beep-bridge` through authenticated Jupyter, without reboot or motion. It reported stopped/no lease, fresh LiDAR, and subsequently usable SLAM/map. These are recovered session reports; this handoff did not contact the robot. Recheck current identity, services, camera and sensors rather than treating either historical outage or recovery as current state.
+
+The complete offline suite passed after the final perception edits: 195 tests. This does not establish hardware readiness or a successful cap-search mission. Do not reset SLAM, restart services or reboot without a diagnosed need.
 
 ## Pi paths
 
