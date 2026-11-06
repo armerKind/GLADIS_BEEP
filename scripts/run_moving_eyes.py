@@ -138,6 +138,17 @@ def main() -> int:
             except Exception as exc:
                 slam_map = {"ok": False, "reason": f"fetch_failed:{type(exc).__name__}"}
             frames, sheet, packet = capture.temporal_window(args.panel, slam_map=slam_map)
+            packet["vision_context"] = {
+                "previous_scene_summary": session.world.last_scene_summary,
+                "previous_changes": session.world.last_changes[-4:],
+                "current_frame_diversity": [
+                    {"frame_id": frame.frame_id,
+                     "difference_from_previous": meta["quality"].get("difference_from_previous"),
+                     "brightness": meta["quality"].get("brightness"),
+                     "edge_stddev": meta["quality"].get("edge_stddev")}
+                    for frame, meta in zip(frames, packet["frames"])
+                ],
+            }
             packet["mission"] = mission
             requested_latest = frames[-1].frame_id
             started_at = time.time()

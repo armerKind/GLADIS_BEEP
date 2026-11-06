@@ -58,6 +58,13 @@ def main() -> int:
         columns=2 if len(frames) <= 4 else 3)
     packet = write_capture_artifacts(output_dir, frames, status, contact_sheet)
     packet["navigation_context"] = summarize_navigation_context(status, slam_map)
+    packet["target_search"] = {
+        "target": "green baseball cap",
+        "visual_cues": ["broad crown", "projecting curved brim", "fabric seams or panels"],
+        "false_positives": ["green robot component", "green patch", "green cloth", "green furniture"],
+        "confirmation_rule": "candidate must be distinct from robot and match cap silhouette; changed-angle close view strongly preferred",
+        "confirmed": False,
+    }
     if isinstance(slam_map, dict) and slam_map.get("ok") is True:
         saved_map = output_dir / "slam_map.json"
         saved_map.write_text(json.dumps(slam_map, separators=(",", ":")))

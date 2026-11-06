@@ -2,7 +2,7 @@
 
 ## Source and deployment state
 
-Last verified live bridge was `0.20.3-vendor-app-reverse`. Repository source is now `0.20.4-slam-map-panel`, adding a `/slam_map` Cartographer export for LLM panels; it has not been deployed or power-tested because BEEP's battery is depleted. Host-side `beep_agent`, `beep_eyes`, and runner scripts execute on GLADIS and are not uploaded by the bridge deployment helper.
+The last verified live bridge was `0.20.3-vendor-app-reverse`. Repository source is `0.20.4-slam-map-panel`, adding a `/slam_map` Cartographer export and context-rich LLM panel; offline-tested only, not deployed. Live check 2026-11-06: DOGZILLA_WIFI/Tailscale reach the Pi; Jupyter `:8888` responds, bridge `:8766` and camera `:6500` refuse connections. Direct SSH port 22 accepts connections but `pi`/`yahboom` public-key/password authentication is rejected; Tailscale SSH times out. No authorized SSH key or saved Jupyter password was found in the current execution context. Do not guess the vendor password. No robot reboot, service restart, code deployment, or motion has occurred. Continue diagnostics through an already-authorized maintenance session if one exists; if none, ask for the smallest authorization action only after confirming that fact. A reboot is not the first-line repair.
 
 ## Pi paths
 

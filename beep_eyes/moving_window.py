@@ -177,6 +177,12 @@ class ContinuousMovingCapture:
             "frames": metadata,
             "bridge_status": latest_status,
             "navigation_context": summarize_navigation_context(latest_status, slam_map),
+            "target_search": {
+                "target": "green baseball cap",
+                "visual_cues": ["broad crown", "projecting curved brim", "fabric seams or panels"],
+                "false_positives": ["green robot component", "green patch", "green cloth", "green furniture"],
+                "confirmation_rule": "distinct from robot, matching cap structure across changed views",
+            },
             "capture_stats": self.stats(),
             "evidence_policy": {
                 "chronological": True,

@@ -238,7 +238,7 @@ def summarize_navigation_context(status: dict[str, Any], slam_map: dict[str, Any
         "pose_valid": pose is not None,
         "pose": pose,
         "view_heading_deg": round(math.degrees(pose["yaw"]), 1) if pose is not None else None,
-        "view_axis": "front-camera/body-forward approximation; optical pan/tilt and lens FOV are uncalibrated",
+        "view_axis": "camera optical orientation not independently calibrated; body heading approximation only",
         "pose_guard_reason": (status.get("slam") or {}).get("pose_guard_reason"),
     }
 
@@ -370,7 +370,7 @@ def build_navigation_contact_sheet(
         rendered_sectors.append(f"{label} {rendered}")
     sector_text = "LiDAR m  " + "  ".join(rendered_sectors)
     lines = [grid_text, pose_text,
-             "Red arrow = latest body/camera-forward axis; FOV and camera pan/tilt are uncalibrated.",
+             "Red arrow = body heading only; optical orientation not independently calibrated.",
              "Blue numbered dots = camera-frame poses in chronological order; line = recent path.",
              "Map legend: white free, black occupied, gray unknown; no marker when pose invalid.",
              sector_text,
