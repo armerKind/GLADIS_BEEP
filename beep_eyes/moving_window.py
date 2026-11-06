@@ -118,7 +118,8 @@ class ContinuousMovingCapture:
     def stop(self, timeout_s: float | None = None) -> None:
         self._stop.set()
         thread = self._thread
-        join_timeout = max(5.0, self.timeout_s + 1.0) if timeout_s is None else float(timeout_s)
+        # One capture may be inside three consecutive bounded HTTP requests.
+        join_timeout = max(5.0, 3 * self.timeout_s + 1.0) if timeout_s is None else float(timeout_s)
         if thread is not None:
             thread.join(join_timeout)
         if thread is not None and thread.is_alive():
@@ -128,6 +129,10 @@ class ContinuousMovingCapture:
         next_capture = time.monotonic()
         while not self._stop.is_set():
             try:
+                try:
+                    before = fetch_json(self.base_url, "/status", self.timeout_s)
+                except Exception:
+                    before = {}
                 captured_at = time.time()
                 # Conservative request-start timestamp, never response completion.
                 jpeg = fetch_jpeg(self.base_url, self.timeout_s)
@@ -135,6 +140,12 @@ class ContinuousMovingCapture:
                     status = fetch_json(self.base_url, "/status", self.timeout_s)
                 except Exception as exc:
                     status = {"status_error": f"{type(exc).__name__}: {exc}"}
+                # A post-capture lease alone could belong to a replacement owner.
+                # A missing or changing owner makes this frame advisory only.
+                before_lease = before.get("motion_lease_id") if isinstance(before, dict) else None
+                after_lease = status.get("motion_lease_id")
+                if not before_lease or before_lease != after_lease:
+                    status = dict(status, motion_lease_id=None, capture_ownership_unverified=True)
                 with self._lock:
                     frame_id = f"m{self._sequence:06d}"
                     self._sequence += 1

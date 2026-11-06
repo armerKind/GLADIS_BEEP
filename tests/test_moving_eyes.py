@@ -62,6 +62,21 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
             self.assertEqual(packet["panel_count"], count)
             self.assertEqual(Image.open(io.BytesIO(panel)).size, expected_size)
 
+    def test_frame_owner_must_match_before_and_after_capture(self):
+        for before, after, expected in (("old", "new", None), (None, "new", None),
+                                        ("same", "same", "same")):
+            with self.subTest(before=before, after=after):
+                capture = ContinuousMovingCapture("http://beep", timeout_s=1)
+                def one_frame(*_):
+                    capture._stop.set()
+                    return jpeg()
+                statuses = [{"motion_lease_id": before}, {"motion_lease_id": after}]
+                with patch("beep_eyes.moving_window.fetch_jpeg", side_effect=one_frame), \
+                     patch("beep_eyes.moving_window.fetch_json", side_effect=statuses):
+                    capture._run()
+                sample = capture.ring._frames[0]
+                self.assertEqual(sample.metadata()["motion"]["motion_lease_id"], expected)
+
     def test_capture_continues_while_inference_would_be_running(self):
         status = {
             "moving": True,
