@@ -128,8 +128,9 @@ class ContinuousMovingCapture:
         next_capture = time.monotonic()
         while not self._stop.is_set():
             try:
-                jpeg = fetch_jpeg(self.base_url, self.timeout_s)
                 captured_at = time.time()
+                # Conservative request-start timestamp, never response completion.
+                jpeg = fetch_jpeg(self.base_url, self.timeout_s)
                 try:
                     status = fetch_json(self.base_url, "/status", self.timeout_s)
                 except Exception as exc:

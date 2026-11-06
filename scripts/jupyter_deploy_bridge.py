@@ -8,6 +8,7 @@ Environment variables:
   BEEP_JUPYTER_PASSWORD     default: yahboom
   BEEP_BRIDGE_SRC           default: beep_bridge/beep_bridge.py
   BEEP_PLANNER_SRC          default: beep_bridge/frontier_planner.py
+  BEEP_INTENT_SRC           default: beep_bridge/semantic_intent.py
   BEEP_SLAM_CONFIG_SRC      default: config/beep_2d.lua
   BEEP_SAVE_SLAM_SRC        default: scripts/save_slam_map.sh
   BEEP_SERVICE_SRC          default: systemd/beep-bridge.service
@@ -30,6 +31,7 @@ HOST = os.environ.get("BEEP_HOST", "192.168.8.88")
 PASSWORD = os.environ.get("BEEP_JUPYTER_PASSWORD", "yahboom")
 BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"))
 PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
+INTENT_SRC = Path(os.environ.get("BEEP_INTENT_SRC", "beep_bridge/semantic_intent.py"))
 SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
 SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map.sh"))
 SERVICE_SRC = Path(os.environ.get("BEEP_SERVICE_SRC", "systemd/beep-bridge.service"))
@@ -59,6 +61,7 @@ def login() -> tuple[requests.Session, str]:
 
 def put_bridge(session: requests.Session, xsrf: str) -> None:
     content = BRIDGE_SRC.read_text()
+    intent_content = INTENT_SRC.read_text()  # Fail before changing the remote if missing.
     headers = {"X-XSRFToken": xsrf, "Content-Type": "application/json"}
     # Best-effort backup.
     old = session.get(f"{BASE}/api/contents/beep_bridge/beep_bridge.py?content=1", timeout=8)
@@ -79,6 +82,14 @@ def put_bridge(session: requests.Session, xsrf: str) -> None:
     )
     resp.raise_for_status()
     print("uploaded: /home/pi/beep_bridge/beep_bridge.py")
+    intent_module = session.put(
+        f"{BASE}/api/contents/beep_bridge/semantic_intent.py",
+        headers=headers,
+        json={"type": "file", "format": "text", "content": intent_content},
+        timeout=10,
+    )
+    intent_module.raise_for_status()
+    print("uploaded: /home/pi/beep_bridge/semantic_intent.py")
     if PLANNER_SRC.exists():
         planner = session.put(
             f"{BASE}/api/contents/beep_bridge/frontier_planner.py",
@@ -130,10 +141,14 @@ base = pathlib.Path('/home/pi/beep_bridge')
 (base/'maps').mkdir(parents=True, exist_ok=True)
 if (base/'save_slam_map.sh').exists():
     (base/'save_slam_map.sh').chmod(0o755)
-p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(base/'frontier_planner.py')], text=True, capture_output=True, timeout=10)
+p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(base/'frontier_planner.py'),str(base/'semantic_intent.py')], text=True, capture_output=True, timeout=10)
 print('py_compile', p.returncode, p.stderr)
 if p.returncode:
     raise SystemExit(p.returncode)
+smoke = subprocess.run(['python3', '-c', "import sys; sys.path.insert(0, sys.argv[1]); import semantic_intent", str(base)], text=True, capture_output=True, timeout=10)
+print('semantic_import', smoke.returncode, smoke.stderr)
+if smoke.returncode:
+    raise SystemExit(smoke.returncode)
 unit = base/'beep-bridge.service'
 if unit.exists():
     install = subprocess.run(['sudo','install','-m','0644',str(unit),'/etc/systemd/system/beep-bridge.service'], text=True, capture_output=True, timeout=10)
@@ -170,7 +185,7 @@ if svc.returncode == 0:
     if active.stdout.strip() != 'active':
         raise SystemExit('beep-bridge did not become active')
     config = json.load(urllib.request.urlopen('http://127.0.0.1:8766/config', timeout=5))
-    expected = {'version': '0.20.4-slam-map-panel',
+    expected = {'version': '0.20.5-semantic-intents',
                 'motor_backend': 'app', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
                 'sdk_body_height': 108, 'sdk_shoulder_yaw': 0, 'sdk_imu': 0}
     mismatches = {key: {'expected': value, 'actual': config.get(key)}

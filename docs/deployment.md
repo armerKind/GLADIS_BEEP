@@ -4,7 +4,7 @@
 
 See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and unresolved executor integration.
 
-Last reported live bridge: `0.20.3-vendor-app-reverse`. Repository source: `0.20.4-slam-map-panel`, adding `/slam_map` and context-rich LLM panels; offline-tested, not deployed. Earlier checks on 2026-11-06 found the bridge and camera unavailable, but the preceding Telegram session subsequently reported restarting only `beep-bridge` through authenticated Jupyter, without reboot or motion. It reported stopped/no lease, fresh LiDAR, and subsequently usable SLAM/map. These are recovered session reports; this handoff did not contact the robot. Recheck current identity, services, camera and sensors rather than treating either historical outage or recovery as current state.
+Last reported live bridge: `0.20.3-vendor-app-reverse`. Repository source: `0.20.5-semantic-intents`, adding an offline-tested semantic intent mailbox and executor prototype; execution is hard-disabled pending safety fixes. See [closed-loop status](CLOSED_LOOP_STATUS.md). Not deployed or physically validated. Earlier checks on 2026-11-06 found the bridge and camera unavailable, but the preceding Telegram session subsequently reported restarting only `beep-bridge` through authenticated Jupyter, without reboot or motion. It reported stopped/no lease, fresh LiDAR, and subsequently usable SLAM/map. These are recovered session reports; this handoff did not contact the robot. Recheck current identity, services, camera and sensors rather than treating either historical outage or recovery as current state.
 
 The complete offline suite passed after the final perception edits: 195 tests. This does not establish hardware readiness or a successful cap-search mission. Do not reset SLAM, restart services or reboot without a diagnosed need.
 
@@ -70,7 +70,7 @@ The deployment helper:
 
 1. logs into BEEP's Jupyter server,
 2. backs up the deployed bridge,
-3. uploads `beep_bridge.py` and `frontier_planner.py`,
+3. uploads `beep_bridge.py`, `frontier_planner.py` and `semantic_intent.py`,
 4. uploads `config/beep_2d.lua`,
 5. uploads and makes executable `scripts/save_slam_map.sh`,
 6. compiles the Python source on BEEP,
@@ -104,7 +104,7 @@ profile. On a full battery and clear level floor:
 This isolates posture from navigation policy. It also prevents the traditional
 robotics method of changing five variables and learning nothing.
 
-Before declaring the current repository source deployed, require `/health` field `status.version == "0.20.4-slam-map-panel"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema (a pending map is acceptable at service startup). The last verified live bridge was `0.20.3-vendor-app-reverse`. A successful upload without these checks is not a deployment. It is file transfer with aspirations.
+Before declaring the current repository source deployed, require `/health` field `status.version == "0.20.5-semantic-intents"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema (a pending map is acceptable at service startup). The last verified live bridge was `0.20.3-vendor-app-reverse`. A successful upload without these checks is not a deployment. It is file transfer with aspirations.
 
 The Jupyter deployment helper uploads and installs the checked-in systemd unit,
 runs `daemon-reload`, explicitly restarts the service, and rejects a live `/config`

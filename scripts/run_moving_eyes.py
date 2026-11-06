@@ -4,7 +4,8 @@
 The capture thread keeps filling a bounded ring while the main thread performs one
 Gemini request at a time. There is no inference queue: after a result arrives, the
 next request uses the newest complete window and silently supersedes stale evidence.
-This process observes and updates the semantic world model; it never commands motors.
+Shadow by default. Explicitly armed execution submits bounded mission-owned intents;
+only the onboard deterministic navigation controller can apply them.
 """
 from __future__ import annotations
 
@@ -15,7 +16,8 @@ from pathlib import Path
 import time
 import uuid
 
-from beep_agent import AgentSession, EmbodiedGoal
+from beep_agent import AgentSession, EmbodiedGoal, BridgeBodyAdapter
+from beep_agent.executor import ClosedLoopExecutor
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
@@ -45,6 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mark", action="store_true")
     parser.add_argument("--resume-session", type=Path,
                         help="Resume only when robot, mission identity and freshness match")
+    parser.add_argument("--mode", choices=("shadow", "supervised"), default="shadow")
+    parser.add_argument("--arm", action="store_true", help="Permit mission intents; also requires onboard opt-in")
     return parser.parse_args()
 
 
@@ -84,6 +88,10 @@ def write_window(directory: Path, frames, contact_sheet: bytes, packet: dict, re
 
 def main() -> int:
     args = parse_args()
+    if args.mode == "supervised" and (not args.arm or args.allow_no_mission or args.mock_response):
+        raise SystemExit("supervised mode requires --arm, an existing mission, and live perception")
+    if args.arm and args.mode != "supervised":
+        raise SystemExit("--arm requires --mode supervised")
     if args.duration < 5 or args.duration > 600:
         raise SystemExit("--duration must be within [5, 600]")
     if args.max_inferences < 0 or args.max_inferences > 1000:
@@ -96,6 +104,10 @@ def main() -> int:
         not isinstance(initial_mission, dict) or initial_mission.get("state") not in {"starting", "running"}
     ):
         raise SystemExit("no active autonomous mission; moving eyes did not start")
+
+    if args.mode == "supervised" and (not isinstance(initial_mission, dict)
+                                       or initial_mission.get("semantic_execution_enabled") is not True):
+        raise SystemExit("onboard semantic execution is disabled; shadow mode only")
 
     mock = validate_perception_response(json.loads(args.mock_response.read_text())) if args.mock_response else None
     client = None if mock is not None else gemini_client(args)
@@ -115,6 +127,9 @@ def main() -> int:
     else:
         session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
     session_path = output_dir / "agent_session.json"
+    executor = ClosedLoopExecutor(session, BridgeBodyAdapter(args.base_url, args.timeout),
+                                  mode=args.mode, armed=args.arm, state_path=session_path)
+    dispatch_performed = False
     deadline = time.monotonic() + args.duration
     inference_count = 0
     last_inference_finished = 0.0
@@ -129,6 +144,8 @@ def main() -> int:
                 continue
             mission_payload = fetch_json(args.base_url, "/mission", args.timeout)
             mission = mission_payload.get("mission")
+            if isinstance(mission, dict):
+                executor.reconcile(mission)
             if not args.allow_no_mission and (
                 not isinstance(mission, dict) or mission.get("state") not in {"starting", "running"}
             ):
@@ -141,6 +158,7 @@ def main() -> int:
             packet["vision_context"] = {
                 "previous_scene_summary": session.world.last_scene_summary,
                 "previous_changes": session.world.last_changes[-4:],
+                "execution_outcome": session.execution["last_outcome"],
                 "current_frame_diversity": [
                     {"frame_id": frame.frame_id,
                      "difference_from_previous": meta["quality"].get("difference_from_previous"),
@@ -168,20 +186,31 @@ def main() -> int:
                 "newer_window_available": newest_latest != requested_latest,
             }
             current_mission_id = mission.get("id") if isinstance(mission, dict) else None
-            session.update(response, observed_at=completed_at,
-                           packet_id=f"{run_id}-{inference_count:04d}", mission_id=current_mission_id)
-            decision = session.decide(rollout_mode="shadow")
+            latest_status = fetch_json(args.base_url, "/status", args.timeout)
+            latest_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
+            if isinstance(latest_mission, dict):
+                execution = executor.step(response, packet_id=f"{run_id}-{inference_count:04d}",
+                                          frames=packet["frames"], mission=latest_mission,
+                                          status=latest_status)
+                decision_dict = execution["decision"]
+            else:
+                if args.mode == "supervised" or not args.allow_no_mission:
+                    raise RuntimeError("mission disappeared during inference")
+                session.update(response, observed_at=frames[-1].captured_at,
+                               packet_id=f"{run_id}-{inference_count:04d}")
+                decision_dict = session.decide(rollout_mode="shadow").to_dict()
+                execution = {"dispatch_performed": False, "state": "shadow", "reason": "no_mission"}
+            dispatch_performed |= execution["dispatch_performed"]
             assert session.selection is not None
             semantic = {
                 "session_id": session.session_id,
                 "mission_id": session.mission_id,
                 "selection": asdict(session.selection),
-                "next_decision": decision.to_dict(),
-                "dispatch_performed": False,
+                "next_decision": decision_dict,
+                "dispatch_performed": execution["dispatch_performed"],
+                "execution": execution,
             }
             session.save(session_path)
-            latest_status = fetch_json(args.base_url, "/status", args.timeout)
-            latest_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
             mission_valid = (
                 isinstance(latest_mission, dict)
                 and latest_mission.get("id") == current_mission_id
@@ -190,7 +219,7 @@ def main() -> int:
             course = recommend_course(response, latest_status, mission_valid=mission_valid)
             policy = evaluate_proposal(response, latest_status, mode="shadow")
             semantic["camera_assisted_course"] = course
-            semantic["dispatch_performed"] = False
+            semantic["dispatch_performed"] = execution["dispatch_performed"]
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
             write_window(window_dir, frames, sheet, packet, response, policy, semantic, slam_map)
             (window_dir / "course_recommendation.json").write_text(
@@ -205,7 +234,8 @@ def main() -> int:
                 "next_skill": semantic["next_decision"]["skill_call"]["name"],
                 "course_recommendation": course["recommendation"],
                 "course_reason": course["reason"],
-                "dispatch_performed": False,
+                "dispatch_performed": execution["dispatch_performed"],
+                "execution_state": execution["state"],
             }
             with trace_path.open("a") as trace:
                 trace.write(json.dumps(event, sort_keys=True) + "\n")
@@ -225,7 +255,7 @@ def main() -> int:
         "inference_interval_s": args.inference_interval,
         "inferences": inference_count,
         "capture": capture.stats(),
-        "dispatch_performed": False,
+        "dispatch_performed": dispatch_performed,
         "agent_session": str(session_path),
         "agent_session_id": session.session_id,
         "mission_id": session.mission_id,

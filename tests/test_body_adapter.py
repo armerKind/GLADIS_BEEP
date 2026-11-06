@@ -37,10 +37,11 @@ class BodyAdapterTests(unittest.TestCase):
     def test_stop_cancels_async_mission(self):
         adapter = BridgeBodyAdapter("http://beep.invalid")
         with patch.object(adapter, "_json", return_value={"ok": True, "cancelled": True}) as request:
-            result = adapter.dispatch(skill("stop", reason="Human stop."), rollout_mode="supervised")
+            result = adapter.dispatch(skill("stop", reason="Human stop."), rollout_mode="supervised",
+                                      mission_id="mission-7", lease_id="lease-7")
         self.assertTrue(result.ok)
         self.assertFalse(result.asynchronous)
-        request.assert_called_once_with("/mission/cancel", {})
+        request.assert_called_once_with("/mission/cancel", {"mission_id": "mission-7", "lease_id": "lease-7"})
 
     def test_unimplemented_physical_skill_is_rejected(self):
         adapter = BridgeBodyAdapter("http://beep.invalid")

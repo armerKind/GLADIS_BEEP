@@ -8,10 +8,10 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 
 **Fresh-agent entry point: [docs/HANDOFF.md](docs/HANDOFF.md).** It records the verified offline checkpoint, unresolved perception-to-action integration, and next acceptance tests. Historical trials below are not current deployment guarantees.
 
-Current repository bridge source:
+Current repository bridge source (semantic execution is disabled; see [closed-loop status](docs/CLOSED_LOOP_STATUS.md)):
 
 ```text
-0.20.4-slam-map-panel
+0.20.5-semantic-intents
 ```
 
 Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.

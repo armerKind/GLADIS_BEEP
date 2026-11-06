@@ -79,10 +79,16 @@ class BridgeBodyAdapter:
     def mission(self) -> dict[str, Any]:
         return self._json("/mission")
 
-    def dispatch(self, call: SkillCall, *, rollout_mode: str = "shadow") -> DispatchResult:
+    def submit_intent(self, intent: dict[str, Any]) -> dict[str, Any]:
+        return self._json("/mission/intent", intent)
+
+    def dispatch(self, call: SkillCall, *, rollout_mode: str = "shadow",
+                 mission_id: str | None = None, lease_id: str | None = None) -> DispatchResult:
         call = validate_skill_call(call)
         if rollout_mode not in {"shadow", "stationary", "supervised"}:
             raise BodyDispatchError("rollout mode must be shadow, stationary, or supervised")
+        if call.name not in {"explore", "observe", "stop"}:
+            raise BodyDispatchError(f"no deterministic body adapter for semantic skill {call.name!r}")
         if rollout_mode == "shadow":
             return DispatchResult(True, call.name, False, False, {"ok": True, "reason": "rollout_not_physically_armed"})
         if rollout_mode == "stationary" and call.name not in {"observe", "stop"}:
@@ -100,8 +106,11 @@ class BridgeBodyAdapter:
             )
             return DispatchResult(bool(response.get("accepted")), call.name, bool(response.get("accepted")), True, response)
         if call.name == "stop":
-            response = self._json("/mission/cancel", {})
-            return DispatchResult(bool(response.get("ok")), call.name, True, False, response)
+            if not mission_id or not lease_id:
+                raise BodyDispatchError("stop requires exact mission_id and lease_id")
+            response = self._json("/mission/cancel", {"mission_id": mission_id, "lease_id": lease_id})
+            ok = response.get("ok") is True and response.get("cancelled") is True
+            return DispatchResult(ok, call.name, ok, False, response)
         if call.name == "observe":
             response = self._json("/observe")
             return DispatchResult(True, call.name, True, False, response)

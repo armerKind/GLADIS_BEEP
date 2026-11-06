@@ -12,6 +12,7 @@ from typing import Any
 from .drives import GoalArbiter, GoalSelection
 from .executive import EmbodiedExecutive, EmbodiedGoal, ExecutiveDecision
 from .world_model import WorldModel
+from .skills import skill
 
 
 class SessionIdentityError(ValueError):
@@ -36,6 +37,9 @@ class AgentSession:
         self.fixed_goal = fixed_goal
         self.selection: GoalSelection | None = None
         self.executive: EmbodiedExecutive | None = None
+        self.execution: dict[str, Any] = {"lease_id": None, "latest_frame_at": 0.0,
+                                         "issued": {}, "last_outcome": None,
+                                         "reobserve_through_sequence": -1}
 
     def _adopt(self, candidate: GoalSelection, *, preserve_executive: bool = False) -> None:
         self.selection = candidate
@@ -89,7 +93,24 @@ class AgentSession:
     def decide(self, *, rollout_mode: str = "shadow") -> ExecutiveDecision:
         self._select_if_needed()
         assert self.executive is not None
+        if self.world.sequence <= self.execution["reobserve_through_sequence"]:
+            return ExecutiveDecision(self.executive.goal.name, None,
+                                     skill("observe", reason="Re-perceive after execution feedback."),
+                                     "execution_feedback_requires_reobservation", False)
         return self.executive.decide(rollout_mode=rollout_mode)
+
+    def record_execution(self, outcome: dict[str, Any]) -> None:
+        intent = outcome.get("intent") or {}
+        if intent.get("mission_id") != self.mission_id or intent.get("session_id") != self.session_id:
+            raise SessionIdentityError("execution outcome belongs to a different session or mission")
+        key = intent["decision_id"]
+        previous = self.execution["issued"].get(key)
+        if previous == outcome:
+            return
+        self.execution["issued"][key] = outcome
+        self.execution["last_outcome"] = outcome
+        if outcome.get("state") in {"rejected", "unknown", "expired_unconfirmed"} or intent.get("kind") in {"yield", "stop"}:
+            self.execution["reobserve_through_sequence"] = self.world.sequence + 1
 
     def to_dict(self) -> dict[str, Any]:
         selection = None
@@ -107,6 +128,7 @@ class AgentSession:
             "selection": selection,
             "inspect_attempts": {} if self.executive is None else dict(self.executive.inspect_attempts),
             "world": self.world.to_dict(),
+            "execution": self.execution,
         }
 
     def save(self, path: Path) -> None:
@@ -142,6 +164,8 @@ class AgentSession:
             session.executive = EmbodiedExecutive(session.world, session.selection.goal)
             session.executive.inspect_attempts = {str(k): int(v) for k, v in value.get("inspect_attempts", {}).items()}
         session.updated_at = float(value["updated_at"])
+        if "execution" in value:
+            session.execution = value["execution"]
         return session
 
     @classmethod

@@ -1,0 +1,7 @@
+# Closed-loop executor checkpoint
+
+The executor and onboard mailbox are implemented as an **offline prototype**, not a hardware-ready closed-loop controller. Shadow remains the default. The bridge reports `semantic_execution_enabled: false` even if intent admission is configured on; the moving-eyes runner refuses supervised mode in that state. Admitted semantic motion is rejected by an additional onboard interlock. No hardware deployment or physical test was performed for this source.
+
+Two independent reviews exposed safety issues. In particular, vendor transport can block after the pre-write authority check; safe packet-by-packet expiry and cancellation fencing is not yet implemented. A cloned session also has no onboard generation/fencing token. The interlock must not be lifted until both are resolved and adversarial fake-transport end-to-end tests exercise the actual navigation worker, including cancellation and expiry during blocking I/O. Existing fake-boundary tests are not proof of physical execution. Visual `look` is not treated as permission for a translating curve. Stationary look remains unsupported. Uncertain delivery that expires absent from the observed mailbox is recorded as unconfirmed, not successful.
+
+The source version is `0.20.5-semantic-intents`. The last reported live version was `0.20.3-vendor-app-reverse`; this checkpoint did not contact BEEP. The green baseball cap has not been searched for or found. Continue offline development; preserve the hardware motion gate.
