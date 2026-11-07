@@ -167,7 +167,7 @@ class TransportFencingTests(unittest.TestCase):
     def test_worker_happy_path_reaches_nonblocking_transport(self):
         worker = self.start()
         self.finish(worker)
-        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]), bridge.pkt(0x11, [0, 10])])
+        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]), bridge.pkt(0x11, [0, 100])])
         self.assertTrue(self.rig.nonblocking)
         self.assertEqual(set(self.rig.nonblocking), {False})
 
@@ -285,7 +285,7 @@ class TransportFencingTests(unittest.TestCase):
         # Deliberately adversarial transport accepts an already-entered call
         # after cancellation. This is a limitation witness, NOT a safety pass:
         # no host check can retroactively revoke it. Yaw is still suppressed.
-        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]), bridge.pkt(0x11, [0, 10])])
+        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]), bridge.pkt(0x11, [0, 100])])
         self.assertFalse(bridge.mission_snapshot()["semantic_execution_enabled"])
 
 

@@ -11,7 +11,7 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 Current repository bridge source (semantic execution is disabled; see [closed-loop status](docs/CLOSED_LOOP_STATUS.md)):
 
 ```text
-0.20.5-semantic-intents
+0.20.9-steering-sweep
 ```
 
 Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
@@ -26,9 +26,7 @@ Release `0.19.3-fluent-steering` keeps compatible gait active while alternating 
 
 Historical note: the final powered run removed the forced high-walk/width-100 setup and showed that GLADIS's guessed negative analog value did not yet reproduce app reverse. That blocker is superseded by the later packet capture and `0.20.3-vendor-app-reverse` bridge configuration below; the app-backed bridge path still needs a guarded physical validation.
 
-Last reported live bridge was `0.20.3-vendor-app-reverse`, using the vendor app protocol as locomotion owner. The preceding Telegram session reported restoring the stopped bridge through authenticated Jupyter without reboot or movement, then verifying stopped/no lease, fresh LiDAR and usable SLAM. These are recovered session reports, not fresh checks in this documentation checkpoint. Repository source includes offline-tested map-context panels and `/slam_map`; those changes remain undeployed.
-
-Current power/connectivity and sensor state must be rechecked before hardware work. The closed-loop semantic executor is still missing: moving-eyes produces shadow recommendations, not live dispatch. See `docs/HANDOFF.md` for precise gaps and the 195-test offline checkpoint.
+The historical `0.20.3-vendor-app-reverse` checkpoint has been superseded. The live bridge is `0.20.9-steering-sweep`; the 291-test suite passed and guarded local missions produced SLAM/range evidence of forward translation. The MJPEG frames were visually static across that motion, so the visual feedback loop remains unproven. Semantic executor motion is disabled. See [closed-loop status](docs/CLOSED_LOOP_STATUS.md) for trial results and the camera discrepancy.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers

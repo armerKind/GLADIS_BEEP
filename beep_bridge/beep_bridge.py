@@ -166,7 +166,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.20.5-semantic-intents",
+    "version": "0.20.9-steering-sweep",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -473,6 +473,15 @@ def app_transaction(action, packets):
         raise
 
 
+def app_joystick_percent(step):
+    """Convert desired SDK velocity to the vendor server's joystick percent.
+
+    The installed app uses speed=int(percent/100 * 0.2 * width), width=50
+    by default. Passing SDK step 10 as 10% silently requests speed 1.
+    """
+    return min(100, max(1, abs(int(step)) * 10))
+
+
 def app_send(action: str, step=None):
     action = str(action).lower()
     aliases = {"turn_left": "turnleft", "turn_right": "turnright",
@@ -489,7 +498,7 @@ def app_send(action: str, step=None):
     elif action in APP_ANALOG_PAYLOAD:
         x, y = APP_ANALOG_PAYLOAD[action]
         if step is not None:
-            magnitude = min(100, max(1, abs(int(step))))
+            magnitude = app_joystick_percent(step)
             x = 0 if x == 0 else (magnitude if x < 128 else 256 - magnitude)
             y = 0 if y == 0 else (magnitude if y < 128 else 256 - magnitude)
         packets.append((pkt(0x11, [x, y]), 0))
@@ -787,7 +796,7 @@ def app_curve(direction, forward_step=10):
     direction = str(direction).lower()
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
-    magnitude = min(100, max(1, abs(int(forward_step))))
+    magnitude = app_joystick_percent(forward_step)
     with app_io_lock:
         app_transaction("curve" + direction, [
             (pkt(0x0F, [0x01]), 0.025),
@@ -959,36 +968,77 @@ def guard_slam_pose(accepted, stationary_anchor, raw, moving):
     return raw, anchor, True, "stationary_jitter"
 
 
+MAX_SLAM_MAP_CELLS = 1_000_000  # Bound map work on the safety-scan ROS executor.
+
 def occupancy_callback(msg):
+    """Publish a validated map atomically; False permanently sheds a bad feed.
+
+    An expanding map can have tens of millions of cells. Even a malformed small
+    header must never leave a previously valid map authoritative or kill the
+    shared ROS executor. A bridge restart is required to rearm a shed feed.
+    """
     global slam_grid
+    width = height = 0
+    reason = None
+    frame_id = "map"
+    try:
+        width, height = int(msg.info.width), int(msg.info.height)
+        cells = width * height
+        if width <= 0 or height <= 0 or cells > MAX_SLAM_MAP_CELLS or len(msg.data) != cells:
+            reason = "invalid_dimensions_or_data_length"
+        else:
+            origin = msg.info.origin
+            q = origin.orientation
+            resolution = float(msg.info.resolution)
+            ox, oy = float(origin.position.x), float(origin.position.y)
+            quaternion = tuple(float(v) for v in (q.x, q.y, q.z, q.w))
+            if not all(math.isfinite(v) for v in (resolution, ox, oy, *quaternion)) or resolution <= 0:
+                reason = "invalid_map_geometry"
+            else:
+                data = list(msg.data)
+                grid = FrontierGrid(width, height, resolution, ox, oy, data,
+                                    origin_yaw=quaternion_to_yaw(*quaternion))
+                known = sum(1 for value in data if int(value) >= 0)
+                occupied = sum(1 for value in data if int(value) >= 50)
+                frame_id = str(getattr(msg.header, "frame_id", "") or "map")
+    except Exception as exc:  # A malformed ROS payload must not kill the scan executor.
+        reason = "invalid_map_payload:" + type(exc).__name__
+    if reason is not None:
+        with state_lock:
+            slam_grid = None
+            slam = dict(state.get("slam") or {})
+            slam.update({"map_at": None, "map_age_s": None, "map_width": width,
+                         "map_height": height, "known_cells": 0, "occupied_cells": 0,
+                         "map_rejected": reason})
+            state["slam"] = slam
+        return False
     now = time.time()
-    data = list(msg.data)
-    known = sum(1 for value in data if int(value) >= 0)
-    occupied = sum(1 for value in data if int(value) >= 50)
-    origin_q = msg.info.origin.orientation
-    origin_yaw = quaternion_to_yaw(float(origin_q.x), float(origin_q.y), float(origin_q.z), float(origin_q.w))
-    slam_grid = FrontierGrid(
-        int(msg.info.width),
-        int(msg.info.height),
-        float(msg.info.resolution),
-        float(msg.info.origin.position.x),
-        float(msg.info.origin.position.y),
-        data,
-        origin_yaw=origin_yaw,
-    )
     with state_lock:
+        slam_grid = grid
         slam = dict(state.get("slam") or {})
-        slam.update({
-            "map_at": now,
-            "map_age_s": 0.0,
-            "frame_id": str(getattr(msg.header, "frame_id", "") or "map"),
-            "map_width": int(msg.info.width),
-            "map_height": int(msg.info.height),
-            "resolution_m": float(msg.info.resolution),
-            "known_cells": known,
-            "occupied_cells": occupied,
-        })
+        slam.update({"map_at": now, "map_age_s": 0.0,
+                     "frame_id": frame_id,
+                     "map_width": width, "map_height": height,
+                     "resolution_m": resolution, "known_cells": known,
+                     "occupied_cells": occupied, "map_rejected": None})
         state["slam"] = slam
+    return True
+
+
+def receive_ros_map(node, msg):
+    if getattr(node, "map_feed_shed", False):
+        return
+    if not occupancy_callback(msg) and node.map_subscription is not None:
+        node.map_feed_shed = True
+        subscription = node.map_subscription
+        node.map_subscription = None
+        try:
+            node.destroy_subscription(subscription)
+            node.get_logger().error("Invalid/oversized map; unsubscribed to protect safety scan callbacks")
+        except Exception as exc:
+            with state_lock:
+                state["last_error"] = "map unsubscribe failed: " + repr(exc)
+            node.get_logger().error("Invalid map and unsubscribe failed; motion remains gated")
 
 
 def ros_thread():
@@ -1008,12 +1058,16 @@ def ros_thread():
         def __init__(self):
             super().__init__("beep_bridge_scan")
             self.create_subscription(LaserScan, "/scan", scan_callback, 10)
-            self.create_subscription(OccupancyGrid, "/map", occupancy_callback, 10)
+            self.map_feed_shed = False
+            self.map_subscription = self.create_subscription(OccupancyGrid, "/map", self.receive_map, 1)
             self.tf_buffer = Buffer()
             self.tf_listener = TransformListener(self.tf_buffer, self)
             self.accepted_slam_pose = None
             self.stationary_anchor = None
             self.create_timer(0.20, self.update_slam_pose)
+
+        def receive_map(self, msg):
+            receive_ros_map(self, msg)
 
         def update_slam_pose(self):
             now = time.time()
@@ -1853,17 +1907,20 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
 
 
 def slam_grid_copy():
-    # FrontierGrid is immutable after construction, so sharing the latest complete
-    # callback snapshot is atomic enough under CPython and avoids copying thousands of cells.
-    return slam_grid
+    # FrontierGrid is immutable after construction; capture the published pointer
+    # under the same lock as the associated SLAM metadata.
+    with state_lock:
+        return slam_grid
 
 
 def slam_map_snapshot():
-    """Export the authoritative Cartographer occupancy grid for visual context."""
-    grid = slam_grid_copy()
-    if grid is None:
-        return {"ok": False, "reason": "slam_grid_unavailable"}
-    slam = snapshot().get("slam") or {}
+    """Export a coherent, currently valid Cartographer grid for visual context."""
+    with state_lock:
+        grid = slam_grid
+        slam = dict(state.get("slam") or {})
+    map_at = slam.get("map_at")
+    if grid is None or map_at is None or time.time() - float(map_at) > 2.5:
+        return {"ok": False, "reason": "slam_grid_unavailable_or_stale"}
     return {
         "ok": True,
         "frame_id": slam.get("frame_id") or "map",
@@ -1874,8 +1931,8 @@ def slam_map_snapshot():
         "origin_y": grid.origin_y,
         "origin_yaw": grid.origin_yaw,
         "data": list(grid.data),
-        "map_at": slam.get("map_at"),
-        "map_age_s": slam.get("map_age_s"),
+        "map_at": map_at,
+        "map_age_s": round(max(0.0, time.time() - float(map_at)), 3),
         "known_cells": slam.get("known_cells"),
         "occupied_cells": slam.get("occupied_cells"),
     }
@@ -2670,6 +2727,11 @@ def choose_fluent_steering(sectors, current_action=None):
     left_open = min(values["front_left"], values["left"])
     right_open = min(values["front_right"], values["right"])
     imbalance = left_open - right_open
+    # A clear forward corridor does not need a turn just because one side is
+    # more open. A curve also needs a viable full sweep, including the rear.
+    if (values["front"] >= 1.25 or min(values.values()) < TURN_SWEEP_M or
+            values["rear"] < FOOTPRINT_REAR_M):
+        return "forward"
     # Forward is the default.  The previous thresholds reacted to ordinary
     # LiDAR asymmetry every 0.5 s and made exploration look like nervous
     # circling.  Curves now require a meaningful corridor imbalance or a

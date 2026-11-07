@@ -137,6 +137,12 @@ async def restart_bridge(session: requests.Session, xsrf: str) -> None:
     code = r'''
 import subprocess, os, time, pathlib, signal, json, urllib.request
 base = pathlib.Path('/home/pi/beep_bridge')
+preflight = json.load(urllib.request.urlopen('http://127.0.0.1:8766/mission', timeout=5))
+mission = preflight.get('mission')
+if ((mission is not None and mission.get('state') not in ('completed', 'failed', 'cancelled'))
+        or preflight['status'].get('moving') is not False
+        or preflight['status'].get('motion_lease_id') is not None):
+    raise SystemExit('refusing bridge restart during active mission, motion or lease')
 (base/'logs').mkdir(parents=True, exist_ok=True)
 (base/'maps').mkdir(parents=True, exist_ok=True)
 if (base/'save_slam_map.sh').exists():
@@ -159,13 +165,21 @@ if unit.exists():
     print('systemd_daemon_reload', reload.returncode, reload.stderr)
     if reload.returncode:
         raise SystemExit(reload.returncode)
-svc = subprocess.run(['bash','-lc','systemctl list-unit-files beep-bridge.service --no-legend 2>/dev/null | grep -q beep-bridge.service'], text=True)
+svc = subprocess.run(['bash','-lc','systemctl list-unit-files beep-bridge.service --no-legend 2>/dev/null | grep -q beep-bridge.service'], text=True, timeout=10)
 pidfile = base/'bridge.pid'
 if svc.returncode == 0:
+    fresh = json.load(urllib.request.urlopen('http://127.0.0.1:8766/mission', timeout=5))
+    active = fresh.get('mission')
+    if ((active is not None and active.get('state') not in ('completed', 'failed', 'cancelled'))
+            or fresh['status'].get('moving') is not False
+            or fresh['status'].get('motion_lease_id') is not None):
+        raise SystemExit('refusing restart: mission or lease appeared during deployment')
+    legacy_terminated = False
     if pidfile.exists():
         try:
             pid = int(pidfile.read_text().strip())
             os.kill(pid, signal.SIGTERM)
+            legacy_terminated = True
             print('killed legacy pid', pid)
             pidfile.unlink(missing_ok=True)
             time.sleep(.5)
@@ -175,6 +189,13 @@ if svc.returncode == 0:
     print('systemd_enable', enable.returncode, enable.stderr)
     if enable.returncode:
         raise SystemExit(enable.returncode)
+    if not legacy_terminated:
+        fresh = json.load(urllib.request.urlopen('http://127.0.0.1:8766/mission', timeout=5))
+        active = fresh.get('mission')
+        if ((active is not None and active.get('state') not in ('completed', 'failed', 'cancelled'))
+                or fresh['status'].get('moving') is not False
+                or fresh['status'].get('motion_lease_id') is not None):
+            raise SystemExit('refusing restart: mission or lease appeared during deployment')
     r = subprocess.run(['sudo','systemctl','restart','beep-bridge'], text=True, capture_output=True, timeout=20)
     print('systemd_restart', r.returncode, r.stderr)
     if r.returncode:
@@ -184,8 +205,16 @@ if svc.returncode == 0:
     print('systemd_active', active.stdout.strip())
     if active.stdout.strip() != 'active':
         raise SystemExit('beep-bridge did not become active')
-    config = json.load(urllib.request.urlopen('http://127.0.0.1:8766/config', timeout=5))
-    expected = {'version': '0.20.5-semantic-intents',
+    config = None
+    for _ in range(10):
+        try:
+            config = json.load(urllib.request.urlopen('http://127.0.0.1:8766/config', timeout=1))
+            break
+        except Exception:
+            time.sleep(0.5)
+    if config is None:
+        raise SystemExit('bridge active but /config did not become ready within 15 seconds')
+    expected = {'version': '0.20.9-steering-sweep',
                 'motor_backend': 'app', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
                 'sdk_body_height': 108, 'sdk_shoulder_yaw': 0, 'sdk_imu': 0}
     mismatches = {key: {'expected': value, 'actual': config.get(key)}
@@ -237,28 +266,41 @@ else:
     print('alive', proc.poll() is None)
 '''
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"
-    async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8) as ws:
-        msg = {
-            "header": {"msg_id": str(uuid.uuid4()), "username": "gladis", "session": str(uuid.uuid4()), "msg_type": "execute_request", "version": "5.3"},
-            "parent_header": {},
-            "metadata": {},
-            "content": {"code": code, "silent": False, "store_history": False, "user_expressions": {}, "allow_stdin": False, "stop_on_error": True},
-            "channel": "shell",
-            "buffers": [],
-        }
-        await ws.send(json.dumps(msg))
-        deadline = time.time() + 35
-        output: list[str] = []
-        while time.time() < deadline:
-            m = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.time())))
-            if m.get("msg_type") == "stream":
-                output.append(m["content"].get("text", ""))
-            elif m.get("msg_type") == "error":
-                output.append("ERROR " + json.dumps(m["content"]))
-            elif m.get("msg_type") == "execute_reply":
-                print("".join(output))
-                return
-        raise TimeoutError("restart command timed out")
+    try:
+        async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8) as ws:
+            msg = {
+                "header": {"msg_id": str(uuid.uuid4()), "username": "gladis", "session": str(uuid.uuid4()), "msg_type": "execute_request", "version": "5.3"},
+                "parent_header": {},
+                "metadata": {},
+                "content": {"code": code, "silent": False, "store_history": False, "user_expressions": {}, "allow_stdin": False, "stop_on_error": True},
+                "channel": "shell", "buffers": [],
+            }
+            await ws.send(json.dumps(msg))
+            deadline = time.monotonic() + 130
+            output: list[str] = []
+            while time.monotonic() < deadline:
+                try:
+                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.monotonic())))
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError("restart outcome indeterminate; reconcile live bridge state") from exc
+                if m.get("msg_type") == "stream":
+                    output.append(m["content"].get("text", ""))
+                elif m.get("msg_type") == "error":
+                    raise RuntimeError("remote deploy error: " + json.dumps(m["content"]))
+                elif m.get("msg_type") == "execute_reply":
+                    print("".join(output))
+                    if m.get("content", {}).get("status") != "ok":
+                        raise RuntimeError("remote deploy failed: " + json.dumps(m["content"]))
+                    return
+            raise TimeoutError("restart outcome indeterminate; reconcile live bridge state")
+    finally:
+        primary_error = sys.exc_info()[0]
+        try:
+            session.delete(f"{BASE}/api/kernels/{kernel_id}", headers={"X-XSRFToken": xsrf}, timeout=8).raise_for_status()
+        except Exception:
+            if primary_error is None:
+                raise
+            print("warning: kernel cleanup failed during deployment error", file=sys.stderr)
 
 
 def main() -> int:
@@ -269,6 +311,14 @@ def main() -> int:
         print(f"missing service source: {SERVICE_SRC}", file=sys.stderr)
         return 2
     session, xsrf = login()
+    preflight = session.get(f"http://{HOST}:8766/mission", timeout=5)
+    preflight.raise_for_status()
+    live = preflight.json()
+    mission = live.get("mission")
+    if ((mission is not None and mission.get("state") not in ("completed", "failed", "cancelled"))
+            or live.get("status", {}).get("moving") is not False
+            or live.get("status", {}).get("motion_lease_id") is not None):
+        raise RuntimeError("refusing deployment during active mission, motion or lease")
     put_bridge(session, xsrf)
     asyncio.run(restart_bridge(session, xsrf))
     return 0

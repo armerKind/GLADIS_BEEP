@@ -1,5 +1,7 @@
 # Fresh-agent handoff — 2026-11-06
 
+> **Current update, November 7, 2026:** This file records the original historical handoff, not the current deployment. See [closed-loop status](CLOSED_LOOP_STATUS.md) and [deployment](deployment.md). BEEP's `/scan` publisher was healthy in ROS domain 16; a corrupt 9312×3293 occupancy grid starved the bridge's scan subscriber and drove invalid localization. GLADIS deployed `0.20.9-steering-sweep`, recovered fresh scans and a valid map/pose, and corrected vendor-app joystick scaling after finding that requested step 10 had been transmitted as 10% (actual SDK speed 1). Guarded local trials showed correlated forward SLAM/range progress totaling about 0.46 m, but the camera MJPEG frames remain visually static; this is not yet a visual perception-action loop. The offline suite passed 291 tests. Semantic executor motion remains hard-disabled. The green cap was merely a replaceable test target, **not** the mission objective.
+
 ## Read this first
 
 Max requested a committed, pushed checkpoint and a fresh session because repeated explanations had replaced execution. The goal is an embodied AI robot dog that feels convincingly alive: sustained fluent exploration, current perception driving useful actions, curiosity and social behaviour. The immediate unfinished task was searching for a **green baseball cap**. The search has NOT been performed and the cap has NOT been found. Do not mistake target-aware prompting, shadow decisions, or a stationary camera frame for search progress.

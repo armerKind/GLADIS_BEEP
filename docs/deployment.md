@@ -4,9 +4,9 @@
 
 See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and unresolved executor integration.
 
-Last reported live bridge: `0.20.3-vendor-app-reverse`. Repository source: `0.20.5-semantic-intents`, adding an offline-tested semantic intent mailbox and executor prototype; execution is hard-disabled pending safety fixes. See [closed-loop status](CLOSED_LOOP_STATUS.md). Not deployed or physically validated. Earlier checks on 2026-11-06 found the bridge and camera unavailable, but the preceding Telegram session subsequently reported restarting only `beep-bridge` through authenticated Jupyter, without reboot or motion. It reported stopped/no lease, fresh LiDAR, and subsequently usable SLAM/map. These are recovered session reports; this handoff did not contact the robot. Recheck current identity, services, camera and sensors rather than treating either historical outage or recovery as current state.
+Live bridge and repository source: `0.20.9-steering-sweep`, deployed and read back on November 7, 2026. It limits occupancy maps to one million cells, corrects the vendor-app joystick-percent/SDK-step mismatch, and avoids a curve when a straight corridor is open or the sweep guard lacks clearance. Guarded local trials showed correlated SLAM/range evidence of forward translation; the JPEG stream appeared visually static across movement, so the visual perception-action loop is **not** verified. Semantic executor motion remains hard-disabled. See [closed-loop status](CLOSED_LOOP_STATUS.md). Recheck identity and sensors before any future motion.
 
-The complete offline suite passed after the final perception edits: 195 tests. This does not establish hardware readiness or a successful cap-search mission. Do not reset SLAM, restart services or reboot without a diagnosed need.
+The offline suite passed 291 tests. Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
 
 ## Pi paths
 
@@ -29,7 +29,7 @@ YahboomStart.service
 tailscaled.service
 ```
 
-The repository units are in `systemd/`. The bridge service sources ROS 2 Foxy and the Cartographer overlay, uses `ROS_DOMAIN_ID=16`, and the last verified live bridge selected the vendor app motor backend. The new source is not deployed yet.
+The repository units are in `systemd/`. The bridge service sources ROS 2 Foxy and the Cartographer overlay with `ROS_DOMAIN_ID=16`; the deployed bridge uses the vendor app motor backend. ROS diagnostics run without domain 16 can falsely report zero `/scan` publishers. The direct serial owner is the `MS200` node from `YahboomStart.service`.
 
 `YahboomStart.service` is the authoritative vendor launch for the MS200 LiDAR on `/dev/ttyAMA1`. Keep the redundant `XGO_Start.service` disabled: both vendor units launch `oradar_scan`, and two publishers competing for the same serial port can leave `/scan` advertised but silent.
 
@@ -77,6 +77,8 @@ The deployment helper:
 7. restarts `beep-bridge.service`,
 8. verifies that the service is active.
 
+The helper checks stopped/no lease and rejects an active mission before upload and again just before restart; a completed mission in the `/mission` history is allowed. **These are observational checks, not an atomic maintenance lock.** Do not run deployment while another client can start motion concurrently. If the helper errors or times out after upload, query `/health` and the service before retrying; service activation can lag its HTTP listener. It cleans up its temporary Jupyter kernel even on failures.
+
 Verify afterward:
 
 ```bash
@@ -104,7 +106,7 @@ profile. On a full battery and clear level floor:
 This isolates posture from navigation policy. It also prevents the traditional
 robotics method of changing five variables and learning nothing.
 
-Before declaring the current repository source deployed, require `/health` field `status.version == "0.20.5-semantic-intents"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema (a pending map is acceptable at service startup). The last verified live bridge was `0.20.3-vendor-app-reverse`. A successful upload without these checks is not a deployment. It is file transfer with aspirations.
+Before declaring repository source deployed, require `/health` field `status.version == "0.20.9-steering-sweep"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema and sustained scan/map/pose freshness after restart. November 7, 2026 verification observed version `0.20.9-steering-sweep`, fresh scan callbacks, a valid guarded pose, and guarded local motor dispatch. The MJPEG camera images appeared visually static despite correlated pose/range movement; a returned JPEG is not proof of live visual perception. A successful upload alone is not deployment.
 
 The Jupyter deployment helper uploads and installs the checked-in systemd unit,
 runs `daemon-reload`, explicitly restarts the service, and rejects a live `/config`

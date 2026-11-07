@@ -50,10 +50,10 @@ class FrontierIntegrationTests(unittest.TestCase):
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
         try:
-            with patch.object(bridge, "slam_grid", grid), patch.object(
-                bridge, "snapshot", return_value={"slam": {"map_age_s": 0.2, "map_at": 123.0,
-                                                              "frame_id": "cartographer_map",
-                                                              "known_cells": 3, "occupied_cells": 2}}
+            with patch.object(bridge, "slam_grid", grid), patch.dict(
+                bridge.state, {"slam": {"map_age_s": 0.2, "map_at": time.time() - 0.2,
+                                        "frame_id": "cartographer_map",
+                                        "known_cells": 3, "occupied_cells": 2}}
             ):
                 with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/slam_map", timeout=1.0) as response:
                     payload = json.load(response)
@@ -61,11 +61,21 @@ class FrontierIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["frame_id"], "cartographer_map")
             self.assertEqual((payload["width"], payload["height"]), (2, 2))
             self.assertEqual(payload["data"], [0, 50, -1, 100])
-            self.assertEqual(payload["map_age_s"], 0.2)
+            self.assertGreaterEqual(payload["map_age_s"], 0.19)
+            self.assertLess(payload["map_age_s"], 1.0)
         finally:
             server.shutdown()
             server.server_close()
             server_thread.join(1.0)
+
+    def test_app_step_is_sdk_velocity_not_joystick_percentage(self):
+        # Installed app server: int(percent / 100 * 0.2 * width[50]).
+        # The prior encoding of step=10 as ten percent produced speed 1.
+        self.assertEqual(bridge.app_joystick_percent(10), 100)
+        self.assertEqual(bridge.app_joystick_percent(5), 50)
+        self.assertEqual(bridge.app_joystick_percent(12), 100)
+        self.assertEqual(int(bridge.app_joystick_percent(10) / 100 * 0.2 * 50), 10)
+        self.assertEqual(int(10 / 100 * 0.2 * 50), 1)
 
     def test_camera_capture_during_motion_never_sends_app_stop(self):
         jpeg = b"\xff\xd8moving-frame\xff\xd9"
@@ -106,7 +116,7 @@ class FrontierIntegrationTests(unittest.TestCase):
         with patch.object(bridge.socket, "create_connection", return_value=connection):
             bridge.app_send("forward", step=10)
         sent = [entry.args[0] for entry in sock.sendall.call_args_list]
-        self.assertEqual(sent[-1], bridge.pkt(0x11, [0x00, 0x0A]))
+        self.assertEqual(sent[-1], bridge.pkt(0x11, [0x00, 0x64]))
 
     def test_app_reverse_arc_combines_negative_x_and_yaw(self):
         sock = MagicMock()
@@ -476,6 +486,14 @@ class FrontierIntegrationTests(unittest.TestCase):
         ordinary_asymmetry = dict(base, front=1.0, front_left=0.80, front_right=0.60,
                                   left=0.80, right=0.60)
         self.assertEqual(bridge.choose_fluent_steering(ordinary_asymmetry), "forward")
+        # The live default-scale trial reached a clear corridor but the rear
+        # was 0.444 m: steering demanded a curve its own sweep guard vetoed.
+        clear_forward_narrow_rear = dict(base, front=2.47, front_left=0.63,
+                                         front_right=0.97, left=0.49,
+                                         right=1.02, rear=0.444)
+        self.assertEqual(bridge.choose_fluent_steering(clear_forward_narrow_rear), "forward")
+        near_front_narrow_rear = dict(base, rear=0.444)
+        self.assertEqual(bridge.choose_fluent_steering(near_front_narrow_rear), "forward")
         tight_curve = dict(base, front=0.70, front_left=0.70, front_right=1.2, left=0.65, right=0.8)
         self.assertEqual(bridge.choose_fluent_steering(tight_curve, current_action="curveleft"), "forward")
 
