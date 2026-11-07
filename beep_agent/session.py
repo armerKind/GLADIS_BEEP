@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import copy
 import json
 import os
 from pathlib import Path
 import time
 import uuid
+import tempfile
 from typing import Any
 
 from .drives import GoalArbiter, GoalSelection
@@ -39,6 +41,7 @@ class AgentSession:
         self.executive: EmbodiedExecutive | None = None
         self.execution: dict[str, Any] = {"lease_id": None, "latest_frame_at": 0.0,
                                          "issued": {}, "last_outcome": None,
+                                         "executor_fence": None,
                                          "reobserve_through_sequence": -1}
 
     def _adopt(self, candidate: GoalSelection, *, preserve_executive: bool = False) -> None:
@@ -105,10 +108,23 @@ class AgentSession:
             raise SessionIdentityError("execution outcome belongs to a different session or mission")
         key = intent["decision_id"]
         previous = self.execution["issued"].get(key)
+        if previous is not None and previous.get("intent") != intent:
+            raise SessionIdentityError("execution decision identity conflict")
+        state = outcome.get("state")
+        if state not in {"sending", "unknown", "accepted", "applied", "completed", "rejected", "expired_unconfirmed"}:
+            raise SessionIdentityError("invalid execution outcome state")
+        if previous is not None:
+            old_state = previous.get("state")
+            if old_state in {"completed", "rejected"}:
+                return
+            if old_state == "applied" and state in {"sending", "accepted"}:
+                return
+            if old_state == "expired_unconfirmed" and state in {"sending", "unknown", "accepted", "applied"}:
+                return
         if previous == outcome:
             return
-        self.execution["issued"][key] = outcome
-        self.execution["last_outcome"] = outcome
+        self.execution["issued"][key] = copy.deepcopy(outcome)
+        self.execution["last_outcome"] = copy.deepcopy(outcome)
         if outcome.get("state") in {"rejected", "unknown", "expired_unconfirmed"} or intent.get("kind") in {"yield", "stop"}:
             self.execution["reobserve_through_sequence"] = self.world.sequence + 1
 
@@ -134,9 +150,23 @@ class AgentSession:
     def save(self, path: Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True))
-        os.replace(temporary, path)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent,
+                                             prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(self.to_dict(), stream, indent=2, sort_keys=True, allow_nan=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any], *, expected_robot_id: str | None = None,
@@ -165,7 +195,7 @@ class AgentSession:
             session.executive.inspect_attempts = {str(k): int(v) for k, v in value.get("inspect_attempts", {}).items()}
         session.updated_at = float(value["updated_at"])
         if "execution" in value:
-            session.execution = value["execution"]
+            session.execution.update(copy.deepcopy(value["execution"]))
         return session
 
     @classmethod

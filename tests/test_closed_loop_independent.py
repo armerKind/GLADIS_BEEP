@@ -143,6 +143,7 @@ def intent(**changes):
     value = {
         "mission_id": "mission-independent", "lease_id": "lease-independent",
         "session_id": "session-independent", "decision_id": "decision-1",
+        "executor_instance_id": "executor-independent", "executor_generation": 1,
         "frame_id": "window-1", "observed_at": 100.0,
         "latest_frame_at": 101.0, "expires_at": 105.0, "kind": "course_left",
     }
@@ -285,12 +286,18 @@ class BoundaryCase(OfflineCase):
     def setUp(self):
         super().setUp()
         self.mission, self.lease = self.install_mission()
+        self.mission["intent_mailbox"] = bridge.IntentMailbox(require_fencing=True)
         clock = patch.object(bridge.time, "time", return_value=102.0)
         self.clock = clock.start()
         self.addCleanup(clock.stop)
         armed = patch.object(bridge, "SEMANTIC_INTENTS_ENABLED", True)
         armed.start()
         self.addCleanup(armed.stop)
+        if not isinstance(self, IndependentExecutorIntegrationTests):
+            self.assertTrue(bridge.claim_navigation_executor({
+                "mission_id": self.mission["id"], "lease_id": self.lease.lease_id,
+                "session_id": "session-independent", "executor_instance_id": "executor-independent",
+                "expected_generation": 0, "takeover": False})["ok"])
 
 
 class IndependentNavigationBoundaryTests(BoundaryCase):
@@ -395,6 +402,9 @@ class IndependentExecutorIntegrationTests(BoundaryCase):
             session_id="session-independent", created_at=100.0,
             fixed_goal=EmbodiedGoal("explore", "safe space"))
         self.body = BridgeBodyAdapter("http://robot.invalid")
+        claim = patch.object(self.body, "claim_executor", side_effect=bridge.claim_navigation_executor)
+        claim.start()
+        self.addCleanup(claim.stop)
         transport = patch.object(self.body, "_json", side_effect=self.transport)
         self.requests = transport.start()
         self.addCleanup(transport.stop)
@@ -503,12 +513,13 @@ class IndependentExecutorIntegrationTests(BoundaryCase):
                                      expected_mission_id=self.mission["id"])
         self.executor = ClosedLoopExecutor(restored, self.body, mode="supervised",
                                            armed=True, state_path=self.state_path)
+        self.executor.acquire(bridge.mission_snapshot(), takeover=True)
         with self.assertRaisesRegex(ValueError, "duplicate perception packet"):
             self.step()
         repeated = self.step(packet_id="same-frames-new-packet-id")
         self.assertFalse(repeated["dispatch_performed"])
         self.assertEqual(self.requests.call_count, 1)
-        self.assertEqual(restored.execution["issued"][first["intent"]["decision_id"]]["state"], "completed")
+        self.assertEqual(self.executor.session.execution["issued"][first["intent"]["decision_id"]]["state"], "completed")
         self.assertIsNone(self.mission["intent_mailbox"].take(102.0))
 
     def test_rejected_execution_forces_reobservation_before_further_dispatch(self):
@@ -542,6 +553,7 @@ class IndependentExecutorIntegrationTests(BoundaryCase):
         restored = AgentSession.load(self.state_path)
         self.executor = ClosedLoopExecutor(restored, self.body, mode="supervised",
                                            armed=True, state_path=self.state_path)
+        self.executor.acquire(bridge.mission_snapshot(), takeover=True)
         for latest in (102.0, 103.0, 104.0):
             self.clock.return_value = latest + 0.5
             self.assertFalse(self.step(latest=latest)["dispatch_performed"])

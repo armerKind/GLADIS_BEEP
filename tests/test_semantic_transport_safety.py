@@ -48,7 +48,7 @@ class SemanticTransportSafetyTests(unittest.TestCase):
         self.mission = {
             "id": "mission-test", "lease_id": self.lease.lease_id, "lease": self.lease,
             "state": "running", "duration_s": 60, "started_at": time.time(),
-            "finished_at": None, "intent_mailbox": bridge.IntentMailbox(),
+            "finished_at": None, "intent_mailbox": bridge.IntentMailbox(require_fencing=True),
         }
         bridge._active_motion_lease = self.lease
         bridge._active_mission = self.mission
@@ -57,10 +57,15 @@ class SemanticTransportSafetyTests(unittest.TestCase):
         self.intent = {
             "mission_id": self.mission["id"], "lease_id": self.lease.lease_id,
             "session_id": "session-test", "decision_id": "decision-test",
+            "executor_instance_id": "executor-test", "executor_generation": 1,
             "frame_id": "frame-test", "observed_at": now - 0.2,
             "latest_frame_at": now - 0.1, "expires_at": now + 2,
             "kind": "course_left",
         }
+        self.assertTrue(bridge.claim_navigation_executor({
+            "mission_id": self.mission["id"], "lease_id": self.lease.lease_id,
+            "session_id": "session-test", "executor_instance_id": "executor-test",
+            "expected_generation": 0, "takeover": False})["ok"])
         self.status = {
             "scan_seen": True, "scan_age_s": 0.01,
             "slam": {"usable": True, "pose_valid": True,

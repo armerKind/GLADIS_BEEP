@@ -361,6 +361,118 @@ def pkt(cmd: int, payload=()):
     return ("$" + "".join(f"{v & 255:02X}" for v in vals) + "#").encode()
 
 
+def app_packet_guard(action, lease, deadline):
+    """Host-side fence, not a guarantee that TCP bytes can be revoked.
+
+    Recheck after every potentially blocking wait. The semantic interlock stays
+    closed: the receiver does not enforce these tokens and SDK writes are opaque.
+    """
+    # Read identity without waiting for ownership: cancellation holds that lock
+    # while draining app I/O. This is intentionally not claimed linearizable.
+    owner = _active_motion_lease
+    if lease is not None and owner is not lease:
+        raise MotionCancelled("app packet ownership lost")
+    if action != "stop" and lease is None and owner is not None:
+        raise MotionCancelled("app packet has no owning lease")
+    if action == "stop":
+        return
+    if time.monotonic() >= deadline:
+        raise MotionCancelled("app transaction expired")
+    if lease is not None and (lease.cancel_event.is_set() or lease.ended_event.is_set()
+                              or time.monotonic() >= lease.deadline):
+        raise MotionCancelled("app packet lease cancelled or expired")
+    if lease is None:
+        if motion_is_cancelled():
+            raise MotionCancelled("app packet cancelled")
+        return
+    status = snapshot()
+    # Do not acquire mission_lock under app_io_lock: mission cancellation may
+    # hold it while waiting to send stop. Enrollment only ever closes this gate.
+    mission = _active_mission
+    if mission is not None and mission.get("lease") is lease:
+        mailbox = mission["intent_mailbox"]
+        if mailbox.expires_at is not None:
+            if (time.time() >= mailbox.expires_at
+                    or time.monotonic() >= mission.get("semantic_deadline", float("inf"))):
+                raise MotionCancelled("semantic_evidence_expired")
+            raise MotionCancelled(SEMANTIC_TRANSPORT_DISABLED_REASON)
+    sec = validated_sector_values(status.get("sectors") or {})
+    if not scan_ok(status) or sec is None:
+        raise MotionCancelled("app packet local sensors invalid")
+    if action == "forward":
+        safe = (sec["front"] >= FORWARD_CORRIDOR_M
+                and min(sec["front_left"], sec["front_right"]) >= FOOTPRINT_DIAGONAL_M
+                and min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+    elif action in ("back", "backward"):
+        safe = (slam_ok(status) and sec["rear"] >= FOOTPRINT_REAR_M
+                and min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+    else:
+        safe = (min(sec.values()) >= max(TURN_SWEEP_M, FOOTPRINT_SIDE_M)
+                and sec["rear"] >= FOOTPRINT_REAR_M)
+    if not safe:
+        raise MotionCancelled("app packet collision veto")
+    # Snapshot/mission lock acquisition can itself outlast authority.
+    if (lease.cancel_event.is_set() or lease.ended_event.is_set()
+            or time.monotonic() >= min(deadline, lease.deadline)):
+        raise MotionCancelled("app packet authority expired during validation")
+    if _active_motion_lease is not lease:
+        raise MotionCancelled("app packet ownership lost during validation")
+
+
+def app_write_packet(sock, packet, action, lease, deadline):
+    """Owned motion never uses sendall's uncancellable internal retry loop."""
+    app_packet_guard(action, lease, deadline)
+    if lease is None or action == "stop":
+        sock.sendall(packet)
+        return
+    sock.setblocking(False)
+    offset = 0
+    while offset < len(packet):
+        app_packet_guard(action, lease, deadline)
+        try:
+            written = sock.send(packet[offset:])
+        except (BlockingIOError, InterruptedError):
+            lease.cancel_event.wait(0.005)
+            continue
+        if written <= 0:
+            raise ConnectionError("app socket closed during packet")
+        offset += written
+    app_packet_guard(action, lease, deadline)
+
+
+def app_transaction(action, packets):
+    """Serialize a register update, checking every packet and partial write.
+
+    No ownership/mission lock is held across connect, greeting, or send. Stop
+    packets are allowed after cancellation, but never from a replaced lease.
+    """
+    lease = getattr(motion_context, "lease", None)
+    deadline = time.monotonic() + 1.5
+    try:
+        with app_io_lock:
+            app_packet_guard(action, lease, deadline)
+            with socket.create_connection((HOST, APP_PORT), timeout=1.2) as sock:
+                sock.settimeout(0.25)
+                try:
+                    sock.recv(256)
+                except TimeoutError:
+                    # Preserve the legacy unowned/stop optional greeting. Owned
+                    # motion aborts on timeout rather than continuing to write.
+                    if lease is not None and action != "stop":
+                        raise
+                for packet, delay in packets:
+                    app_write_packet(sock, packet, action, lease, deadline)
+                    if delay:
+                        if lease is not None and action != "stop":
+                            lease.cancel_event.wait(delay)
+                        else:
+                            time.sleep(delay)
+    except Exception:
+        if lease is not None and action != "stop":
+            lease.cancel_event.set()
+        raise
+
+
 def app_send(action: str, step=None):
     action = str(action).lower()
     aliases = {"turn_left": "turnleft", "turn_right": "turnright",
@@ -368,38 +480,23 @@ def app_send(action: str, step=None):
     action = aliases.get(action, action)
     if action not in CMD_PAYLOAD and action not in APP_ANALOG_PAYLOAD and action not in APP_REVERSE_ARC_TURN:
         raise ValueError(f"unknown app action {action!r}")
+    packets = [(pkt(0x0F, [0x01]), 0.025)]
+    if action == "stop":
+        packets.extend([(pkt(0x11, [0x00, 0x00]), 0.01), (pkt(0x12, [0x00]), 0)])
+    elif action in APP_REVERSE_ARC_TURN:
+        packets.extend([(pkt(0x11, APP_ANALOG_PAYLOAD["backward"]), 0.025),
+                        (pkt(0x12, [APP_REVERSE_ARC_TURN[action]]), 0)])
+    elif action in APP_ANALOG_PAYLOAD:
+        x, y = APP_ANALOG_PAYLOAD[action]
+        if step is not None:
+            magnitude = min(100, max(1, abs(int(step))))
+            x = 0 if x == 0 else (magnitude if x < 128 else 256 - magnitude)
+            y = 0 if y == 0 else (magnitude if y < 128 else 256 - magnitude)
+        packets.append((pkt(0x11, [x, y]), 0))
+    else:
+        packets.append((pkt(0x12, [CMD_PAYLOAD[action]]), 0))
     with app_io_lock:
-        if action != "stop" and motion_is_cancelled():
-            raise MotionCancelled("motion cancelled before app command")
-        with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
-            s.settimeout(0.25)
-            try:
-                s.recv(256)
-            except Exception:
-                pass
-            # Standard/control mode, then command. Stop only neutralizes velocity:
-            # width, pace and posture are persistent configuration in app V2.0.7.
-            s.sendall(pkt(0x0F, [0x01]))
-            time.sleep(0.025)
-            if action == "stop":
-                s.sendall(pkt(0x11, [0x00, 0x00]))
-                time.sleep(0.01)
-                s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
-            elif action in APP_REVERSE_ARC_TURN:
-                # Combine reverse translation and yaw without changing persistent
-                # width, pace, gait or posture.
-                s.sendall(pkt(0x11, APP_ANALOG_PAYLOAD["backward"]))
-                time.sleep(0.025)
-                s.sendall(pkt(0x12, [APP_REVERSE_ARC_TURN[action]]))
-            elif action in APP_ANALOG_PAYLOAD:
-                x, y = APP_ANALOG_PAYLOAD[action]
-                if step is not None:
-                    magnitude = min(100, max(1, abs(int(step))))
-                    x = 0 if x == 0 else (magnitude if x < 128 else 256 - magnitude)
-                    y = 0 if y == 0 else (magnitude if y < 128 else 256 - magnitude)
-                s.sendall(pkt(0x11, [x, y]))
-            else:
-                s.sendall(pkt(0x12, [CMD_PAYLOAD[action]]))
+        app_transaction(action, packets)
         with state_lock:
             state["last_command"] = "app:" + action
             state["last_command_at"] = time.time()
@@ -692,19 +789,11 @@ def app_curve(direction, forward_step=10):
         raise ValueError("curve direction must be left or right")
     magnitude = min(100, max(1, abs(int(forward_step))))
     with app_io_lock:
-        if motion_is_cancelled():
-            raise MotionCancelled("motion cancelled before app curve")
-        with socket.create_connection((HOST, APP_PORT), timeout=1.2) as s:
-            s.settimeout(0.25)
-            try:
-                s.recv(256)
-            except Exception:
-                pass
-            s.sendall(pkt(0x0F, [0x01]))
-            time.sleep(0.025)
-            s.sendall(pkt(0x11, [0x00, magnitude]))
-            time.sleep(0.025)
-            s.sendall(pkt(0x12, [0x05 if direction == "left" else 0x06]))
+        app_transaction("curve" + direction, [
+            (pkt(0x0F, [0x01]), 0.025),
+            (pkt(0x11, [0x00, magnitude]), 0.025),
+            (pkt(0x12, [0x05 if direction == "left" else 0x06]), 0),
+        ])
         with state_lock:
             state["last_command"] = "app:curve_" + direction
             state["last_command_at"] = time.time()
@@ -731,6 +820,9 @@ def motor_send(action: str, step=None):
 
 
 def stop_burst(n=3):
+    lease = getattr(motion_context, "lease", None)
+    if lease is not None and active_motion_lease() is not lease:
+        return "stop_ownership_lost"
     sdk_errors = []
     sdk_ok = False
     app_errors = []
@@ -746,7 +838,7 @@ def stop_burst(n=3):
                     app_errors.append(repr(e))
                 time.sleep(0.06)
         # Explicit emergency fallback only after the active backend fails.
-        if not app_ok:
+        if not app_ok and (lease is None or active_motion_lease() is lease):
             with sdk_io_lock:
                 for _ in range(n):
                     try:
@@ -2215,21 +2307,54 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     return result
 
 
+def live_mission_owner(mission, lease, value):
+    """Caller holds mission_lock and motion_owner_lock for the whole mutation."""
+    return (isinstance(value, dict) and mission is not None and lease is not None
+            and value.get("mission_id") == mission["id"]
+            and value.get("lease_id") == mission["lease_id"] == lease.lease_id
+            and lease is mission.get("lease") and not lease.cancel_event.is_set()
+            and not lease.ended_event.is_set() and time.monotonic() < lease.deadline
+            and mission["state"] == "running")
+
+
+def claim_navigation_executor(value):
+    """Claim host authority only; this NEVER enables semantic execution.
+
+    Try (never wait for) transport locks under the ownership locks. A busy
+    writer must drain before retry; no client quiescence assertion is accepted.
+    Drained host I/O is not proof of stopped motors or revoked TCP bytes.
+    """
+    with mission_lock, motion_owner_lock:
+        mission, lease = _active_mission, _active_motion_lease
+        if not SEMANTIC_INTENTS_ENABLED:
+            return {"ok": False, "reason": "onboard_not_armed"}
+        if not live_mission_owner(mission, lease, value):
+            return {"ok": False, "reason": "mission_or_lease_mismatch"}
+        if not app_io_lock.acquire(blocking=False):
+            return {"ok": False, "reason": "executor_transport_busy"}
+        try:
+            if not sdk_io_lock.acquire(blocking=False):
+                return {"ok": False, "reason": "executor_transport_busy"}
+            try:
+                return mission["intent_mailbox"].claim(value, safe_to_takeover=True)
+            finally:
+                sdk_io_lock.release()
+        finally:
+            app_io_lock.release()
+
+
 def submit_navigation_intent(value):
     """Queue only: HTTP never sends motion. Opt-in is local startup configuration."""
-    with mission_lock:
+    with mission_lock, motion_owner_lock:
         mission = _active_mission
-        lease = active_motion_lease()
+        lease = _active_motion_lease
         if not SEMANTIC_INTENTS_ENABLED:
             return {"ok": False, "state": "rejected", "reason": "onboard_not_armed"}
-        if (not isinstance(value, dict) or mission is None or lease is None
-                or value.get("mission_id") != mission["id"]
-                or value.get("lease_id") != mission["lease_id"]
-                or lease is not mission.get("lease") or lease.cancel_event.is_set()
-                or lease.ended_event.is_set() or time.monotonic() >= lease.deadline
-                or mission["state"] != "running"):
+        if not live_mission_owner(mission, lease, value):
             return {"ok": False, "state": "rejected", "reason": "mission_or_lease_mismatch"}
         mailbox = mission["intent_mailbox"]
+        if mailbox.fence is None or not mailbox.fence.matches(value):
+            return {"ok": False, "state": "rejected", "reason": "stale_executor_fence"}
         is_new = isinstance(value.get("decision_id"), str) and value["decision_id"] not in mailbox.records
         now = time.time()
         result = mailbox.submit(value, now)
@@ -2245,12 +2370,12 @@ def navigation_intent_guard(status):
         if mission is None or mission.get("lease") is not lease:
             return None
         mailbox = mission["intent_mailbox"]
-        if mailbox.expires_at is None:
+        if mailbox.expires_at is None and mailbox.fence is None:
             return None
         if (active_motion_lease() is not lease or lease.cancel_event.is_set()
                 or lease.ended_event.is_set() or time.monotonic() >= lease.deadline):
             return "semantic_ownership_lost"
-        if (time.time() >= mailbox.expires_at
+        if ((mailbox.expires_at is not None and time.time() >= mailbox.expires_at)
                 or time.monotonic() >= mission.get("semantic_deadline", float("inf"))):
             return "semantic_evidence_expired"
         if not sensor_gate(status) or not scan_ok(status):
@@ -2268,7 +2393,8 @@ def apply_navigation_course(current_action, desired_action, intent):
     # segments with no new intent or no register change.
     with mission_lock, motion_owner_lock:
         mission = _active_mission
-        enrolled = mission is not None and mission["intent_mailbox"].expires_at is not None
+        enrolled = mission is not None and (mission["intent_mailbox"].expires_at is not None
+                                           or mission["intent_mailbox"].fence is not None)
         if enrolled or intent is not None:
             reason = SEMANTIC_TRANSPORT_DISABLED_REASON
             lease = getattr(motion_context, "lease", None)
@@ -2277,10 +2403,15 @@ def apply_navigation_course(current_action, desired_action, intent):
             if intent is not None:
                 finish_navigation_intent(intent, "rejected", reason)
             return current_action, False, reason
-        # Legacy, unenrolled navigation is unchanged. Keep its ordering with
-        # enrollment/cancellation until a transport-level replacement is proven.
-        action, started = start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
-        return action, started, None
+        if MOTOR_BACKEND == "sdk":
+            # The opaque SDK still needs the old admission ordering. It has no
+            # per-packet fence; semantic execution remains disabled for it too.
+            action, started = start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
+            return action, started, None
+    # Transport checks enrollment again per packet. Do not hold mission/owner
+    # locks across vendor waits: admission and watchdog latching must proceed.
+    action, started = start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
+    return action, started, None
 
 
 def navigation_intent_remaining():
@@ -2294,10 +2425,20 @@ def navigation_intent_remaining():
 
 
 def finish_navigation_intent(intent, state_name, reason):
-    with mission_lock:
+    with mission_lock, motion_owner_lock:
         mission = _active_mission
-        if mission is not None and mission["id"] == intent["mission_id"]:
-            mission["intent_mailbox"].outcome(intent["decision_id"], state_name, reason)
+        lease = getattr(motion_context, "lease", None)
+        if (not isinstance(intent, dict) or mission is None or lease is None
+                or _active_motion_lease is not lease or mission.get("lease") is not lease
+                or intent.get("mission_id") != mission["id"]
+                or intent.get("lease_id") != mission["lease_id"] or lease.lease_id != mission["lease_id"]):
+            return
+        mailbox = mission["intent_mailbox"]
+        record = mailbox.records.get(intent.get("decision_id"))
+        if (mailbox.closed or mailbox.fence is None or not mailbox.fence.matches(intent)
+                or record is None or record["intent"] != intent):
+            return
+        mailbox.outcome(intent["decision_id"], state_name, reason)
 
 
 def navigation_intent_boundary(status, local_action, current_action):
@@ -2356,6 +2497,9 @@ def mission_snapshot():
         value = {key: item for key, item in mission.items() if key not in ("thread", "lease", "intent_mailbox")}
         value["intent_outcomes"] = mission["intent_mailbox"].snapshot() if "intent_mailbox" in mission else []
         value["semantic_intents_enabled"] = SEMANTIC_INTENTS_ENABLED
+        value["executor_fencing_enabled"] = True
+        mailbox = mission.get("intent_mailbox")
+        value["executor_fence"] = mailbox.fence_snapshot() if mailbox is not None else None
         value["semantic_execution_enabled"] = False
         value["semantic_execution_disabled_reason"] = SEMANTIC_TRANSPORT_DISABLED_REASON
     now = time.time()
@@ -2444,7 +2588,7 @@ def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
         _mission_sequence += 1
         mission = {
             "id": f"mission-{BOOT_ID}-{_mission_sequence}",
-            "intent_mailbox": IntentMailbox(),
+            "intent_mailbox": IntentMailbox(require_fencing=True),
             "mode": mode,
             "state": "starting",
             "duration_s": duration_s,
@@ -3409,6 +3553,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result, 202 if result.get("accepted") else (409 if result.get("busy") else 412))
             elif p.path == "/mission/cancel":
                 result = cancel_autonomous_mission(body.get("mission_id"), source="http_mission_cancel", lease_id=body.get("lease_id"))
+                self.send_json(result, 200 if result.get("ok") else 409)
+            elif p.path == "/mission/executor/claim":
+                result = claim_navigation_executor(body)
                 self.send_json(result, 200 if result.get("ok") else 409)
             elif p.path == "/mission/intent":
                 result = submit_navigation_intent(body)

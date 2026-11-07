@@ -82,6 +82,9 @@ class BridgeBodyAdapter:
     def submit_intent(self, intent: dict[str, Any]) -> dict[str, Any]:
         return self._json("/mission/intent", intent)
 
+    def claim_executor(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._json("/mission/executor/claim", request)
+
     def dispatch(self, call: SkillCall, *, rollout_mode: str = "shadow",
                  mission_id: str | None = None, lease_id: str | None = None) -> DispatchResult:
         call = validate_skill_call(call)
