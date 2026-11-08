@@ -158,6 +158,8 @@ motion_lock = threading.RLock()
 motion_owner_lock = threading.RLock()
 sdk_io_lock = threading.RLock()
 app_io_lock = threading.RLock()
+# Serialize compound motion transitions without blocking stop on connect/recv.
+app_transition_lock = threading.RLock()
 motion_context = threading.local()
 _active_motion_lease = None
 _motion_lease_sequence = 0
@@ -166,7 +168,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.20.9-steering-sweep",
+    "version": "0.21.0-stop-priority",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -449,17 +451,20 @@ def app_transaction(action, packets):
     lease = getattr(motion_context, "lease", None)
     deadline = time.monotonic() + 1.5
     try:
-        with app_io_lock:
-            app_packet_guard(action, lease, deadline)
-            with socket.create_connection((HOST, APP_PORT), timeout=1.2) as sock:
-                sock.settimeout(0.25)
-                try:
-                    sock.recv(256)
-                except TimeoutError:
-                    # Preserve the legacy unowned/stop optional greeting. Owned
-                    # motion aborts on timeout rather than continuing to write.
-                    if lease is not None and action != "stop":
-                        raise
+        app_packet_guard(action, lease, deadline)
+        # Connection setup and greeting cannot hold the register-write lock:
+        # /stop must be able to acquire it while an owned socket stalls here.
+        with socket.create_connection((HOST, APP_PORT), timeout=1.2) as sock:
+            sock.settimeout(0.25)
+            try:
+                sock.recv(256)
+            except TimeoutError:
+                # Preserve the legacy unowned/stop optional greeting. Owned
+                # motion aborts on timeout rather than continuing to write.
+                if lease is not None and action != "stop":
+                    raise
+            with app_io_lock:
+                app_packet_guard(action, lease, deadline)
                 for packet, delay in packets:
                     app_write_packet(sock, packet, action, lease, deadline)
                     if delay:
@@ -467,6 +472,16 @@ def app_transaction(action, packets):
                             lease.cancel_event.wait(delay)
                         else:
                             time.sleep(delay)
+                # Publish while still owning the wire: a later stop cannot be
+                # overwritten by stale "moving=True" from this transaction.
+                with state_lock:
+                    now = time.time()
+                    state["last_command"] = ("app:curve_" + action[5:] if action.startswith("curve")
+                                             else "app:" + action)
+                    state["last_command_at"] = now
+                    if action.startswith("curve"):
+                        state["last_motion_at"] = now
+                    state["moving"] = action != "stop"
     except Exception:
         if lease is not None and action != "stop":
             lease.cancel_event.set()
@@ -504,12 +519,11 @@ def app_send(action: str, step=None):
         packets.append((pkt(0x11, [x, y]), 0))
     else:
         packets.append((pkt(0x12, [CMD_PAYLOAD[action]]), 0))
-    with app_io_lock:
+    if action == "stop":
         app_transaction(action, packets)
-        with state_lock:
-            state["last_command"] = "app:" + action
-            state["last_command_at"] = time.time()
-            state["moving"] = action != "stop"
+    else:
+        with app_transition_lock:
+            app_transaction(action, packets)
     remember("app_send", action=action)
 
 
@@ -797,22 +811,17 @@ def app_curve(direction, forward_step=10):
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
     magnitude = app_joystick_percent(forward_step)
-    with app_io_lock:
+    with app_transition_lock:
         app_transaction("curve" + direction, [
             (pkt(0x0F, [0x01]), 0.025),
             (pkt(0x11, [0x00, magnitude]), 0.025),
             (pkt(0x12, [0x05 if direction == "left" else 0x06]), 0),
         ])
-        with state_lock:
-            state["last_command"] = "app:curve_" + direction
-            state["last_command_at"] = time.time()
-            state["last_motion_at"] = time.time()
-            state["moving"] = True
 
 
 def app_straighten(forward_step=10):
     """Release retained app registers, then restart straight translation."""
-    with app_io_lock:
+    with app_transition_lock:
         app_send("stop")
         if motion_is_cancelled():
             remember("app_straighten_cancelled", forward_step=int(forward_step))

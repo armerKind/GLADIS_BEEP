@@ -9,6 +9,7 @@ from .tactical import TacticalDisposition, TacticalEvent, TacticalGate, Tactical
 from .visual_grounding import (CameraCalibration, Detection, DirectiveValidation, GroundingError,
                                ViewpointCone, ViewpointRequest, ground_viewpoint,
                                validate_viewpoint_request)
+from .viewpoint_scorer import OccupancySnapshot, ViewpointCandidate, score_viewpoint
 from .world_model import EntityTrack, WorldModel
 
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "TacticalDisposition", "TacticalEvent", "TacticalGate", "TacticalValidationError",
     "CameraCalibration", "Detection", "DirectiveValidation", "GroundingError",
     "ViewpointCone", "ViewpointRequest", "ground_viewpoint", "validate_viewpoint_request",
+    "OccupancySnapshot", "ViewpointCandidate", "score_viewpoint",
     "skill", "validate_skill_call",
 ]

@@ -522,7 +522,7 @@ class FrontierIntegrationTests(unittest.TestCase):
         app_straighten.assert_called_once_with(forward_step=10)
         sdk_straighten.assert_not_called()
 
-    def test_app_stop_waits_for_straighten_transaction_and_is_final(self):
+    def test_app_stop_preempts_stalled_straighten_and_is_final(self):
         commands = []
         release_started = threading.Event()
         allow_restart = threading.Event()
@@ -543,7 +543,8 @@ class FrontierIntegrationTests(unittest.TestCase):
                 stopper = threading.Thread(target=bridge.request_stop, args=("race_test",))
                 stopper.start()
                 self.assertTrue(lease.cancel_event.wait(1.0))
-                self.assertTrue(stopper.is_alive())
+                stopper.join(0.6)
+                self.assertFalse(stopper.is_alive(), "stop waited behind motion transition")
                 allow_restart.set()
                 transition.join(1.0)
                 stopper.join(2.0)

@@ -278,22 +278,54 @@ class TransportFencingTests(unittest.TestCase):
         self.assertTrue(results[0]["cancelled"])
         self.assertEqual(self.first_writes(), [])
 
-    def test_stop_latches_but_cannot_preempt_greeting_lock_known_gap(self):
-        """A limitation witness, not a passing physical stop-latency guarantee."""
+    def test_stop_preempts_stalled_greeting_before_motion_writes(self):
+        """Host stop I/O must not queue behind a stalled motion greeting."""
         worker = self.start("recv")
         completed = threading.Event()
-        stopper = threading.Thread(target=lambda: (bridge.request_stop("phase_c_probe", n=1),
+        result = []
+        stopper = threading.Thread(target=lambda: (result.append(bridge.request_stop("phase_c_probe", n=1)),
                                                    completed.set()), daemon=True)
         self.workers.append(stopper)
         stopper.start()
         self.assertTrue(self.lease.cancel_event.wait(1), "stop cancellation latch delayed")
-        self.assertFalse(completed.wait(.05), "greeting unexpectedly released I/O lock")
-        self.assertTrue(stopper.is_alive(), "stop should be queued behind greeting")
+        self.assertTrue(completed.wait(.6), "stop packet queued behind greeting")
+        self.assertTrue(worker.is_alive(), "movement greeting was not held during stop")
+        self.assertIsNone(result[0])
+        self.assertEqual(self.first_writes(), [])
+        self.assertEqual(bridge.state["last_command"], "app:stop")
+        self.assertFalse(bridge.state["moving"])
         self.finish(worker)
+        self.assertEqual(bridge.state["last_command"], "app:stop")
+        self.assertFalse(bridge.state["moving"])
         stopper.join(4)
         self.assertFalse(stopper.is_alive())
-        self.assertTrue(completed.is_set())
+
+    def test_stop_preempts_stalled_connect_before_motion_writes(self):
+        worker = self.start("connect")
+        completed = threading.Event()
+        stopper = threading.Thread(target=lambda: (bridge.request_stop("phase_c_connect", n=1),
+                                                   completed.set()), daemon=True)
+        self.workers.append(stopper)
+        stopper.start()
+        self.assertTrue(self.lease.cancel_event.wait(1))
+        self.assertTrue(completed.wait(.6), "stop packet queued behind connect")
         self.assertEqual(self.first_writes(), [])
+        self.finish(worker)
+
+    def test_stop_still_waits_for_already_entered_write_known_limit(self):
+        worker = self.start("motion", "late_accept", curve=True)
+        completed = threading.Event()
+        stopper = threading.Thread(target=lambda: (bridge.request_stop("phase_c_inflight", n=1),
+                                                   completed.set()), daemon=True)
+        self.workers.append(stopper)
+        stopper.start()
+        self.assertTrue(self.lease.cancel_event.wait(1))
+        self.assertFalse(completed.wait(.05), "in-flight wire call was not serialized")
+        self.finish(worker)
+        self.assertTrue(completed.wait(2))
+        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]),
+                                               bridge.pkt(0x11, [0, 100])])
+        self.assertEqual(bridge.state["last_command"], "app:stop")
 
     def test_inflight_write_is_not_revocable_so_semantic_interlock_stays_closed(self):
         worker = self.start("motion", "late_accept", curve=True)
