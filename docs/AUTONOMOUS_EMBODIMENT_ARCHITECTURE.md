@@ -31,7 +31,7 @@ Proposed `TacticalEvent` (create `beep_agent/tactical.py`; schema and fake-clock
 {
   "schema_version": 1,
   "event_id": "evt-...", "session_id": "...", "boot_id": "...",
-  "map_epoch": 4, "mission_id": "...", "lease_id": "...",
+  "map_epoch": 4, "map_revision": 7, "mission_id": "...", "lease_id": "...",
   "source": "vad_onset|vad_end|visual_salience|local_hazard|speech_keyword",
   "acquired_at_robot": 0.0, "ttl_ms": 2000,
   "confidence": 0.0,
@@ -55,8 +55,8 @@ Proposed `VisualBearing` (new `beep_agent/visual_grounding.py`; `tests/test_visu
 ```json
 {
   "frame_id": "...", "track_id": "object-0001",
-  "boot_id": "...", "map_epoch": 4,
-  "acquired_at_robot": 0.0,
+  "boot_id": "...", "map_epoch": 4, "map_revision": 7,
+  "acquired_at_robot": 0.0, "capture_event_id": "evt-frame-...",
   "bbox_norm": [0.35, 0.30, 0.55, 0.72],
   "surface_class": "floor_level|elevated|unknown|occluded",
   "camera_posture": "stand|sit|unknown",
@@ -66,7 +66,7 @@ Proposed `VisualBearing` (new `beep_agent/visual_grounding.py`; `tests/test_visu
 
 **Pipeline:** (1) the model returns a bounded box or `null`, plus surface class and provenance; (2) fetch the guarded capture-time local pose from a short Pi-side history, not the global `map → base_link` pose remembered at inference completion; reject missing/ambiguous epoch, invalid pose, changed camera posture, or excessive interpolation gap; (3) with calibrated horizontal FOV and body-to-camera yaw, convert normalized horizontal center `u` in `[0,1]` to approximate bearing `θ_body(t) + yaw_camera(posture) + atan((2u−1)·tan(HFOV/2))`; expand by box width and measured calibration/SLAM uncertainty, not an arbitrary narrow constant; (4) intersect the cone with free/unknown/occupied map **as uncertainty**, score reachable inflated-map standoff viewpoints, and let fresh local LiDAR validate any route. Never raycast through unknown space and announce the target is at the first occupied cell.
 
-**Loop-closure trap:** `map_epoch` tracks resets, not every global pose-graph correction. BEEP's Cartographer config currently has `provide_odom_frame = true` and `use_odometry = false`: its continuous `odom` frame is *local SLAM*, **not an independent wheel/IMU odometer**. Stamp each camera acquisition and its `odom → base_link` transform in the same ROS/robot time domain; retain the local transform and uncertainty in the short ring. For a fresh map query, compose the latest validated optimized `map → odom` with the **capture-time** `odom → base_link` and camera extrinsics. Do not simply subtract two historical `map → base_link` poses across loop closure. Track a map/optimization revision or detect untrusted corrections, and invalidate/reobserve old bearing hypotheses if the relevant submap geometry moved non-rigidly, TF history is missing, or map/pose consistency fails; even a corrected current transform is not a universal repair for older submaps. The bridge currently publishes guarded `map → base_link` snapshots but **does not provide this capture-time transform ring or revision contract**. Fake-TF tests must inject an optimization jump with an unchanged epoch, interpolation gaps, clock skew and non-rigid map changes; none may silently yield a precise waypoint.
+**Loop-closure trap:** `map_epoch` tracks resets, not every global pose-graph correction. BEEP's Cartographer config currently has `provide_odom_frame = true` and `use_odometry = false`: its continuous `odom` frame is *local SLAM*, **not an independent wheel/IMU odometer**. Stamp each camera acquisition and its `odom → base_link` transform with both a robot acquisition timestamp and a ROS TF stamp; validate their clock relationship rather than treating them as the same clock. Retain the local transform and uncertainty in the short ring. For a fresh map query, compose the latest validated optimized `map → odom` with the **capture-time** `odom → base_link` and camera extrinsics. Do not simply subtract two historical `map → base_link` poses across loop closure. Track a map/optimization revision or detect untrusted corrections, and invalidate/reobserve old bearing hypotheses if the relevant submap geometry moved non-rigidly, TF history is missing, or map/pose consistency fails; even a corrected current transform is not a universal repair for older submaps. The bridge currently publishes guarded `map → base_link` snapshots but **does not provide this capture-time transform ring or revision contract**. Fake-TF tests must inject an optimization jump with an unchanged epoch, interpolation gaps, clock skew and non-rigid map changes; none may silently yield a precise waypoint.
 
 For `floor_level`, choose an observable safe viewpoint near the cone; short floor objects may be invisible to planar LiDAR. For `elevated`, propose a wider standoff and, once **stopped and posture-safe**, a `sit`/upward-camera inspection. Neither the table-leg cluster nor the wall is assumed to be the object. A second changed-angle view can narrow a track bearing; only calibrated geometry and consistent localization permit metric triangulation. Until then, a typed `investigate_bearing` remains advisory.
 
@@ -112,13 +112,36 @@ Primary AEC references: Speex's [echo cancellation API/manual](https://www.speex
 
 ## 7. Ownership, contracts and milestones
 
-The three lifetimes from the original design remain: one canonical embodied session, interruptible strategic goal, immutable exclusive navigation lease. A short local attention event never changes the strategic goal. GLADIS proposes; the Pi validates freshness/boot/map epoch/exact lease/revision; the local controller applies only bounded, supported physical effects and reports `accepted/rejected/applied/completed`. Compatible goal-region updates keep the gait and lease; incompatible behaviors intentionally stop. The Pi watchdog and six-sector guard do not depend on GLADIS, System 1 or the audio/cloud provider.
+The three lifetimes from the original design remain: one canonical embodied session, interruptible strategic goal, immutable exclusive navigation lease. A short local attention event never changes the strategic goal. GLADIS proposes; the Pi validates freshness/boot/map epoch/map revision/exact lease/goal revision; the local controller applies only bounded, supported physical effects and reports `accepted/rejected/applied/completed`. Compatible goal-region updates keep the gait and lease; incompatible behaviors intentionally stop. The Pi watchdog and six-sector guard do not depend on GLADIS, System 1 or the audio/cloud provider.
+
+**Phase A prerequisite — version the spatial event envelope before journaling.** `EventEnvelope` v1 is a *proposed new journal schema*, not the existing `beep_agent/session.py` snapshot schema. Define its fields and replay contract in Phase A, before the place graph creates metric nodes; do not bolt the revision/pose fields onto old journal entries in Phase C. An illustrative frame-acquisition event (non-spatial events retain the same keys with `capture_local_transform: null`):
+
+```json
+{
+  "schema_version": 1, "event_id": "evt-frame-...", "event_kind": "frame_acquired",
+  "robot_id": "beep", "session_id": "...", "boot_id": "...",
+  "mission_id": null, "lease_id": null,
+  "acquired_at_robot": 0.0, "robot_clock": "boot_monotonic",
+  "acquired_at_ros_ns": 0,
+  "map_epoch": 4, "map_revision": 7, "map_revision_status": "verified",
+  "map_snapshot_id": "grid-...",
+  "capture_local_transform": {
+    "parent_frame": "odom", "child_frame": "base_link",
+    "stamp_ros_ns": 0, "x_m": 0.0, "y_m": 0.0, "yaw_rad": 0.0,
+    "source": "cartographer_local_slam", "valid": true,
+    "uncertainty": null
+  },
+  "evidence_id": "frame-...", "payload": {}
+}
+```
+
+The bridge owns a monotonically increasing `map_revision` **within each `(boot_id, map_epoch)`**, advanced on a verified optimized-map correction/relocalization (for example, changed global placement of an already known submap). A new LiDAR scan, ordinary local-pose tick or version change of a still-growing submap is **not** by itself a loop closure; occupancy-content updates belong to `map_snapshot_id`. Cartographer's published `SubmapList` includes submap poses and versions but is **not** an explicit global optimization counter. The bridge must validate its detection/provenance rather than fabricating a precise revision from the clock or raw `/map` publication count. If it cannot establish this, record `map_revision: null, map_revision_status: "unknown"` and withhold metric graph updates/visual routes. `map_snapshot_id` separately identifies the occupancy-grid snapshot used for free-space evidence; it is not interchangeable with an optimization revision. `acquired_at_robot` is a boot-scoped monotonic timestamp, whereas `acquired_at_ros_ns` and transform stamps are ROS time; verify conversion and interpolation bounds before associating them. Retain the acquisition-time local transform **in the append-only record**, even if the live pose ring later evicts it. If spatial TF is absent or invalid, persist `capture_local_transform: null` and forbid metric effects rather than inventing coordinates. A revision change triggers reproject/revalidate or invalidate affected node geometry and edges; it does not erase the embodied session or semantic memory. `TacticalEvent` and `VisualBearing` carry the same revision and may link to the acquisition event via `capture_event_id`; no event can promote a stale old-revision pose to a current waypoint just by changing its revision number.
 
 **Revised implementation order:**
 
-- **A — identity + memory:** event envelope, embodied session across leases, working ring and map-revision-aware place graph with deterministic spawning/dedupe, append-only journal, episodes. Tests for map reset, same-epoch loop closure, open room/corridor/doorway node counts, stale object bearing and prompt compaction preserving diagnostic trace.
+- **A — identity + memory:** define `EventEnvelope` v1 with boot-scoped `map_revision`/status, map snapshot ID, capture-time `odom → base_link` transform and dual-clock stamps; build the local pose ring and validated revision producer before the graph/journal consumes metric events. Then embodied session across leases, map-revision-aware place graph with deterministic spawning/dedupe, append-only journal and episodes. Offline tests for schema round-trip, unknown-revision fail-closed, map reset, same-epoch loop closure, clock skew, invalid transform, open room/corridor/doorway node counts and prompt compaction preserving diagnostic trace. No live bridge capability is implied.
 - **B — strategic + tactical cognition:** lifetime charter and self-chosen goals; strict `TacticalEvent` producer from VAD/visual salience; no second planner, no unsupervised pace/gait change; benchmark optional fast classifier. Tests with delayed System 2, gait-induced camera/audio noise, quiet human speech during gait and immediate Pi safety/vocal acknowledgment.
-- **C — visual grounding + motion review:** calibrated local-pose-history lookup plus current optimized transform and conservative viewpoint cone; pure navigation-directive validation; discrepancy monitor; bounded-stop-lock transport races and measured stop-distance characterization. Keep semantic motor dispatch off until physical residual bounds and vendor parity are proven.
+- **C — visual grounding + motion review:** consume Phase A's immutable acquisition event/local transform and revision without migrating its journal schema; combine with a current optimized transform for a conservative viewpoint cone. Add pure navigation-directive validation, discrepancy monitor, bounded-stop-lock transport races and measured stop-distance characterization. Keep semantic motor dispatch off until physical residual bounds and vendor parity are proven.
 - **D — speech:** bounded capture, transcription, AEC/double-talk and independent-clock drift benchmarks, cached acknowledgment, interrupted TTS, separate stop authority. Privacy/consent gate before ambient upload.
 - **E — physical commissioning:** BEEP powered later by Max; deploy while stopped, verify exact live version/owner/sensors, then observe-only, short guarded route revision and stop, and finally supervised sustained gait plus social barge-in. Report measured gait-active intervals, displacement, view diversity, model-stall continuity and exact stop state. No plan revision itself moves BEEP.
 
