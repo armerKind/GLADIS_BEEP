@@ -7,7 +7,7 @@ legacy scene labels are semantic hints, not pixel rays or metric positions.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import atan2, cos, isfinite, pi, sin
+from math import atan, atan2, cos, isfinite, pi, sin, tan
 
 from .events import EventEnvelope
 from .pose_history import MapTransform, project_capture
@@ -95,6 +95,8 @@ class ViewpointCone:
     bearing_center_rad: float
     bearing_half_width_rad: float
     confidence: float
+    origin_xy_std_m: float | None
+    slam_yaw_std_rad: float | None
     motor_authority: bool = field(default=False, init=False)
 
 
@@ -117,18 +119,31 @@ def ground_viewpoint(event: EventEnvelope, detection: Detection, optimized: MapT
     projected = project_capture(event, optimized)
     if projected is None:
         return None
+    assert event.evidence_id is not None
     c, s = cos(projected.yaw_rad), sin(projected.yaw_rad)
-    center = (detection.bbox_left + detection.bbox_right) / 2
-    half_width = (detection.bbox_right - detection.bbox_left) * calibration.horizontal_fov_rad / 2
+    # Compute each pixel edge through the calibrated pinhole model. The
+    # angular midpoint is not the angle of the pixel midpoint off-axis.
+    half_fov_tangent = tan(calibration.horizontal_fov_rad / 2)
+    left = atan((1 - 2 * detection.bbox_left) * half_fov_tangent)
+    right = atan((1 - 2 * detection.bbox_right) * half_fov_tangent)
+    local = event.capture_local_transform
+    assert local is not None
+    measured = local["uncertainty"]
+    slam_yaw_std = 0.0 if measured is None else measured["yaw_std_rad"]
+    half_width = (left - right) / 2 + calibration.angular_error_rad + slam_yaw_std
+    if half_width >= pi / 2:
+        # A hemisphere-sized interval cannot guide even an advisory viewpoint.
+        return None
     return ViewpointCone(
         detection.target_id, detection.target_kind, event.event_id, event.evidence_id,
         event.session_id, event.boot_id, projected.map_epoch, projected.map_revision,
         projected.map_snapshot_id, event.acquired_at_robot,
         projected.x_m + c * calibration.offset_forward_m - s * calibration.offset_left_m,
         projected.y_m + s * calibration.offset_forward_m + c * calibration.offset_left_m,
-        _angle(projected.yaw_rad + calibration.yaw_offset_rad
-               + (0.5 - center) * calibration.horizontal_fov_rad),
-        half_width + calibration.angular_error_rad, detection.confidence,
+        _angle(projected.yaw_rad + calibration.yaw_offset_rad + (left + right) / 2),
+        half_width, detection.confidence,
+        None if measured is None else measured["xy_std_m"],
+        None if measured is None else measured["yaw_std_rad"],
     )
 
 
@@ -166,7 +181,7 @@ class DirectiveValidation:
 
 def validate_viewpoint_request(request: ViewpointRequest, cone: ViewpointCone,
                                event: EventEnvelope, *, now_robot: float,
-                               boot_id: str, map_epoch: int, map_revision: int,
+                               current_session_id: str, boot_id: str, map_epoch: int, map_revision: int,
                                map_snapshot_id: str, mission_id: str | None,
                                lease_id: str | None) -> DirectiveValidation:
     """Advisory admission only; local collision/route policy remains separate.
@@ -183,11 +198,13 @@ def validate_viewpoint_request(request: ViewpointRequest, cone: ViewpointCone,
     context = (boot_id, map_epoch, map_revision, map_snapshot_id)
     if (request.boot_id, request.map_epoch, request.map_revision, request.map_snapshot_id) != context or (
             cone.boot_id, cone.map_epoch, cone.map_revision, cone.map_snapshot_id) != context or (
-            event.boot_id, event.map_epoch, event.map_revision, event.map_snapshot_id) != context or (
-            event.session_id != cone.session_id):
+            event.boot_id, event.map_epoch, event.map_revision, event.map_snapshot_id) != context:
         return DirectiveValidation(False, "map_context_mismatch")
-    if (request.mission_id, request.lease_id) != (mission_id, lease_id) or (
-            event.mission_id, event.lease_id) != (mission_id, lease_id):
+    if event.session_id != current_session_id or cone.session_id != current_session_id:
+        return DirectiveValidation(False, "session_mismatch")
+    if (not mission_id or not lease_id
+            or (request.mission_id, request.lease_id) != (mission_id, lease_id)
+            or (event.mission_id, event.lease_id) not in ((mission_id, lease_id), (None, None))):
         return DirectiveValidation(False, "ownership_mismatch")
     if (now < event.acquired_at_robot or now >= request.expires_at_robot
             or request.expires_at_robot > event.acquired_at_robot + 2.0):

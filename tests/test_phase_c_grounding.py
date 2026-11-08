@@ -3,6 +3,7 @@ import json
 import math
 import unittest
 from pathlib import Path
+from typing import Any
 
 from beep_agent.events import EventEnvelope
 from beep_agent.pose_history import MapTransform
@@ -13,10 +14,11 @@ from beep_agent.visual_grounding import (
 
 
 def exposure(*, at=1.0, revision=3, snapshot="grid-1", posture="level", event_id="frame-1",
-             evidence_id="img-1", yaw=0.0, quality="sensor_exposure", lease: str | None="lease-1"):
+             evidence_id="img-1", yaw=0.0, quality="sensor_exposure", lease: str | None="lease-1",
+             session="session-1", uncertainty=None):
     return EventEnvelope.from_dict({
         "schema_version": 1, "event_id": event_id, "event_kind": "frame_acquired",
-        "source": "camera", "robot_id": "beep", "session_id": "session-1", "boot_id": "boot-1",
+        "source": "camera", "robot_id": "beep", "session_id": session, "boot_id": "boot-1",
         "mission_id": "mission-1" if lease else None, "lease_id": lease,
         "acquired_at_robot": at, "received_at_robot": at + 0.01,
         "robot_clock": "boot_monotonic", "timestamp_quality": quality,
@@ -26,7 +28,7 @@ def exposure(*, at=1.0, revision=3, snapshot="grid-1", posture="level", event_id
         "capture_local_transform": {
             "parent_frame": "odom", "child_frame": "base_link", "stamp_ros_ns": int(at * 1e9),
             "x_m": 1.0, "y_m": 2.0, "yaw_rad": yaw, "source": "synthetic_local_tf",
-            "valid": True, "uncertainty": None},
+            "valid": True, "uncertainty": uncertainty},
         "payload": {"camera_posture_id": posture},
     })
 
@@ -48,8 +50,12 @@ class VisualGroundingTests(unittest.TestCase):
         self.assertEqual((cone.map_epoch, cone.map_revision, cone.map_snapshot_id), (2, 3, "grid-1"))
         self.assertAlmostEqual(cone.origin_x_m, 1.1)
         self.assertAlmostEqual(cone.origin_y_m, 2.2)
-        self.assertAlmostEqual(cone.bearing_center_rad, 0.1 - 0.3 * math.pi / 2)
-        self.assertAlmostEqual(cone.bearing_half_width_rad, 0.1 * math.pi / 2 + 0.05)
+        left = math.atan((1 - 2 * .7) * math.tan(math.pi / 4))
+        right = math.atan((1 - 2 * .9) * math.tan(math.pi / 4))
+        self.assertAlmostEqual(cone.bearing_center_rad, .1 + (left + right) / 2)
+        self.assertAlmostEqual(cone.bearing_half_width_rad, (left - right) / 2 + .05)
+        self.assertIsNone(cone.origin_xy_std_m)
+        self.assertIsNone(cone.slam_yaw_std_rad)
         self.assertFalse(hasattr(cone, "target_x_m"))
         self.assertFalse(hasattr(cone, "range_m"))
         self.assertFalse(cone.motor_authority)
@@ -60,7 +66,9 @@ class VisualGroundingTests(unittest.TestCase):
         assert cone is not None
         self.assertAlmostEqual(cone.origin_x_m, 0.8)
         self.assertAlmostEqual(cone.origin_y_m, 2.1)
-        self.assertAlmostEqual(cone.bearing_center_rad, math.pi / 2 + 0.1 - 0.3 * math.pi / 2)
+        left = math.atan((1 - 2 * .7) * math.tan(math.pi / 4))
+        right = math.atan((1 - 2 * .9) * math.tan(math.pi / 4))
+        self.assertAlmostEqual(cone.bearing_center_rad, math.pi / 2 + .1 + (left + right) / 2)
 
     def test_exposure_posture_evidence_and_projection_fail_closed(self):
         base = exposure()
@@ -109,7 +117,7 @@ class VisualGroundingTests(unittest.TestCase):
         req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
                                "grid-1", "mission-1", "lease-1", 1.5)
         accepted = validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
-                                               boot_id="boot-1", map_epoch=2, map_revision=3,
+                                               current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3,
                                                map_snapshot_id="grid-1", mission_id="mission-1", lease_id="lease-1")
         self.assertTrue(accepted.accepted)
         self.assertFalse(accepted.motor_authority)
@@ -121,24 +129,84 @@ class VisualGroundingTests(unittest.TestCase):
         ):
             request = ViewpointRequest(**{**vars(req), **changed})
             self.assertEqual(validate_viewpoint_request(request, cone, exposure(),
-                now_robot=1.1, boot_id="boot-1", map_epoch=2, map_revision=3,
+                now_robot=1.1, current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3,
                 map_snapshot_id="grid-1", mission_id="mission-1", lease_id="lease-1").reason, reason)
         self.assertEqual(validate_viewpoint_request(req, cone, exposure(), now_robot=1.6,
-            boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
+            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
             mission_id="mission-1", lease_id="lease-1").reason, "expired")
         self.assertEqual(validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
-            boot_id="boot-1", map_epoch=2, map_revision=4, map_snapshot_id="grid-1",
+            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=4, map_snapshot_id="grid-1",
             mission_id="mission-1", lease_id="lease-1").reason, "map_context_mismatch")
         self.assertEqual(validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
-            boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-2",
+            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-2",
             mission_id="mission-1", lease_id="lease-1").reason, "map_context_mismatch")
         self.assertEqual(validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
-            boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
+            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
             mission_id="new-mission", lease_id="new-lease").reason, "ownership_mismatch")
         delayed = ViewpointRequest(**{**vars(req), "expires_at_robot": 4.0})
         self.assertEqual(validate_viewpoint_request(delayed, cone, exposure(), now_robot=1.1,
-            boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
+            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
             mission_id="mission-1", lease_id="lease-1").reason, "expired")
+
+    def test_stationary_observation_can_bind_new_lease_but_stale_owner_cannot(self):
+        stationary = exposure(lease=None)
+        cone = ground_viewpoint(stationary, self.detection, transform(), self.calibration)
+        assert cone is not None
+        req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
+                               "grid-1", "mission-2", "lease-2", 1.5)
+        current: dict[str, Any] = dict(now_robot=1.1, current_session_id="session-1", boot_id="boot-1",
+                       map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
+                       mission_id="mission-2", lease_id="lease-2")
+        result = validate_viewpoint_request(req, cone, stationary, **current)
+        self.assertTrue(result.accepted)
+        self.assertFalse(result.motor_authority)
+        self.assertEqual(validate_viewpoint_request(req, cone, stationary,
+            **{**current, "current_session_id": "replacement"}).reason, "session_mismatch")
+        self.assertEqual(validate_viewpoint_request(req, cone, stationary,
+            **{**current, "lease_id": "lease-3"}).reason, "ownership_mismatch")
+        self.assertEqual(validate_viewpoint_request(req, cone, stationary,
+            **{**current, "map_revision": 4}).reason, "map_context_mismatch")
+        old_owned = exposure(lease="lease-1")
+        old_cone = ground_viewpoint(old_owned, self.detection, transform(), self.calibration)
+        assert old_cone is not None
+        self.assertEqual(validate_viewpoint_request(req, old_cone, old_owned,
+            **current).reason, "ownership_mismatch")
+        self.assertEqual(validate_viewpoint_request(req, cone, stationary,
+            **{**current, "mission_id": None, "lease_id": None}).reason, "ownership_mismatch")
+
+    def test_pinhole_bbox_edges_and_measured_slam_yaw_expand_cone(self):
+        hfov = math.radians(110)
+        calibration = CameraCalibration("level", hfov, .1, .1, .2, .05)
+        detection = Detection("cap", "object", "frame-1", "img-1", .8, .6, .95)
+        event = exposure(uncertainty={"xy_std_m": .03, "yaw_std_rad": .08})
+        cone = ground_viewpoint(event, detection, transform(), calibration)
+        assert cone is not None
+        left = math.atan((1 - 2 * .6) * math.tan(hfov / 2))
+        right = math.atan((1 - 2 * .95) * math.tan(hfov / 2))
+        self.assertAlmostEqual(cone.bearing_center_rad, .1 + (left + right) / 2)
+        self.assertAlmostEqual(cone.bearing_half_width_rad, (left - right) / 2 + .05 + .08)
+        assert cone.origin_xy_std_m is not None and cone.slam_yaw_std_rad is not None
+        self.assertAlmostEqual(cone.origin_xy_std_m, .03)
+        self.assertAlmostEqual(cone.slam_yaw_std_rad, .08)
+        self.assertNotAlmostEqual(cone.bearing_center_rad,
+                                  .1 + (0.5 - (.6 + .95) / 2) * hfov, places=3)
+        self.assertFalse(hasattr(cone, "target_x_m"))
+        self.assertFalse(cone.motor_authority)
+
+    def test_moving_views_are_separate_rays_not_triangulated_points(self):
+        first = exposure(event_id="frame-1", evidence_id="img-1")
+        second = exposure(at=1.3, event_id="frame-2", evidence_id="img-2", yaw=.2)
+        second_data = second.to_dict()
+        second_data["capture_local_transform"]["x_m"] = 1.4
+        second = EventEnvelope.from_dict(second_data)
+        a = ground_viewpoint(first, self.detection, transform(), self.calibration)
+        b = ground_viewpoint(second, Detection("cap", "object", "frame-2", "img-2",
+                   .8, .7, .9), transform(at=1.3), self.calibration)
+        assert a is not None and b is not None
+        self.assertNotEqual(a.origin_x_m, b.origin_x_m)
+        self.assertNotEqual(a.bearing_center_rad, b.bearing_center_rad)
+        self.assertFalse(hasattr(a, "target_x_m"))
+        self.assertFalse(hasattr(b, "target_x_m"))
 
 
 if __name__ == "__main__":
