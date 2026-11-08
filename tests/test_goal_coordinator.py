@@ -106,6 +106,86 @@ class CoordinatorTests(unittest.TestCase):
                                    result="completed", release_id="release-1")
         self.assertEqual(session.execution["lease_id"], None)
 
+    def test_block_is_attributed_to_bound_goal_and_map_not_later_revisions(self):
+        for change in ("goal", "map"):
+            with self.subTest(change=change):
+                session, owner = ready()
+                owner.bind_confirmed(context(mission_id="m1", lease_id="l1",
+                                             local_motion_active=True), goal_revision=1)
+                if change == "goal":
+                    newer = GoalProposal.from_dict(dict(schema_version=1,
+                        proposal_id="new-explore", session_id="s", boot_id="b",
+                        map_epoch=1, map_revision=2, base_goal_revision=1,
+                        observed_world_sequence=session.world.sequence,
+                        goal_name="explore", target_track_id=None,
+                        issued_at_robot=2., expires_at_robot=3., source_event_ids=[],
+                        reason="Choose a different region after this segment."))
+                    StrategicOwner(session).submit(newer, now_robot=2.1,
+                                                   map_epoch=1, map_revision=2)
+                terminal = context(mission_id="m1", lease_id="l1",
+                                   map_revision=3 if change == "map" else 2)
+                owner.complete_segment(terminal, result="blocked", release_id="release-1")
+                self.assertEqual(owner.tick(context(map_revision=terminal.map_revision)).action,
+                                 "plan_next_segment")
+                self.assertEqual(owner.to_dict()["blocked_on"], [1, 2, "grid", 1])
+
+    def test_new_verified_snapshot_unblocks_same_revision_without_retrying_old_grid(self):
+        session, owner = ready()
+        owner.bind_confirmed(context(mission_id="m1", lease_id="l1",
+                                     local_motion_active=True), goal_revision=1)
+        owner.complete_segment(context(mission_id="m1", lease_id="l1"),
+                               result="blocked", release_id="release-1")
+        self.assertEqual(owner.tick(context()).action, "blocked_await_new_evidence")
+        self.assertEqual(owner.tick(context(map_snapshot_id="new-grid",
+                                            map_verified=False)).action, "revalidate_map")
+        self.assertEqual(owner.tick(context(map_snapshot_id="new-grid",
+                                            sensors_fresh=False)).action, "revalidate_sensors")
+        self.assertEqual(owner.tick(context(map_snapshot_id="new-grid")).action,
+                         "plan_next_segment")
+
+    def test_constructor_and_external_session_mutation_fail_closed(self):
+        session, owner = ready()
+        session.bind_motion(mission_id="m1", lease_id="l1", boot_id="b")
+        with self.assertRaises(CoordinatorError):
+            GoalCoordinator(session)
+        self.assertEqual(owner.tick(context(mission_id="m1", lease_id="l1",
+                                            local_motion_active=True)).action,
+                         "owner_mismatch")
+        with self.assertRaises(CoordinatorError):
+            owner.complete_segment(context(mission_id="m1", lease_id="l1"),
+                                   result="completed", release_id="release-1")
+        self.assertEqual(session.execution["lease_id"], "l1")
+
+    def test_external_rebind_cannot_masquerade_as_original_owner_or_restore(self):
+        session, owner = ready()
+        owner.bind_confirmed(context(mission_id="m1", lease_id="l1",
+                                     local_motion_active=True), goal_revision=1)
+        checkpoint = owner.to_dict()
+        session.release_motion(mission_id="m1", lease_id="l1")
+        session.bind_motion(mission_id="m2", lease_id="l2", boot_id="b")
+        self.assertEqual(owner.tick(context(mission_id="m2", lease_id="l2",
+                                            local_motion_active=True)).action,
+                         "owner_mismatch")
+        with self.assertRaises(CoordinatorError):
+            GoalCoordinator.from_dict(session, checkpoint)
+
+    def test_release_receipts_evict_oldest_not_lexicographically_smallest(self):
+        session, owner = ready()
+        checkpoint = owner.to_dict()
+        checkpoint["release_ids"] = [f"z-{i:04d}" for i in range(4096)]
+        owner = GoalCoordinator.from_dict(session, checkpoint)
+        owner.bind_confirmed(context(mission_id="m1", lease_id="l1",
+                                     local_motion_active=True), goal_revision=1)
+        owner.complete_segment(context(mission_id="m1", lease_id="l1"),
+                               result="completed", release_id="a-new")
+        receipts = owner.to_dict()["release_ids"]
+        self.assertEqual(len(receipts), 4096)
+        self.assertNotIn("z-0000", receipts)
+        self.assertEqual(receipts[-1], "a-new")
+        self.assertEqual(GoalCoordinator.from_dict(
+            AgentSession.from_dict(session.to_dict(), expected_boot_id="b"),
+            owner.to_dict()).to_dict()["release_ids"], receipts)
+
     def test_strategic_revision_is_advisory_during_active_lease_and_rest_is_stationary(self):
         session, owner = ready()
         owner.bind_confirmed(context(mission_id="m1", lease_id="l1", local_motion_active=True),
