@@ -80,7 +80,7 @@ class VisualGroundingTests(unittest.TestCase):
             (base, self.detection, transform(revision=4), self.calibration),
             (base, self.detection, transform(snapshot="grid-2"), self.calibration),
             (base, self.detection, transform(epoch=3), self.calibration),
-            (base, self.detection, transform(at=4), self.calibration),
+            (base, self.detection, transform(at=12), self.calibration),
         ):
             with self.subTest(event=event, opt=opt):
                 self.assertIsNone(ground_viewpoint(event, detection, opt, calibration))
@@ -115,7 +115,7 @@ class VisualGroundingTests(unittest.TestCase):
         cone = ground_viewpoint(exposure(), self.detection, transform(), self.calibration)
         assert cone is not None
         req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
-                               "grid-1", "mission-1", "lease-1", 1.5)
+                               "grid-1", "mission-1", "lease-1", 1.0, 1.5)
         accepted = validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
                                                current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3,
                                                map_snapshot_id="grid-1", mission_id="mission-1", lease_id="lease-1")
@@ -143,17 +143,15 @@ class VisualGroundingTests(unittest.TestCase):
         self.assertEqual(validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
             current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
             mission_id="new-mission", lease_id="new-lease").reason, "ownership_mismatch")
-        delayed = ViewpointRequest(**{**vars(req), "expires_at_robot": 4.0})
-        self.assertEqual(validate_viewpoint_request(delayed, cone, exposure(), now_robot=1.1,
-            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
-            mission_id="mission-1", lease_id="lease-1").reason, "expired")
+        with self.assertRaises(GroundingError):
+            ViewpointRequest(**{**vars(req), "expires_at_robot": 4.0})
 
     def test_stationary_observation_can_bind_new_lease_but_stale_owner_cannot(self):
         stationary = exposure(lease=None)
         cone = ground_viewpoint(stationary, self.detection, transform(), self.calibration)
         assert cone is not None
         req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
-                               "grid-1", "mission-2", "lease-2", 1.5)
+                               "grid-1", "mission-2", "lease-2", 1.0, 1.5)
         current: dict[str, Any] = dict(now_robot=1.1, current_session_id="session-1", boot_id="boot-1",
                        map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
                        mission_id="mission-2", lease_id="lease-2")
@@ -192,6 +190,34 @@ class VisualGroundingTests(unittest.TestCase):
                                   .1 + (0.5 - (.6 + .95) / 2) * hfov, places=3)
         self.assertFalse(hasattr(cone, "target_x_m"))
         self.assertFalse(cone.motor_authority)
+
+    def test_delayed_model_evidence_and_short_post_inference_ttl_are_separate(self):
+        frame = exposure(at=1.0)
+        # The map transform is acquired at inference completion, not exposure.
+        cone = ground_viewpoint(frame, self.detection, transform(at=8.8), self.calibration)
+        assert cone is not None
+        req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
+                               "grid-1", "mission-1", "lease-1", 8.9, 10.4)
+        current: dict[str, Any] = dict(current_session_id="session-1", boot_id="boot-1", map_epoch=2,
+                       map_revision=3, map_snapshot_id="grid-1", mission_id="mission-1",
+                       lease_id="lease-1")
+        self.assertTrue(validate_viewpoint_request(req, cone, frame, now_robot=9.1,
+                                                   **current).accepted)
+        self.assertEqual(validate_viewpoint_request(req, cone, frame, now_robot=10.4,
+            **current).reason, "expired")
+        self.assertIsNone(ground_viewpoint(frame, self.detection,
+            transform(at=11.1), self.calibration))
+        self.assertIsNone(ground_viewpoint(frame, self.detection,
+            transform(at=8.8, revision=4), self.calibration))
+        late = ViewpointRequest(**{**vars(req), "issued_at_robot": 9.8,
+                                   "expires_at_robot": 11.3})
+        self.assertEqual(validate_viewpoint_request(late, cone, frame, now_robot=11.05,
+            **current).reason, "expired")  # exposure-age ceiling, despite fresh TTL
+        for change in ({"issued_at_robot": 8.9, "expires_at_robot": 10.91},
+                       {"issued_at_robot": 10.0, "expires_at_robot": 10.0},
+                       {"issued_at_robot": float("nan"), "expires_at_robot": 10.0}):
+            with self.subTest(change=change), self.assertRaises(GroundingError):
+                ViewpointRequest(**{**vars(req), **change})
 
     def test_moving_views_are_separate_rays_not_triangulated_points(self):
         first = exposure(event_id="frame-1", evidence_id="img-1")

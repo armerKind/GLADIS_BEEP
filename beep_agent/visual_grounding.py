@@ -116,7 +116,7 @@ def ground_viewpoint(event: EventEnvelope, detection: Detection, optimized: MapT
             or event.event_id != detection.frame_event_id
             or detection.confidence < (0.7 if detection.target_kind == "person" else 0.65)):
         return None
-    projected = project_capture(event, optimized)
+    projected = project_capture(event, optimized, max_age_ns=10_000_000_000)
     if projected is None:
         return None
     assert event.evidence_id is not None
@@ -158,6 +158,7 @@ class ViewpointRequest:
     map_snapshot_id: str
     mission_id: str
     lease_id: str
+    issued_at_robot: float
     expires_at_robot: float
 
     def __post_init__(self) -> None:
@@ -165,7 +166,10 @@ class ViewpointRequest:
                       "mission_id", "lease_id"):
             _id(getattr(self, field), field)
         _finite(self.bearing_rad, "bearing_rad")
-        _finite(self.expires_at_robot, "expires_at_robot")
+        issued = _finite(self.issued_at_robot, "issued_at_robot")
+        expires = _finite(self.expires_at_robot, "expires_at_robot")
+        if not 0 <= issued < expires <= issued + 2.0:
+            raise GroundingError("directive lifetime must be positive and at most two seconds")
         for field in ("map_epoch", "map_revision"):
             number = getattr(self, field)
             if isinstance(number, bool) or not isinstance(number, int) or number < 0:
@@ -206,8 +210,9 @@ def validate_viewpoint_request(request: ViewpointRequest, cone: ViewpointCone,
             or (request.mission_id, request.lease_id) != (mission_id, lease_id)
             or (event.mission_id, event.lease_id) not in ((mission_id, lease_id), (None, None))):
         return DirectiveValidation(False, "ownership_mismatch")
-    if (now < event.acquired_at_robot or now >= request.expires_at_robot
-            or request.expires_at_robot > event.acquired_at_robot + 2.0):
+    if (now < event.acquired_at_robot or now - event.acquired_at_robot > 10.0
+            or request.issued_at_robot < event.acquired_at_robot
+            or now < request.issued_at_robot or now >= request.expires_at_robot):
         return DirectiveValidation(False, "expired")
     if abs(_angle(request.bearing_rad - cone.bearing_center_rad)) > cone.bearing_half_width_rad:
         return DirectiveValidation(False, "outside_viewpoint_cone")
