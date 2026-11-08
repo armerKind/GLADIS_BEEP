@@ -4,7 +4,7 @@
 
 See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and unresolved executor integration.
 
-Live bridge and repository source: `0.20.9-steering-sweep`, deployed and read back on November 7, 2026. It limits occupancy maps to one million cells, corrects the vendor-app joystick-percent/SDK-step mismatch, and avoids a curve when a straight corridor is open or the sweep guard lacks clearance. Guarded local trials showed correlated SLAM/range evidence of forward translation; the JPEG stream appeared visually static across movement, so the visual perception-action loop is **not** verified. Semantic executor motion remains hard-disabled. See [closed-loop status](CLOSED_LOOP_STATUS.md). Recheck identity and sensors before any future motion.
+Live bridge and repository source: `0.20.9-steering-sweep`, deployed and read back on November 7, 2026. It limits occupancy maps to one million cells, corrects the vendor-app joystick-percent/SDK-step mismatch, and avoids a curve when a straight corridor is open or the sweep guard lacks clearance. Guarded local trials showed correlated SLAM/range evidence of forward translation; a nearly unchanged view over a short straight run does not establish a camera fault. The onboard LiDAR/map controller owns locomotion while camera capture and LLM interpretation run in parallel. Semantic executor motion remains hard-disabled. See [closed-loop status](CLOSED_LOOP_STATUS.md). Recheck identity and sensors before any future motion.
 
 The offline suite passed 291 tests. Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
 
@@ -106,7 +106,7 @@ profile. On a full battery and clear level floor:
 This isolates posture from navigation policy. It also prevents the traditional
 robotics method of changing five variables and learning nothing.
 
-Before declaring repository source deployed, require `/health` field `status.version == "0.20.9-steering-sweep"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema and sustained scan/map/pose freshness after restart. November 7, 2026 verification observed version `0.20.9-steering-sweep`, fresh scan callbacks, a valid guarded pose, and guarded local motor dispatch. The MJPEG camera images appeared visually static despite correlated pose/range movement; a returned JPEG is not proof of live visual perception. A successful upload alone is not deployment.
+Before declaring repository source deployed, require `/health` field `status.version == "0.20.9-steering-sweep"`, `status.moving == false`, and no active motion lease; also verify `/slam_map` returns its JSON schema and sustained scan/map/pose freshness after restart. November 7, 2026 verification observed version `0.20.9-steering-sweep`, fresh scan callbacks, a valid guarded pose, and guarded local motor dispatch. The MJPEG frames showed little detectable scene change in a short straight run; this alone says nothing about camera freshness. A successful upload alone is not deployment.
 
 The Jupyter deployment helper uploads and installs the checked-in systemd unit,
 runs `daemon-reload`, explicitly restarts the service, and rejects a live `/config`

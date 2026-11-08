@@ -87,10 +87,9 @@ class GeminiVisionClientTests(unittest.TestCase):
         prompt = parts[0]["text"]
         self.assertIn("During moving capture", prompt)
         self.assertIn("Do not request a stop merely because one panel is blurred", prompt)
-        self.assertIn("GREEN BASEBALL CAP", prompt)
-        self.assertIn("projecting curved brim", prompt)
-        self.assertIn("Do not declare found from color alone", prompt)
-        self.assertIn("A candidate must be visually distinct from the robot", prompt)
+        self.assertIn("semantic_target", prompt)
+        self.assertIn("duplicate-looking camera images were filtered", prompt)
+        self.assertNotIn("GREEN BASEBALL CAP", prompt)
 
     def test_rejects_non_json_model_output(self):
         def transport(*_):

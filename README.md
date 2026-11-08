@@ -26,7 +26,7 @@ Release `0.19.3-fluent-steering` keeps compatible gait active while alternating 
 
 Historical note: the final powered run removed the forced high-walk/width-100 setup and showed that GLADIS's guessed negative analog value did not yet reproduce app reverse. That blocker is superseded by the later packet capture and `0.20.3-vendor-app-reverse` bridge configuration below; the app-backed bridge path still needs a guarded physical validation.
 
-The historical `0.20.3-vendor-app-reverse` checkpoint has been superseded. The live bridge is `0.20.9-steering-sweep`; the 291-test suite passed and guarded local missions produced SLAM/range evidence of forward translation. The MJPEG frames were visually static across that motion, so the visual feedback loop remains unproven. Semantic executor motion is disabled. See [closed-loop status](docs/CLOSED_LOOP_STATUS.md) for trial results and the camera discrepancy.
+The historical `0.20.3-vendor-app-reverse` checkpoint has been superseded. The live bridge is `0.20.9-steering-sweep`; the 291-test suite passed and guarded local missions produced SLAM/range evidence of forward translation. The camera frames looked similar across that short straight run, which does not establish a camera failure. LiDAR/SLAM drive continuous exploration; camera panels supply scene context concurrently, without blocking gait while the model thinks. Semantic executor motion is disabled. See [closed-loop status](docs/CLOSED_LOOP_STATUS.md) for trial results and the parallel-observer architecture.
 
 - SDK-backed locomotion through `DOGZILLALib`
 - fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers

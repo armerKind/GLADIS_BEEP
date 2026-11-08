@@ -9,14 +9,32 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import io
 import threading
 import time
 from typing import Any
+
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 from .contact_sheet import (CapturedFrame, build_navigation_contact_sheet, fetch_jpeg, fetch_json,
                             frame_quality, summarize_navigation_context)
 
 PANEL_COUNTS = frozenset({4, 6, 9})
+
+
+def _appearance(frame: CapturedFrame) -> Image.Image:
+    """Small scene signature; omit the vendor FPS text along the top edge."""
+    with Image.open(io.BytesIO(frame.jpeg)) as source:
+        image = source.convert("L")
+    image = image.crop((0, int(image.height * 0.09), image.width, image.height))
+    return ImageOps.fit(image, (96, 64), method=Image.Resampling.BILINEAR)
+
+
+def _appearance_delta(left: Image.Image, right: Image.Image) -> float:
+    luminance = ImageStat.Stat(ImageChops.difference(left, right)).mean[0]
+    edges = ImageStat.Stat(ImageChops.difference(
+        left.filter(ImageFilter.FIND_EDGES), right.filter(ImageFilter.FIND_EDGES))).mean[0]
+    return max(luminance, edges * 0.8)
 
 
 @dataclass(frozen=True)
@@ -63,16 +81,16 @@ class MovingFrameRing:
             self._condition.notify_all()
 
     def latest(self, count: int = 9) -> list[MovingFrameSample]:
-        if count not in PANEL_COUNTS:
-            raise ValueError("panel count must be 4, 6, or 9")
+        if count not in PANEL_COUNTS | {1}:
+            raise ValueError("frame count must be 1, 4, 6, or 9")
         with self._condition:
             if len(self._frames) < count:
                 raise RuntimeError(f"moving frame ring has {len(self._frames)} frames; {count} required")
             return list(self._frames)[-count:]
 
     def wait_for(self, count: int = 9, timeout_s: float = 10.0) -> bool:
-        if count not in PANEL_COUNTS:
-            raise ValueError("panel count must be 4, 6, or 9")
+        if count not in PANEL_COUNTS | {1}:
+            raise ValueError("frame count must be 1, 4, 6, or 9")
         deadline = time.monotonic() + float(timeout_s)
         with self._condition:
             while len(self._frames) < count:
@@ -81,6 +99,38 @@ class MovingFrameRing:
                     return False
                 self._condition.wait(remaining)
             return True
+
+    def diverse(self, count: int, *, min_spacing_s: float = 0.7,
+                min_appearance_delta: float = 5.0, max_age_s: float = 30.0) -> tuple[list[MovingFrameSample], int]:
+        """Newest visually distinct evidence, not N successive copies of a scene.
+
+        The timestamped ring keeps collecting during inference. No visual change
+        means one honest frame, not a fabricated nine-view panel. Never mix leases.
+        """
+        if count not in PANEL_COUNTS:
+            raise ValueError("panel count must be 4, 6, or 9")
+        with self._condition:
+            samples = list(self._frames)
+        if not samples:
+            raise RuntimeError("moving frame ring is empty")
+        newest = samples[-1]
+        owner = newest.bridge_status.get("motion_lease_id")
+        candidates = [sample for sample in samples
+                      if sample.bridge_status.get("motion_lease_id") == owner
+                      and newest.frame.captured_at - sample.frame.captured_at <= max_age_s]
+        selected = [newest]
+        signatures = [_appearance(newest.frame)]
+        for sample in reversed(candidates[:-1]):
+            if len(selected) >= count:
+                break
+            if selected[-1].frame.captured_at - sample.frame.captured_at < min_spacing_s:
+                continue
+            signature = _appearance(sample.frame)
+            if all(_appearance_delta(signature, existing) >= min_appearance_delta
+                   for existing in signatures):
+                selected.append(sample)
+                signatures.append(signature)
+        return list(reversed(selected)), len(candidates)
 
     def __len__(self) -> int:
         with self._condition:
@@ -173,7 +223,7 @@ class ContinuousMovingCapture:
             }
 
     def temporal_window(self, count: int = 9, *, slam_map: dict[str, Any] | None = None) -> tuple[list[CapturedFrame], bytes, dict[str, Any]]:
-        samples = self.ring.latest(count)
+        samples, candidate_count = self.ring.diverse(count)
         frames = [sample.frame for sample in samples]
         metadata = []
         for index, sample in enumerate(samples):
@@ -184,17 +234,16 @@ class ContinuousMovingCapture:
             "schema_version": "1.1",
             "capture_mode": "moving_temporal_ring",
             "captured_at": frames[-1].captured_at,
-            "panel_count": count,
+            "panel_count": len(samples),
+            "requested_panel_count": count,
+            "candidate_frame_count": candidate_count,
+            "distinct_appearance_count": len(samples),
+            "repeated_appearance_filtered": candidate_count > len(samples),
             "frame_span_s": round(frames[-1].captured_at - frames[0].captured_at, 3),
             "frames": metadata,
             "bridge_status": latest_status,
             "navigation_context": summarize_navigation_context(latest_status, slam_map),
-            "target_search": {
-                "target": "green baseball cap",
-                "visual_cues": ["broad crown", "projecting curved brim", "fabric seams or panels"],
-                "false_positives": ["green robot component", "green patch", "green cloth", "green furniture"],
-                "confirmation_rule": "distinct from robot, matching cap structure across changed views",
-            },
+
             "capture_stats": self.stats(),
             "evidence_policy": {
                 "chronological": True,
@@ -203,7 +252,7 @@ class ContinuousMovingCapture:
                 "map_pose_heading_are_visualized_in_contact_sheet": True,
             },
         }
-        columns = 2 if count == 4 else 3
+        columns = 2 if len(samples) <= 4 else 3
         panel = build_navigation_contact_sheet(
             frames, frame_statuses=frame_statuses, current_status=latest_status,
             slam_map=slam_map, columns=columns)

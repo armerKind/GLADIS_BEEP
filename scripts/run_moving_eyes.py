@@ -13,8 +13,12 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
+import sys
 import time
 import uuid
+
+# The companion launcher invokes this file directly, not with ``python -m``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from beep_agent import AgentSession, EmbodiedGoal, BridgeBodyAdapter
 from beep_agent.executor import ClosedLoopExecutor
@@ -115,7 +119,11 @@ def main() -> int:
     output_dir = args.output_root / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     trace_path = output_dir / "trace.jsonl"
-    capture = ContinuousMovingCapture(args.base_url, fps=args.fps, max_frames=max(18, args.panel * 2), timeout_s=min(args.timeout, 8.0))
+    # Keep up to thirty seconds of camera history, not only the last three
+    # seconds of a nine-panel request. Inference never blocks the capture ring.
+    capture = ContinuousMovingCapture(args.base_url, fps=args.fps,
+                                      max_frames=min(90, max(18, int(args.fps * 30))),
+                                      timeout_s=min(args.timeout, 8.0))
     mission_id = initial_mission.get("id") if isinstance(initial_mission, dict) else None
     fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
     if args.resume_session:
@@ -135,8 +143,8 @@ def main() -> int:
     last_inference_finished = 0.0
     capture.start()
     try:
-        if not capture.ring.wait_for(args.panel, min(args.duration, max(args.timeout, args.panel / args.fps + 2.0))):
-            raise RuntimeError(f"moving camera did not produce {args.panel} frames: {capture.stats()}")
+        if not capture.ring.wait_for(1, min(args.duration, args.timeout)):
+            raise RuntimeError(f"moving camera did not produce a frame: {capture.stats()}")
         while time.monotonic() < deadline:
             wait_s = last_inference_finished + args.inference_interval - time.monotonic()
             if inference_count and wait_s > 0:
@@ -155,6 +163,7 @@ def main() -> int:
             except Exception as exc:
                 slam_map = {"ok": False, "reason": f"fetch_failed:{type(exc).__name__}"}
             frames, sheet, packet = capture.temporal_window(args.panel, slam_map=slam_map)
+            packet["semantic_target"] = None if args.target == "scene" else args.target
             packet["vision_context"] = {
                 "previous_scene_summary": session.world.last_scene_summary,
                 "previous_changes": session.world.last_changes[-4:],
@@ -176,7 +185,7 @@ def main() -> int:
                 assert client is not None
                 response = client.analyze(packet, sheet, frames[-1].jpeg)
             completed_at = time.time()
-            newest_latest = capture.ring.latest(args.panel)[-1].frame.frame_id
+            newest_latest = capture.ring.latest(1)[-1].frame.frame_id
             packet["inference"] = {
                 "started_at": started_at,
                 "completed_at": completed_at,
@@ -226,6 +235,8 @@ def main() -> int:
                 json.dumps(course, indent=2, sort_keys=True))
             event = {
                 "window": inference_count,
+                "distinct_appearance_count": packet["distinct_appearance_count"],
+                "candidate_frame_count": packet["candidate_frame_count"],
                 "latest_frame_id": requested_latest,
                 "newer_window_available": newest_latest != requested_latest,
                 "latency_s": packet["inference"]["latency_s"],

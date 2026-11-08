@@ -110,13 +110,16 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 semantics = [json.loads((window / "semantic_decision.json").read_text())
                              for window in sorted(windows)]
                 self.assertEqual(packet["capture_mode"], "moving_temporal_ring")
-                self.assertEqual(len(packet["frames"]), 4)
+                self.assertEqual(len(packet["frames"]), 1)
+                self.assertEqual(packet["requested_panel_count"], 4)
+                self.assertEqual(packet["candidate_frame_count"], 1)
+                self.assertIsNone(packet["semantic_target"])
                 self.assertTrue(packet["navigation_context"]["map_available"])
                 self.assertTrue(packet["navigation_context"]["pose_valid"])
                 self.assertAlmostEqual(packet["navigation_context"]["view_heading_deg"], 17.2, places=1)
                 self.assertTrue(Path(packet["artifacts"]["slam_map"]).exists())
                 with Image.open(run / windows[0].name / "contact_sheet.jpg") as panel:
-                    self.assertEqual(panel.size, (960, 1160))
+                    self.assertEqual(panel.size, (960, 760))
                 self.assertFalse(semantics[0]["dispatch_performed"])
                 self.assertFalse(semantics[0]["camera_assisted_course"]["dispatch_performed"])
                 self.assertEqual(semantics[0]["camera_assisted_course"]["recommendation"], "hold_and_reobserve")

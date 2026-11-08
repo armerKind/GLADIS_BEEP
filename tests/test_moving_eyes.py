@@ -30,7 +30,7 @@ class MovingFrameRingTests(unittest.TestCase):
         self.assertEqual([item.frame.frame_id for item in ring.latest(4)], [f"m{i:06d}" for i in range(8, 12)])
         self.assertEqual([item.frame.frame_id for item in ring.latest(6)], [f"m{i:06d}" for i in range(6, 12)])
         self.assertEqual([item.frame.frame_id for item in ring.latest(9)], [f"m{i:06d}" for i in range(3, 12)])
-        with self.assertRaisesRegex(ValueError, "4, 6, or 9"):
+        with self.assertRaisesRegex(ValueError, "1, 4, 6, or 9"):
             ring.latest(5)
 
     def test_rejects_non_chronological_insert(self):
@@ -53,7 +53,7 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
         capture = ContinuousMovingCapture("http://beep", fps=3.0, max_frames=18)
         for index in range(9):
             capture.ring.add(MovingFrameSample(
-                CapturedFrame(f"m{index:06d}", 100.0 + index, jpeg((index * 10, 20, 30))),
+                CapturedFrame(f"m{index:06d}", 100.0 + index, jpeg((index * 28,) * 3)),
                 {"moving": True, "motion_lease_id": "lease-1"},
             ))
         for count, expected_size in ((6, (1440, 1160)), (9, (1440, 1560))):
@@ -61,6 +61,39 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
             self.assertEqual(len(frames), count)
             self.assertEqual(packet["panel_count"], count)
             self.assertEqual(Image.open(io.BytesIO(panel)).size, expected_size)
+
+    def test_stationary_appearance_is_not_repeated_nine_times(self):
+        capture = ContinuousMovingCapture("http://beep", max_frames=18)
+        for index in range(9):
+            image = Image.new("RGB", (160, 120), "gray")
+            # Vendor FPS text changes, but this isn't a new view of the room.
+            from PIL import ImageDraw
+            ImageDraw.Draw(image).text((2, 2), f"FPS:{index}", fill="white")
+            output = io.BytesIO()
+            image.save(output, format="JPEG")
+            capture.ring.add(MovingFrameSample(
+                CapturedFrame(f"m{index:06d}", 100.0 + index, output.getvalue()),
+                {"moving": True, "motion_lease_id": "lease-1"},
+            ))
+        frames, _, packet = capture.temporal_window(9)
+        self.assertEqual([frame.frame_id for frame in frames], ["m000008"])
+        self.assertEqual(packet["candidate_frame_count"], 9)
+        self.assertEqual(packet["panel_count"], 1)
+        self.assertTrue(packet["repeated_appearance_filtered"])
+
+    def test_diverse_window_uses_spaced_history_with_same_lease(self):
+        ring = MovingFrameRing(90)
+        for index in range(30):
+            ring.add(MovingFrameSample(
+                CapturedFrame(f"m{index:06d}", 100.0 + index / 3,
+                              jpeg((index * 8 % 256,) * 3)),
+                {"motion_lease_id": "lease-a" if index < 25 else "lease-b"},
+            ))
+        samples, candidates = ring.diverse(9, min_appearance_delta=5)
+        self.assertEqual(candidates, 5)
+        self.assertTrue(all(s.bridge_status["motion_lease_id"] == "lease-b" for s in samples))
+        self.assertEqual(samples[-1].frame.frame_id, "m000029")
+        self.assertLess(len(samples), 5)  # At 3 FPS the samples are deliberately spread.
 
     def test_frame_owner_must_match_before_and_after_capture(self):
         for before, after, expected in (("old", "new", None), (None, "new", None),
@@ -97,12 +130,14 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
             finally:
                 capture.stop()
         self.assertGreater(after, before)
-        self.assertEqual(len(frames), 4)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(packet["requested_panel_count"], 4)
+        self.assertTrue(packet["repeated_appearance_filtered"])
         self.assertEqual(packet["capture_mode"], "moving_temporal_ring")
         self.assertTrue(packet["bridge_status"]["moving"])
         self.assertTrue(packet["evidence_policy"]["motion_blur_tolerated"])
         image = Image.open(io.BytesIO(panel))
-        self.assertEqual(image.size, (960, 1160))
+        self.assertEqual(image.size, (960, 760))
 
 
 if __name__ == "__main__":
