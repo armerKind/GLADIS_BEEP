@@ -196,6 +196,7 @@ The eyes subsystem supports fully offline saved-frame replay. BEEP is required o
 
 ## Further documentation
 
+- [`docs/AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md`](docs/AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md) — canonical system-level design, proposed tactical attention, visual grounding, memory, motor transport, audio, and hardware gates
 - [`docs/architecture.md`](docs/architecture.md) — onboard components, mapping layers, autonomy modes, and limits
 - [`docs/bridge_api.md`](docs/bridge_api.md) — HTTP API and safety behavior
 - [`docs/deployment.md`](docs/deployment.md) — deployment, systemd, Jupyter, SLAM reset/export, and verification

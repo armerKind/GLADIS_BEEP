@@ -1,5 +1,7 @@
 # Continuous strategy loop — current boundary and next hardware gate
 
+The system-level design, including reviewed fast attention, metric-grounding limits, vendor transport and audio, is in [Autonomous Embodiment Architecture](AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md). This file is a shorter implementation checkpoint.
+
 BEEP's intended architecture is a persistent semantic goal above a locally guarded locomotion controller. Local LiDAR/SLAM owns immediate steering, collision response, lease deadlines, and motor stop; a camera/audio reasoning loop updates world state and strategy asynchronously. No network inference is allowed to become the gait clock. Intentional inspection, social interaction, genuine hazards, cancellation, or rest may stop locomotion.
 
 ## Implemented offline (November 8, 2026)
