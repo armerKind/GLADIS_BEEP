@@ -113,6 +113,7 @@ class GeminiVisionClient:
             "use agreement across the chronological panels and the sharpest supported evidence rather than rejecting the whole window. "
             "Do not request a stop merely because one panel is blurred, and do not misclassify normal camera motion as an independently moving hazard. "
             "A requested target, if any, is given in observation metadata as semantic_target; otherwise observe the whole scene for useful objects, people, and hazards. "
+            "For attention.target_type=direction, attention.target_id MUST be exactly left, center, or right; never use object names or phrases. "
             "Do not declare an object found from one color cue or repeated copies of one camera view; require supported geometry and, when available, a genuinely different appearance. "
             "The panel may contain fewer than nine frames because duplicate-looking camera images were filtered; do not infer a camera fault or physical immobility merely from a slowly changing room view. "
             "Each inference is advisory to one persistent mission; stop/task outcomes must not be confused with local motion segments. "

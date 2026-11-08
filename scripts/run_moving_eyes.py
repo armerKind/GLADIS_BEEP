@@ -140,6 +140,7 @@ def main() -> int:
     dispatch_performed = False
     deadline = time.monotonic() + args.duration
     inference_count = 0
+    inference_errors = 0
     last_inference_finished = 0.0
     capture.start()
     try:
@@ -179,11 +180,28 @@ def main() -> int:
             packet["mission"] = mission
             requested_latest = frames[-1].frame_id
             started_at = time.time()
-            if mock is not None:
-                response = mock
-            else:
-                assert client is not None
-                response = client.analyze(packet, sheet, frames[-1].jpeg)
+            try:
+                if mock is not None:
+                    response = mock
+                else:
+                    assert client is not None
+                    response = client.analyze(packet, sheet, frames[-1].jpeg)
+            except GeminiError as exc:
+                # Invalid model output must not terminate the independent
+                # LiDAR/map mission or manufacture a motor command. Keep
+                # collecting new views and retry at the next window.
+                inference_errors += 1
+                event = {"window": inference_count, "model_error": str(exc)[:500],
+                         "latest_frame_id": requested_latest,
+                         "mission_id": mission_id, "dispatch_performed": False}
+                with trace_path.open("a") as trace:
+                    trace.write(json.dumps(event, sort_keys=True) + "\n")
+                print(json.dumps(event, sort_keys=True), flush=True)
+                inference_count += 1
+                last_inference_finished = time.monotonic()
+                if args.max_inferences and inference_count >= args.max_inferences:
+                    break
+                continue
             completed_at = time.time()
             newest_latest = capture.ring.latest(1)[-1].frame.frame_id
             packet["inference"] = {
@@ -265,6 +283,7 @@ def main() -> int:
         "panel_count": args.panel,
         "inference_interval_s": args.inference_interval,
         "inferences": inference_count,
+        "inference_errors": inference_errors,
         "capture": capture.stats(),
         "dispatch_performed": dispatch_performed,
         "agent_session": str(session_path),
