@@ -12,7 +12,7 @@ from dataclasses import asdict
 from .events import EventEnvelope
 from .journal import EventJournal, JournalError
 from .map_revision import MapRevisionTracker
-from .place_graph import PlaceGraph
+from .place_graph import GridGeometry, PlaceGraph
 from .pose_history import MapTransform, PoseRing, ProjectedPose, project_capture
 from .session import AgentSession, SessionIdentityError
 
@@ -39,9 +39,14 @@ class PhaseARecorder:
                 capture = self._seen.get(payload["capture_event_id"])
                 if capture is None:
                     raise JournalError("place observation precedes its acquisition")
+                if "grid_geometry" not in payload:
+                    # Legacy raw indices have no map-frame alignment proof.
+                    # Retain the event, never resurrect its metric place node.
+                    continue
                 pose = ProjectedPose(**payload["projected_pose"])
                 self.graph.observe(capture, map(tuple, payload["free_cells"]),
                                    projected_pose=pose,
+                                   grid_geometry=GridGeometry(**payload["grid_geometry"]),
                                    clearance_m=payload["clearance_m"],
                                    visibility_radius_m=payload["visibility_radius_m"],
                                    footprint_radius_m=payload["footprint_radius_m"],
@@ -106,6 +111,7 @@ class PhaseARecorder:
         return True
 
     def record_place(self, event: EventEnvelope, *, free_cells: set[tuple[int, int]],
+                     grid_geometry: GridGeometry,
                      optimized: MapTransform, clearance_m: float,
                      visibility_radius_m: float, footprint_radius_m: float,
                      computed_at_robot: float,
@@ -128,6 +134,7 @@ class PhaseARecorder:
             return None
         candidate = deepcopy(self.graph)
         node = candidate.observe(event, free_cells, projected_pose=projected,
+                                 grid_geometry=grid_geometry,
                                  clearance_m=clearance_m,
                                  visibility_radius_m=visibility_radius_m,
                                  footprint_radius_m=footprint_radius_m,
@@ -139,6 +146,7 @@ class PhaseARecorder:
                      payload={"capture_event_id": event.event_id,
                               "projected_pose": asdict(projected),
                               "free_cells": sorted(map(list, free_cells)),
+                              "grid_geometry": asdict(grid_geometry),
                               "clearance_m": clearance_m,
                               "visibility_radius_m": visibility_radius_m,
                               "footprint_radius_m": footprint_radius_m,

@@ -26,6 +26,7 @@ class MapRevisionTracker:
         self.revision: int | None = None
         self._poses: dict[str, tuple[float, float, float]] = {}
         self._unknown = True
+        self._requires_new_epoch = False
 
     def status(self) -> dict:
         fresh = (self._last_seen is not None and
@@ -41,6 +42,7 @@ class MapRevisionTracker:
         if (self.boot_id, self.map_epoch) != (boot_id, map_epoch):
             self.boot_id, self.map_epoch = boot_id, map_epoch
             self.revision, self._poses, self._unknown = None, {}, True
+            self._requires_new_epoch = False
             self._last_seen = None
         if not healthy or not submaps:
             self._unknown = True
@@ -57,16 +59,25 @@ class MapRevisionTracker:
                 self._last_seen = None
                 return None, "unknown"
             poses[key] = (float(value[0]), float(value[1]), float(value[2]))
+        if self._requires_new_epoch:
+            return None, "unknown"
         if self.revision is None:
             self.revision, self._poses, self._unknown = 0, poses, False
             self._last_seen = self._clock()
             return 0, "verified"
-        if (self._unknown or self._last_seen is None or
-                self._clock() - self._last_seen > self.max_age_s or
-                not self._poses.keys() <= poses.keys()):
+        if not self._poses.keys() <= poses.keys():
+            self._requires_new_epoch = True
             self._unknown = True
             self._last_seen = None
             return None, "unknown"
+        if (self._unknown or self._last_seen is None or
+                not 0 <= self._clock() - self._last_seen <= self.max_age_s):
+            # A gap may hide an optimization; never reuse pre-gap metric state.
+            self.revision += 1
+            self._poses = poses
+            self._unknown = False
+            self._last_seen = self._clock()
+            return self.revision, "verified"
         corrected = any(
             math.hypot(poses[key][0] - xyz[0], poses[key][1] - xyz[1]) >= self.position_epsilon_m
             or abs(math.atan2(math.sin(poses[key][2] - xyz[2]),

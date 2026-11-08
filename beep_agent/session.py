@@ -64,10 +64,12 @@ class AgentSession:
         self.execution["lease_history"].append({"mission_id": mission_id,
                                                  "lease_id": lease_id, "state": "bound"})
 
-    def release_motion(self, *, mission_id: str, lease_id: str) -> None:
-        if (self.mission_id, self.execution["lease_id"]) != (mission_id, lease_id):
+    def release_motion(self, *, mission_id: str | None, lease_id: str | None) -> None:
+        if (not mission_id or not lease_id or self.execution["lease_id"] is None
+                or (self.mission_id, self.execution["lease_id"]) != (mission_id, lease_id)):
             raise SessionIdentityError("cannot release a different motion owner")
         self.execution["lease_id"] = None
+        self.mission_id = None
         self.execution["lease_history"].append({"mission_id": mission_id,
                                                  "lease_id": lease_id, "state": "released"})
 
@@ -112,12 +114,16 @@ class AgentSession:
 
     def update(self, perception: dict[str, Any], *, observed_at: float, packet_id: str,
                mission_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
-        incoming = self.mission_id if mission_id is None else str(mission_id)
-        if self.mission_id is not None and incoming != self.mission_id:
-            raise SessionIdentityError("perception mission does not match agent session")
-        if self.boot_id is not None and (self.execution["lease_id"] is None or
-                                         lease_id != self.execution["lease_id"]):
-            raise SessionIdentityError("perception does not belong to exact active lease")
+        active_lease = self.execution["lease_id"]
+        if self.boot_id is not None and active_lease is None:
+            if mission_id is not None or lease_id is not None:
+                raise SessionIdentityError("unowned perception cannot claim a motion lease")
+        else:
+            incoming = self.mission_id if mission_id is None else str(mission_id)
+            if self.mission_id is not None and incoming != self.mission_id:
+                raise SessionIdentityError("perception mission does not match agent session")
+            if self.boot_id is not None and lease_id != active_lease:
+                raise SessionIdentityError("perception does not belong to exact active lease")
         snapshot = self.world.update(perception, observed_at=observed_at, packet_id=packet_id)
         self._select_if_needed()
         self.updated_at = float(observed_at)

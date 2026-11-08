@@ -46,6 +46,7 @@ class EventEnvelope:
     acquired_at_robot: float
     received_at_robot: float
     robot_clock: str
+    timestamp_quality: str
     acquired_at_ros_ns: int | None
     map_epoch: int
     map_revision: int | None
@@ -57,8 +58,11 @@ class EventEnvelope:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "EventEnvelope":
-        if not isinstance(value, dict) or set(value) != set(cls.__dataclass_fields__):
+        if not isinstance(value, dict) or set(value) not in (
+                set(cls.__dataclass_fields__), set(cls.__dataclass_fields__) - {"timestamp_quality"}):
             raise EventValidationError("event envelope fields differ from v1 contract")
+        # Legacy records remain readable, but cannot claim camera exposure time.
+        value = {**value, "timestamp_quality": value.get("timestamp_quality", "unknown")}
         if value["schema_version"] != 1 or isinstance(value["schema_version"], bool):
             raise EventValidationError("unsupported event envelope schema")
         for field in ("event_id", "event_kind", "robot_id", "session_id", "boot_id"):
@@ -74,6 +78,10 @@ class EventEnvelope:
             raise EventValidationError("received before acquired on robot clock")
         if value["robot_clock"] != "boot_monotonic":
             raise EventValidationError("robot clock must be boot_monotonic")
+        if (not isinstance(value["timestamp_quality"], str)
+                or value["timestamp_quality"] not in {"sensor_exposure", "sensor_acquisition",
+                                                      "ingest_approximate", "unknown"}):
+            raise EventValidationError("invalid acquisition timestamp quality")
         if value["acquired_at_ros_ns"] is not None:
             _integer(value["acquired_at_ros_ns"], "acquired_at_ros_ns")
         _integer(value["map_epoch"], "map_epoch")
@@ -119,7 +127,9 @@ class EventEnvelope:
 
     @property
     def spatial_ready(self) -> bool:
-        return (self.map_revision_status == "verified" and self.map_snapshot_id is not None
+        time_proven = (self.timestamp_quality == "sensor_exposure" if self.source == "camera"
+                       else self.timestamp_quality in {"sensor_exposure", "sensor_acquisition"})
+        return (time_proven and self.map_revision_status == "verified" and self.map_snapshot_id is not None
                 and self.capture_local_transform is not None
                 and self.capture_local_transform["valid"] is True
                 and self.acquired_at_ros_ns is not None)
