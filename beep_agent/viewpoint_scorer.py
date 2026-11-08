@@ -71,19 +71,23 @@ class OccupancySnapshot:
                         return False
         return True
 
-    def wedge_free(self, cone: ViewpointCone, distance: float) -> bool:
-        """Unknown and occupied cells intersecting the capture-origin wedge veto.
+    def first_wedge_block_m(self, cone: ViewpointCone, distance: float) -> float:
+        """Nearest conservative wedge blockage, scanning the bounded grid once.
 
-        Each cell is a square area, not a point on the center ray. This uses its
-        circumscribed radius to conservatively include edge-intersecting cells.
+        Each cell is a square area, not a point on the center ray. Its
+        circumscribed disk conservatively includes edge-intersecting cells.
+        Return infinity if no unknown/occupied cell intersects the wedge.
         """
         res = self.geometry.resolution_m
         half_diag = res * 2**0.5 / 2
         gx, gy = self.metric_to_cell(cone.origin_x_m, cone.origin_y_m)
         reach = int((distance + half_diag) / res) + 2
         c, s = cos(self.geometry.origin_yaw_rad), sin(self.geometry.origin_yaw_rad)
+        first_block = float("inf")
         for iy in range(gy - reach, gy + reach + 1):
             for ix in range(gx - reach, gx + reach + 1):
+                if self.cell(ix, iy) == 0:
+                    continue
                 dx = (ix + .5) * res
                 dy = (iy + .5) * res
                 x = self.geometry.origin_x_m + c * dx - s * dy
@@ -100,9 +104,8 @@ class OccupancySnapshot:
                 angular_margin = (pi if r <= half_diag + 1e-9
                                   else atan2(half_diag, r - half_diag))
                 if abs(delta) <= cone.bearing_half_width_rad + angular_margin:
-                    if self.cell(ix, iy) != 0:
-                        return False
-        return True
+                    first_block = min(first_block, max(0.0, r - half_diag))
+        return first_block
 
 
 @dataclass(frozen=True)
@@ -143,12 +146,13 @@ def score_viewpoint(cone: ViewpointCone, grid: OccupancySnapshot, *,
             or not 0 <= cone.slam_yaw_std_rad <= .3
             or not 0 <= cone.bearing_half_width_rad < pi / 2):
         return None
+    first_block_m = grid.first_wedge_block_m(cone, max_look_m)
     radius = footprint_radius_m + 2 * cone.origin_xy_std_m
     step = grid.geometry.resolution_m / 2
     n = int((max_look_m - min_look_m) / step) + 1
     for index in range(n):
         distance = min_look_m + index * step
-        if not grid.wedge_free(cone, distance):
+        if distance >= first_block_m:
             return None  # No raycasting through unknown space.
         x = cone.origin_x_m + distance * cos(cone.bearing_center_rad)
         y = cone.origin_y_m + distance * sin(cone.bearing_center_rad)

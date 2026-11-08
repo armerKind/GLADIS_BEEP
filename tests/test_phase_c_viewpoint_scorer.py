@@ -2,6 +2,7 @@
 import math
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from beep_agent.events import EventEnvelope
 from beep_agent.place_graph import GridGeometry
@@ -103,6 +104,22 @@ class ViewpointScorerTests(unittest.TestCase):
         self.assertIsNone(score_viewpoint(cone, grid(unknown=((59, 70),)),
             current_map_context=("boot-1", 2, 3, "grid-1"), current_x_m=1,
             current_y_m=3, footprint_radius_m=.15))
+
+    def test_wedge_scanned_once_and_distant_unknown_does_not_veto_near_viewpoint(self):
+        cone = cone_at()
+        assert cone is not None
+        snapshot = grid(unknown=((74, 70),))  # 1.4 m along capture ray, past 0.7 m candidate
+        original = OccupancySnapshot.first_wedge_block_m
+        with patch.object(OccupancySnapshot, "first_wedge_block_m",
+                          autospec=True) as scan:
+            scan.side_effect = lambda obj, ray, distance: original(obj, ray, distance)
+            result = score_viewpoint(cone, snapshot,
+                current_map_context=snapshot.identity, current_x_m=1,
+                current_y_m=3, footprint_radius_m=.15)
+            self.assertEqual(scan.call_count, 1)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertLess(result.x_m, 2.0)
 
     def test_grid_contract_rejects_bad_dimensions_and_unknown_values(self):
         geometry = GridGeometry(0, 0, .1, "map")
