@@ -1,5 +1,7 @@
 # Fresh-agent handoff — 2026-11-06
 
+> **Phase B offline start, November 8, 2026:** [Phase B gate](PHASE_B_GATE.md) covers strict tactical attention and one revisioned GLADIS goal-proposal owner. These are shadow contracts only: no live VAD/camera/ROS producer, persistent model-session adapter, audio cue output, or motor dispatch exists in this Phase B slice. Do not describe it as an autonomous running robot.
+
 > **Phase A external-audit correction, November 8, 2026:** See [Phase A gate](PHASE_A_GATE.md). Boot-bound READY/between-lease perception, multi-node graph revalidation and same-revision revisits, occupancy-grid origin shifts, transient submap-feed recovery, and journal append scaling are fixed offline with regression tests. Camera spatial readiness now requires proven exposure-time quality; the bridge does not currently supply that proof. Phase B may proceed offline, not as live autonomous or motor-enabled behavior.
 
 > **Architecture update, November 8, 2026:** The canonical design is [Autonomous Embodiment Architecture](AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md). The green cap was found in two moving-camera views on November 8; [trial evidence](CAP_SEARCH_TRIAL.md) and [continuous-strategy checkpoint](CONTINUOUS_STRATEGY.md) supersede the original unfinished-task paragraph below. Semantic motor execution remains disabled. Do not treat the historical 2026-11-06 instructions as the active task.

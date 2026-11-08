@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 import uuid
 import tempfile
+import threading
 from typing import Any
 
 from .drives import GoalArbiter, GoalSelection
@@ -46,6 +47,8 @@ class AgentSession:
                                          "executor_fence": None,
                                          "reobserve_through_sequence": -1,
                                          "lease_history": []}
+        self.strategy: dict[str, Any] = {"goal_revision": 0, "proposal_ids": {}}
+        self._strategy_lock = threading.RLock()
 
     def bind_motion(self, *, mission_id: str, lease_id: str, boot_id: str) -> None:
         """Bind only after exact release of any prior owner; never infer stop."""
@@ -81,6 +84,10 @@ class AgentSession:
             self.executive = EmbodiedExecutive(self.world, candidate.goal)
 
     def _select_if_needed(self) -> None:
+        if self.strategy["goal_revision"] > 0 and self.selection is not None:
+            # One strategic owner, not the packet-local heuristic, owns this
+            # goal until a validated newer proposal explicitly revises it.
+            return
         candidate = (GoalSelection(self.fixed_goal, "operator", "Mission-fixed semantic goal.")
                      if self.fixed_goal is not None else self.arbiter.select(self.world))
         if self.selection is None:
@@ -114,29 +121,31 @@ class AgentSession:
 
     def update(self, perception: dict[str, Any], *, observed_at: float, packet_id: str,
                mission_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
-        active_lease = self.execution["lease_id"]
-        if self.boot_id is not None and active_lease is None:
-            if mission_id is not None or lease_id is not None:
-                raise SessionIdentityError("unowned perception cannot claim a motion lease")
-        else:
-            incoming = self.mission_id if mission_id is None else str(mission_id)
-            if self.mission_id is not None and incoming != self.mission_id:
-                raise SessionIdentityError("perception mission does not match agent session")
-            if self.boot_id is not None and lease_id != active_lease:
-                raise SessionIdentityError("perception does not belong to exact active lease")
-        snapshot = self.world.update(perception, observed_at=observed_at, packet_id=packet_id)
-        self._select_if_needed()
-        self.updated_at = float(observed_at)
-        return snapshot
+        with self._strategy_lock:
+            active_lease = self.execution["lease_id"]
+            if self.boot_id is not None and active_lease is None:
+                if mission_id is not None or lease_id is not None:
+                    raise SessionIdentityError("unowned perception cannot claim a motion lease")
+            else:
+                incoming = self.mission_id if mission_id is None else str(mission_id)
+                if self.mission_id is not None and incoming != self.mission_id:
+                    raise SessionIdentityError("perception mission does not match agent session")
+                if self.boot_id is not None and lease_id != active_lease:
+                    raise SessionIdentityError("perception does not belong to exact active lease")
+            snapshot = self.world.update(perception, observed_at=observed_at, packet_id=packet_id)
+            self._select_if_needed()
+            self.updated_at = float(observed_at)
+            return snapshot
 
     def decide(self, *, rollout_mode: str = "shadow") -> ExecutiveDecision:
-        self._select_if_needed()
-        assert self.executive is not None
-        if self.world.sequence <= self.execution["reobserve_through_sequence"]:
-            return ExecutiveDecision(self.executive.goal.name, None,
-                                     skill("observe", reason="Re-perceive after execution feedback."),
-                                     "execution_feedback_requires_reobservation", False)
-        return self.executive.decide(rollout_mode=rollout_mode)
+        with self._strategy_lock:
+            self._select_if_needed()
+            assert self.executive is not None
+            if self.world.sequence <= self.execution["reobserve_through_sequence"]:
+                return ExecutiveDecision(self.executive.goal.name, None,
+                                         skill("observe", reason="Re-perceive after execution feedback."),
+                                         "execution_feedback_requires_reobservation", False)
+            return self.executive.decide(rollout_mode=rollout_mode)
 
     def record_execution(self, outcome: dict[str, Any]) -> None:
         intent = outcome.get("intent") or {}
@@ -168,6 +177,10 @@ class AgentSession:
             self.execution["reobserve_through_sequence"] = self.world.sequence + 1
 
     def to_dict(self) -> dict[str, Any]:
+        with self._strategy_lock:
+            return self._to_dict_locked()
+
+    def _to_dict_locked(self) -> dict[str, Any]:
         selection = None
         if self.selection is not None:
             selection = {"goal": asdict(self.selection.goal), "drive": self.selection.drive,
@@ -184,7 +197,8 @@ class AgentSession:
             "selection": selection,
             "inspect_attempts": {} if self.executive is None else dict(self.executive.inspect_attempts),
             "world": self.world.to_dict(),
-            "execution": self.execution,
+            "execution": copy.deepcopy(self.execution),
+            "strategy": copy.deepcopy(self.strategy),
         }
 
     def save(self, path: Path) -> None:
@@ -241,6 +255,14 @@ class AgentSession:
         session.updated_at = float(value["updated_at"])
         if "execution" in value:
             session.execution.update(copy.deepcopy(value["execution"]))
+        if "strategy" in value:
+            strategy = value["strategy"]
+            if (not isinstance(strategy, dict) or set(strategy) != {"goal_revision", "proposal_ids"}
+                    or type(strategy["goal_revision"]) is not int or strategy["goal_revision"] < 0
+                    or not isinstance(strategy["proposal_ids"], dict)
+                    or (strategy["goal_revision"] > 0 and session.selection is None)):
+                raise SessionIdentityError("invalid strategic goal snapshot")
+            session.strategy = copy.deepcopy(strategy)
         return session
 
     @classmethod

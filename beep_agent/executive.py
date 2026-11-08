@@ -50,6 +50,9 @@ class EmbodiedExecutive:
             raise ValueError("rollout_mode must be shadow, stationary, or supervised")
         if not self.world.sequence:
             return self._decision(None, skill("observe", reason="No world evidence exists yet."), "acquire_initial_world_state")
+        if self.goal.name in {"rest", "observe", "perceive"}:
+            return self._decision(None, skill("observe", reason="Observe quietly without requesting locomotion."),
+                                  "deliberate_rest_or_observation")
 
         central_living_hazards = {
             hazard["type"] for hazard in self.world.hazards
