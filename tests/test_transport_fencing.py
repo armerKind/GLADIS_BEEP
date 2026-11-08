@@ -278,6 +278,23 @@ class TransportFencingTests(unittest.TestCase):
         self.assertTrue(results[0]["cancelled"])
         self.assertEqual(self.first_writes(), [])
 
+    def test_stop_latches_but_cannot_preempt_greeting_lock_known_gap(self):
+        """A limitation witness, not a passing physical stop-latency guarantee."""
+        worker = self.start("recv")
+        completed = threading.Event()
+        stopper = threading.Thread(target=lambda: (bridge.request_stop("phase_c_probe", n=1),
+                                                   completed.set()), daemon=True)
+        self.workers.append(stopper)
+        stopper.start()
+        self.assertTrue(self.lease.cancel_event.wait(1), "stop cancellation latch delayed")
+        self.assertFalse(completed.wait(.05), "greeting unexpectedly released I/O lock")
+        self.assertTrue(stopper.is_alive(), "stop should be queued behind greeting")
+        self.finish(worker)
+        stopper.join(4)
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(completed.is_set())
+        self.assertEqual(self.first_writes(), [])
+
     def test_inflight_write_is_not_revocable_so_semantic_interlock_stays_closed(self):
         worker = self.start("motion", "late_accept", curve=True)
         self.lease.cancel_event.set()

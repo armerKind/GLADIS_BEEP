@@ -6,6 +6,9 @@ from .skills import FUNCTION_SCHEMAS, SkillCall, SkillValidationError, skill, va
 from .session import AgentSession, SessionIdentityError
 from .strategy import GoalProposal, StrategicOwner, StrategyError, LIFETIME_CHARTER
 from .tactical import TacticalDisposition, TacticalEvent, TacticalGate, TacticalValidationError
+from .visual_grounding import (CameraCalibration, Detection, DirectiveValidation, GroundingError,
+                               ViewpointCone, ViewpointRequest, ground_viewpoint,
+                               validate_viewpoint_request)
 from .world_model import EntityTrack, WorldModel
 
 __all__ = [
@@ -15,5 +18,7 @@ __all__ = [
     "AgentSession", "SessionIdentityError", "SkillCall", "SkillValidationError", "WorldModel",
     "GoalProposal", "StrategicOwner", "StrategyError", "LIFETIME_CHARTER",
     "TacticalDisposition", "TacticalEvent", "TacticalGate", "TacticalValidationError",
+    "CameraCalibration", "Detection", "DirectiveValidation", "GroundingError",
+    "ViewpointCone", "ViewpointRequest", "ground_viewpoint", "validate_viewpoint_request",
     "skill", "validate_skill_call",
 ]

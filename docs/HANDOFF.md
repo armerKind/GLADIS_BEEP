@@ -1,5 +1,7 @@
 # Fresh-agent handoff — 2026-11-06
 
+> **Phase C offline first slice, November 8, 2026:** [Phase C gate](PHASE_C_GATE.md) documents a pure exposure/TF/revision/calibration-gated viewpoint-cone contract and advisory bearing validation, plus a transport-race witness that stop can latch while its app transaction waits on a blocked greeting lock. These are synthetic replay and host-side tests; no live producer, map-space route, stop-latency bound, or motor enablement was added. Phase A's offline gate is closed; Phase B's offline contracts were accepted while live integration gates remain open.
+
 > **Phase B offline start, November 8, 2026:** [Phase B gate](PHASE_B_GATE.md) covers strict tactical attention and one revisioned GLADIS goal-proposal owner. These are shadow contracts only: no live VAD/camera/ROS producer, persistent model-session adapter, audio cue output, or motor dispatch exists in this Phase B slice. Do not describe it as an autonomous running robot.
 
 > **Phase A external-audit correction, November 8, 2026:** See [Phase A gate](PHASE_A_GATE.md). Boot-bound READY/between-lease perception, multi-node graph revalidation and same-revision revisits, occupancy-grid origin shifts, transient submap-feed recovery, and journal append scaling are fixed offline with regression tests. Camera spatial readiness now requires proven exposure-time quality; the bridge does not currently supply that proof. Phase B may proceed offline, not as live autonomous or motor-enabled behavior.

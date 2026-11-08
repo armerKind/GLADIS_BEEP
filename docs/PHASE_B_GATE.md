@@ -1,6 +1,6 @@
 # Phase B offline cognition checkpoint
 
-**Status:** Shadow-only contract slice. Phase A's external audit defects were corrected before this work. No Pi producer, model-session adapter, audio mixer, motor dispatch, bridge deployment or hardware validation is included; **Phase B is not complete**.
+**Status:** Offline tactical/strategy shadow-contract slice reviewed and accepted by Max on November 8, 2026. No Pi producer, model-session adapter, audio mixer, motor dispatch, bridge deployment or hardware validation is included; **the live Phase B integration gates below remain open**.
 
 ## Implemented
 
