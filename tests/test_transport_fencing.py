@@ -28,6 +28,7 @@ class SocketRig:
         self.release = threading.Event()
         self.writes = []
         self.connections = 0
+        self.recv_count = 0
         self.triggered = False
         self.nonblocking = []
 
@@ -63,6 +64,7 @@ class SocketRig:
                 rig.nonblocking.append(value)
 
             def recv(self, _size):
+                rig.recv_count += 1
                 if number == 1:
                     rig.gate("recv")
                 return b"ready"
@@ -277,6 +279,41 @@ class TransportFencingTests(unittest.TestCase):
         self.assertFalse(cancel.is_alive())
         self.assertTrue(results[0]["cancelled"])
         self.assertEqual(self.first_writes(), [])
+
+    def test_stop_does_not_wait_for_vendor_greeting(self):
+        self.rig = SocketRig("recv")
+        self.assertIsNone(bridge.request_stop("no_greeting", n=1))
+        self.assertEqual(self.rig.recv_count, 0)
+        self.assertEqual(self.rig.writes[-1][1], bridge.pkt(0x12, [0]))
+
+    def test_unowned_pre_stop_handshake_cannot_write_after_stop_and_reset(self):
+        bridge._active_motion_lease = None
+        bridge._active_mission = None
+        self.rig = SocketRig("recv")
+        errors = []
+        worker = threading.Thread(target=lambda: self._unowned_forward(errors), daemon=True)
+        self.workers.append(worker)
+        worker.start()
+        self.assertTrue(self.rig.entered.wait(1))
+        self.assertIsNone(bridge.request_stop("unowned_race", n=1))
+        # A later control cycle may reset the generic cancelled flag; the
+        # in-flight, pre-stop socket must still be fenced by stop sequence.
+        with bridge.state_lock:
+            bridge.state["motion_cancelled"] = False
+        self.rig.release.set()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(errors)
+        self.assertEqual([packet for _, packet in self.rig.writes
+                          if packet == bridge.pkt(0x11, [0, 100])], [])
+        self.assertFalse(bridge.state["moving"])
+
+    @staticmethod
+    def _unowned_forward(errors):
+        try:
+            bridge.app_send("forward", step=10)
+        except bridge.MotionCancelled as error:
+            errors.append(error)
 
     def test_stop_preempts_stalled_greeting_before_motion_writes(self):
         """Host stop I/O must not queue behind a stalled motion greeting."""

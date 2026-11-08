@@ -2,16 +2,18 @@
 import math
 import unittest
 from dataclasses import replace
+from typing import Any
 from unittest.mock import patch
 
 from beep_agent.events import EventEnvelope
 from beep_agent.place_graph import GridGeometry
 from beep_agent.pose_history import MapTransform
-from beep_agent.visual_grounding import CameraCalibration, Detection, ground_viewpoint
+from beep_agent.visual_grounding import (CameraCalibration, Detection, ViewpointRequest,
+                                          ground_viewpoint, validate_viewpoint_request)
 from beep_agent.viewpoint_scorer import OccupancySnapshot, score_viewpoint
 
 
-def cone_at(x=1.0, y=2.0, yaw=0.0):
+def event_at(x=1.0, y=2.0, yaw=0.0):
     value = {
         "schema_version": 1, "event_id": "frame-1", "event_kind": "frame_acquired",
         "source": "camera", "robot_id": "beep", "session_id": "session-1", "boot_id": "boot-1",
@@ -26,7 +28,11 @@ def cone_at(x=1.0, y=2.0, yaw=0.0):
             "valid": True, "uncertainty": {"xy_std_m": .01, "yaw_std_rad": .01}},
         "payload": {"camera_posture_id": "level"},
     }
-    return ground_viewpoint(EventEnvelope.from_dict(value),
+    return EventEnvelope.from_dict(value)
+
+
+def cone_at(x=1.0, y=2.0, yaw=0.0):
+    return ground_viewpoint(event_at(x, y, yaw),
         Detection("cap", "object", "frame-1", "img-1", .9, .49, .51),
         MapTransform("boot-1", 2, 3, "grid-1", 1_100_000_000, 0, 0, 0),
         CameraCalibration("level", math.pi/2, 0, 0, 0, .01))
@@ -44,6 +50,29 @@ def grid(*, unknown=(), occupied=(), revision=3, snapshot="grid-1"):
 
 
 class ViewpointScorerTests(unittest.TestCase):
+    def test_scored_candidate_round_trips_through_request_with_distinct_bearings(self):
+        cone = cone_at()
+        assert cone is not None
+        snapshot = grid()
+        candidate = score_viewpoint(cone, snapshot,
+            current_map_context=snapshot.identity, current_x_m=1.0,
+            current_y_m=3.0, footprint_radius_m=.15)
+        assert candidate is not None
+        self.assertNotAlmostEqual(candidate.heading_from_current_rad,
+                                  candidate.target_look_bearing_rad)
+        request = ViewpointRequest(candidate.evidence_id, "cap",
+            candidate.target_look_bearing_rad, candidate.boot_id,
+            candidate.map_epoch, candidate.map_revision, candidate.map_snapshot_id,
+            "mission-1", "lease-1", 1.0, 1.5, candidate.x_m, candidate.y_m)
+        current: dict[str, Any] = dict(now_robot=1.1, current_session_id="session-1",
+            boot_id="boot-1", map_epoch=2, map_revision=3,
+            map_snapshot_id="grid-1", mission_id="mission-1", lease_id="lease-1")
+        self.assertTrue(validate_viewpoint_request(request, cone, event_at(),
+                                                   **current).accepted)
+        wrong = replace(request, target_look_bearing_rad=candidate.heading_from_current_rad)
+        self.assertEqual(validate_viewpoint_request(wrong, cone, event_at(),
+            **current).reason, "outside_viewpoint_cone")
+
     def test_heading_is_from_current_pose_to_viewpoint_not_parallel_capture_ray(self):
         cone = cone_at()
         assert cone is not None
@@ -120,6 +149,32 @@ class ViewpointScorerTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertLess(result.x_m, 2.0)
+
+    def test_forward_motion_does_not_choose_a_viewpoint_behind_current_pose(self):
+        cone = cone_at()
+        assert cone is not None
+        result = score_viewpoint(cone, grid(),
+            current_map_context=("boot-1", 2, 3, "grid-1"),
+            current_x_m=2.0, current_y_m=2.0, footprint_radius_m=.15,
+            min_look_m=.7, max_look_m=1.5)
+        assert result is not None
+        self.assertGreater(result.x_m, 2.0)
+        self.assertAlmostEqual(result.heading_from_current_rad, 0)
+
+    def test_blocked_wedge_needs_full_body_clearance_and_valid_current_pose(self):
+        cone = cone_at()
+        assert cone is not None
+        # Wide uncertainty wedge intersects off-axis unknown near 0.85 m;
+        # the body at the first center-ray step can otherwise miss that cell.
+        cone = replace(cone, bearing_half_width_rad=.3)
+        blocked = grid(unknown=((68, 72),))
+        self.assertIsNone(score_viewpoint(cone, blocked,
+            current_map_context=blocked.identity, current_x_m=1,
+            current_y_m=2, footprint_radius_m=.2, min_look_m=.7))
+        outside = grid()
+        self.assertIsNone(score_viewpoint(cone, outside,
+            current_map_context=outside.identity, current_x_m=100,
+            current_y_m=100, footprint_radius_m=.15))
 
     def test_grid_contract_rejects_bad_dimensions_and_unknown_values(self):
         geometry = GridGeometry(0, 0, .1, "map")

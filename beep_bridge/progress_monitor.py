@@ -26,7 +26,7 @@ class MotionWindow:
     end_y_m: float
     start_yaw_rad: float
     pose_healthy: bool
-    range_delta_m: float | None
+    forward_range_reduction_m: float | None  # front range at start minus front range at end
     visual_motion: str
     attitude_alert: bool | None
 
@@ -46,9 +46,9 @@ class MotionWindow:
         if (any(isinstance(v, bool) or not isinstance(v, (float, int))
                 or not isfinite(v) for v in values)
                 or self.started_at_robot < 0 or self.ended_at_robot <= self.started_at_robot
-                or (self.range_delta_m is not None and (isinstance(self.range_delta_m, bool)
-                or not isinstance(self.range_delta_m, (float, int))
-                or not isfinite(self.range_delta_m)))):
+                or (self.forward_range_reduction_m is not None and (isinstance(self.forward_range_reduction_m, bool)
+                or not isinstance(self.forward_range_reduction_m, (float, int))
+                or not isfinite(self.forward_range_reduction_m)))):
             raise ValueError("invalid motion window measurements")
 
 
@@ -91,20 +91,20 @@ class MotionDiscrepancy:
             return MotionAssessment("insufficient_evidence", signals + ("unverified_map_revision",))
         signals += ("revision_verified",)
         if (window.gait != "straight" or window.gait_cycles < self.min_gait_cycles
-                or not window.pose_healthy or window.range_delta_m is None
+                or not window.pose_healthy or window.forward_range_reduction_m is None
                 or window.visual_motion == "unknown"):
             self._consecutive_stalls = 0
             return MotionAssessment("insufficient_evidence", signals + ("unqualified_window",))
         dx, dy = window.end_x_m - window.start_x_m, window.end_y_m - window.start_y_m
         forward = dx * cos(window.start_yaw_rad) + dy * sin(window.start_yaw_rad)
         displacement = hypot(dx, dy)
-        if displacement >= .5 and abs(window.range_delta_m) < .05 and window.visual_motion == "still":
+        if displacement >= .5 and abs(window.forward_range_reduction_m) < .05 and window.visual_motion == "still":
             self._consecutive_stalls = 0
             return MotionAssessment("localization_conflict", signals + ("pose_range_vision_disagree",))
-        if forward >= .15 and (window.range_delta_m >= .1 or window.visual_motion == "moving"):
+        if forward >= .15 and (window.forward_range_reduction_m >= .1 or window.visual_motion == "moving"):
             self._consecutive_stalls = 0
             return MotionAssessment("progress_ok", signals + ("correlated_forward_progress",))
-        if displacement < .05 and abs(window.range_delta_m) < .05 and window.visual_motion == "still":
+        if displacement < .05 and abs(window.forward_range_reduction_m) < .05 and window.visual_motion == "still":
             self._consecutive_stalls += 1
             if self._consecutive_stalls >= 2:
                 return MotionAssessment("stalled", signals + ("two_correlated_stall_windows",))

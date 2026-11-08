@@ -151,7 +151,7 @@ def ground_viewpoint(event: EventEnvelope, detection: Detection, optimized: MapT
 class ViewpointRequest:
     evidence_id: str
     target_id: str
-    bearing_rad: float
+    target_look_bearing_rad: float  # capture-origin map bearing, never current navigation heading
     boot_id: str
     map_epoch: int
     map_revision: int
@@ -160,12 +160,16 @@ class ViewpointRequest:
     lease_id: str
     issued_at_robot: float
     expires_at_robot: float
+    viewpoint_x_m: float
+    viewpoint_y_m: float
 
     def __post_init__(self) -> None:
         for field in ("evidence_id", "target_id", "boot_id", "map_snapshot_id",
                       "mission_id", "lease_id"):
             _id(getattr(self, field), field)
-        _finite(self.bearing_rad, "bearing_rad")
+        _finite(self.target_look_bearing_rad, "target_look_bearing_rad")
+        _finite(self.viewpoint_x_m, "viewpoint_x_m")
+        _finite(self.viewpoint_y_m, "viewpoint_y_m")
         issued = _finite(self.issued_at_robot, "issued_at_robot")
         expires = _finite(self.expires_at_robot, "expires_at_robot")
         if not 0 <= issued < expires <= issued + 2.0:
@@ -214,6 +218,12 @@ def validate_viewpoint_request(request: ViewpointRequest, cone: ViewpointCone,
             or request.issued_at_robot < event.acquired_at_robot
             or now < request.issued_at_robot or now >= request.expires_at_robot):
         return DirectiveValidation(False, "expired")
-    if abs(_angle(request.bearing_rad - cone.bearing_center_rad)) > cone.bearing_half_width_rad:
+    # The request bearing is capture-origin LOOK bearing; current-pose heading
+    # toward the metric viewpoint is a separate value from the scorer.
+    dx = request.viewpoint_x_m - cone.origin_x_m
+    dy = request.viewpoint_y_m - cone.origin_y_m
+    if (dx * dx + dy * dy < .01
+            or abs(_angle(atan2(dy, dx) - request.target_look_bearing_rad)) > 1e-6
+            or abs(_angle(request.target_look_bearing_rad - cone.bearing_center_rad)) > cone.bearing_half_width_rad):
         return DirectiveValidation(False, "outside_viewpoint_cone")
     return DirectiveValidation(True, "advisory_only")

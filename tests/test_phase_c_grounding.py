@@ -115,7 +115,9 @@ class VisualGroundingTests(unittest.TestCase):
         cone = ground_viewpoint(exposure(), self.detection, transform(), self.calibration)
         assert cone is not None
         req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
-                               "grid-1", "mission-1", "lease-1", 1.0, 1.5)
+                               "grid-1", "mission-1", "lease-1", 1.0, 1.5,
+                               cone.origin_x_m + math.cos(cone.bearing_center_rad),
+                               cone.origin_y_m + math.sin(cone.bearing_center_rad))
         accepted = validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
                                                current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3,
                                                map_snapshot_id="grid-1", mission_id="mission-1", lease_id="lease-1")
@@ -124,7 +126,11 @@ class VisualGroundingTests(unittest.TestCase):
         for changed, reason in (
             ({"evidence_id": "other"}, "evidence_mismatch"),
             ({"map_revision": 4}, "map_context_mismatch"),
-            ({"bearing_rad": cone.bearing_center_rad + 1.0}, "outside_viewpoint_cone"),
+            ({"target_look_bearing_rad": cone.bearing_center_rad + 1.0}, "outside_viewpoint_cone"),
+            ({"viewpoint_x_m": cone.origin_x_m - 1.0,
+              "viewpoint_y_m": cone.origin_y_m}, "outside_viewpoint_cone"),
+            ({"viewpoint_x_m": cone.origin_x_m,
+              "viewpoint_y_m": cone.origin_y_m}, "outside_viewpoint_cone"),
             ({"lease_id": "new-lease"}, "ownership_mismatch"),
         ):
             request = ViewpointRequest(**{**vars(req), **changed})
@@ -146,12 +152,28 @@ class VisualGroundingTests(unittest.TestCase):
         with self.assertRaises(GroundingError):
             ViewpointRequest(**{**vars(req), "expires_at_robot": 4.0})
 
+    def test_lateral_observer_heading_is_not_capture_relative_request_bearing(self):
+        cone = ground_viewpoint(exposure(), self.detection, transform(), self.calibration)
+        assert cone is not None
+        x = cone.origin_x_m + math.cos(cone.bearing_center_rad)
+        y = cone.origin_y_m + math.sin(cone.bearing_center_rad)
+        heading_from_current = math.atan2(y - 3.0, x - 1.0)
+        self.assertGreater(abs(heading_from_current - cone.bearing_center_rad),
+                           cone.bearing_half_width_rad)
+        req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
+                               "grid-1", "mission-1", "lease-1", 1.0, 1.5, x, y)
+        self.assertTrue(validate_viewpoint_request(req, cone, exposure(), now_robot=1.1,
+            current_session_id="session-1", boot_id="boot-1", map_epoch=2, map_revision=3,
+            map_snapshot_id="grid-1", mission_id="mission-1", lease_id="lease-1").accepted)
+
     def test_stationary_observation_can_bind_new_lease_but_stale_owner_cannot(self):
         stationary = exposure(lease=None)
         cone = ground_viewpoint(stationary, self.detection, transform(), self.calibration)
         assert cone is not None
         req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
-                               "grid-1", "mission-2", "lease-2", 1.0, 1.5)
+                               "grid-1", "mission-2", "lease-2", 1.0, 1.5,
+                               cone.origin_x_m + math.cos(cone.bearing_center_rad),
+                               cone.origin_y_m + math.sin(cone.bearing_center_rad))
         current: dict[str, Any] = dict(now_robot=1.1, current_session_id="session-1", boot_id="boot-1",
                        map_epoch=2, map_revision=3, map_snapshot_id="grid-1",
                        mission_id="mission-2", lease_id="lease-2")
@@ -197,7 +219,9 @@ class VisualGroundingTests(unittest.TestCase):
         cone = ground_viewpoint(frame, self.detection, transform(at=8.8), self.calibration)
         assert cone is not None
         req = ViewpointRequest("img-1", "cap", cone.bearing_center_rad, "boot-1", 2, 3,
-                               "grid-1", "mission-1", "lease-1", 8.9, 10.4)
+                               "grid-1", "mission-1", "lease-1", 8.9, 10.4,
+                               cone.origin_x_m + math.cos(cone.bearing_center_rad),
+                               cone.origin_y_m + math.sin(cone.bearing_center_rad))
         current: dict[str, Any] = dict(current_session_id="session-1", boot_id="boot-1", map_epoch=2,
                        map_revision=3, map_snapshot_id="grid-1", mission_id="mission-1",
                        lease_id="lease-1")

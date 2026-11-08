@@ -113,6 +113,7 @@ class ViewpointCandidate:
     x_m: float
     y_m: float
     heading_from_current_rad: float
+    target_look_bearing_rad: float  # map-frame bearing from exposure origin, NOT navigation heading
     evidence_id: str
     boot_id: str
     map_epoch: int
@@ -146,20 +147,28 @@ def score_viewpoint(cone: ViewpointCone, grid: OccupancySnapshot, *,
             or not 0 <= cone.slam_yaw_std_rad <= .3
             or not 0 <= cone.bearing_half_width_rad < pi / 2):
         return None
+    if not grid.footprint_free(current_x_m, current_y_m, footprint_radius_m):
+        return None
     first_block_m = grid.first_wedge_block_m(cone, max_look_m)
     radius = footprint_radius_m + 2 * cone.origin_xy_std_m
+    ray_x, ray_y = cos(cone.bearing_center_rad), sin(cone.bearing_center_rad)
+    current_projection = ((current_x_m - cone.origin_x_m) * ray_x
+                          + (current_y_m - cone.origin_y_m) * ray_y)
     step = grid.geometry.resolution_m / 2
     n = int((max_look_m - min_look_m) / step) + 1
     for index in range(n):
         distance = min_look_m + index * step
-        if distance >= first_block_m:
-            return None  # No raycasting through unknown space.
-        x = cone.origin_x_m + distance * cos(cone.bearing_center_rad)
-        y = cone.origin_y_m + distance * sin(cone.bearing_center_rad)
+        if distance + radius >= first_block_m:
+            return None  # Full uncertainty-inflated body stays before unknown.
+        if distance <= current_projection + .05:
+            continue  # Do not send a translated observer back down its old ray.
+        x = cone.origin_x_m + distance * ray_x
+        y = cone.origin_y_m + distance * ray_y
         if grid.footprint_free(x, y, radius):
             if hypot(x - current_x_m, y - current_y_m) < .05:
                 continue
             return ViewpointCandidate(x, y, atan2(y - current_y_m, x - current_x_m),
-                                      cone.evidence_id, cone.boot_id, cone.map_epoch,
+                                      cone.bearing_center_rad, cone.evidence_id, cone.boot_id,
+                                      cone.map_epoch,
                                       cone.map_revision, cone.map_snapshot_id)
     return None

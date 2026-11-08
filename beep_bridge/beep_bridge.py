@@ -160,6 +160,9 @@ sdk_io_lock = threading.RLock()
 app_io_lock = threading.RLock()
 # Serialize compound motion transitions without blocking stop on connect/recv.
 app_transition_lock = threading.RLock()
+# Never reset this generation during normal control; a pre-stop handshake
+# cannot become current again when a later lease clears motion_cancelled.
+_last_stop_seq = 0
 motion_context = threading.local()
 _active_motion_lease = None
 _motion_lease_sequence = 0
@@ -168,7 +171,7 @@ observer_stop_lock = threading.Lock()
 observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.21.0-stop-priority",
+    "version": "0.21.1-phase-c-audit",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -363,7 +366,7 @@ def pkt(cmd: int, payload=()):
     return ("$" + "".join(f"{v & 255:02X}" for v in vals) + "#").encode()
 
 
-def app_packet_guard(action, lease, deadline):
+def app_packet_guard(action, lease, deadline, stop_seq=None):
     """Host-side fence, not a guarantee that TCP bytes can be revoked.
 
     Recheck after every potentially blocking wait. The semantic interlock stays
@@ -378,6 +381,8 @@ def app_packet_guard(action, lease, deadline):
         raise MotionCancelled("app packet has no owning lease")
     if action == "stop":
         return
+    if stop_seq is not None and stop_seq != _last_stop_seq:
+        raise MotionCancelled("app transaction predates stop")
     if time.monotonic() >= deadline:
         raise MotionCancelled("app transaction expired")
     if lease is not None and (lease.cancel_event.is_set() or lease.ended_event.is_set()
@@ -421,16 +426,16 @@ def app_packet_guard(action, lease, deadline):
         raise MotionCancelled("app packet ownership lost during validation")
 
 
-def app_write_packet(sock, packet, action, lease, deadline):
+def app_write_packet(sock, packet, action, lease, deadline, stop_seq=None):
     """Owned motion never uses sendall's uncancellable internal retry loop."""
-    app_packet_guard(action, lease, deadline)
+    app_packet_guard(action, lease, deadline, stop_seq)
     if lease is None or action == "stop":
         sock.sendall(packet)
         return
     sock.setblocking(False)
     offset = 0
     while offset < len(packet):
-        app_packet_guard(action, lease, deadline)
+        app_packet_guard(action, lease, deadline, stop_seq)
         try:
             written = sock.send(packet[offset:])
         except (BlockingIOError, InterruptedError):
@@ -439,7 +444,7 @@ def app_write_packet(sock, packet, action, lease, deadline):
         if written <= 0:
             raise ConnectionError("app socket closed during packet")
         offset += written
-    app_packet_guard(action, lease, deadline)
+    app_packet_guard(action, lease, deadline, stop_seq)
 
 
 def app_transaction(action, packets):
@@ -449,24 +454,26 @@ def app_transaction(action, packets):
     packets are allowed after cancellation, but never from a replaced lease.
     """
     lease = getattr(motion_context, "lease", None)
+    stop_seq = _last_stop_seq
     deadline = time.monotonic() + 1.5
     try:
-        app_packet_guard(action, lease, deadline)
+        app_packet_guard(action, lease, deadline, stop_seq)
         # Connection setup and greeting cannot hold the register-write lock:
         # /stop must be able to acquire it while an owned socket stalls here.
         with socket.create_connection((HOST, APP_PORT), timeout=1.2) as sock:
             sock.settimeout(0.25)
-            try:
-                sock.recv(256)
-            except TimeoutError:
-                # Preserve the legacy unowned/stop optional greeting. Owned
-                # motion aborts on timeout rather than continuing to write.
-                if lease is not None and action != "stop":
-                    raise
+            if action != "stop":
+                try:
+                    sock.recv(256)
+                except TimeoutError:
+                    # Preserve the legacy unowned optional greeting. Owned
+                    # motion aborts on timeout rather than continuing to write.
+                    if lease is not None:
+                        raise
             with app_io_lock:
-                app_packet_guard(action, lease, deadline)
+                app_packet_guard(action, lease, deadline, stop_seq)
                 for packet, delay in packets:
-                    app_write_packet(sock, packet, action, lease, deadline)
+                    app_write_packet(sock, packet, action, lease, deadline, stop_seq)
                     if delay:
                         if lease is not None and action != "stop":
                             lease.cancel_event.wait(delay)
@@ -837,24 +844,30 @@ def motor_send(action: str, step=None):
     return app_send(action, step=step)
 
 
+def _bump_stop_seq():
+    global _last_stop_seq
+    with state_lock:
+        _last_stop_seq += 1
+
+
 def stop_burst(n=3):
     lease = getattr(motion_context, "lease", None)
     if lease is not None and active_motion_lease() is not lease:
         return "stop_ownership_lost"
+    _bump_stop_seq()  # Includes direct watchdog/cleanup stop paths.
     sdk_errors = []
     sdk_ok = False
     app_errors = []
     app_ok = False
     primary = MOTOR_BACKEND
     if primary == "app":
-        with app_io_lock:
-            for _ in range(n):
-                try:
-                    app_send("stop")
-                    app_ok = True
-                except Exception as e:
-                    app_errors.append(repr(e))
-                time.sleep(0.06)
+        for _ in range(n):
+            try:
+                app_send("stop")
+                app_ok = True
+            except Exception as e:
+                app_errors.append(repr(e))
+            time.sleep(0.06)
         # Explicit emergency fallback only after the active backend fails.
         if not app_ok and (lease is None or active_motion_lease() is lease):
             with sdk_io_lock:
@@ -876,14 +889,13 @@ def stop_burst(n=3):
                 time.sleep(0.06)
         # Explicit emergency fallback only after the active backend fails.
         if not sdk_ok:
-            with app_io_lock:
-                for _ in range(n):
-                    try:
-                        app_send("stop")
-                        app_ok = True
-                    except Exception as e:
-                        app_errors.append(repr(e))
-                    time.sleep(0.06)
+            for _ in range(n):
+                try:
+                    app_send("stop")
+                    app_ok = True
+                except Exception as e:
+                    app_errors.append(repr(e))
+                time.sleep(0.06)
 
     stopped = (app_ok or sdk_ok)
     errors = (app_errors + sdk_errors) if primary == "app" else (sdk_errors + app_errors)
@@ -900,11 +912,13 @@ def stop_burst(n=3):
 
 def request_stop(source="api", n=3):
     """Cancel the exact active lease before stopping; its token can never be revived."""
+    global _last_stop_seq
     lease = active_motion_lease()
     if lease is not None:
         lease.cancel_event.set()
     with state_lock:
         state["motion_cancelled"] = True
+        _last_stop_seq += 1  # Latch before any stop I/O; never revive old handshakes.
     remember("motion_cancel_requested", source=str(source), lease_id=None if lease is None else lease.lease_id)
     return stop_burst(n)
 
