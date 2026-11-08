@@ -1,4 +1,4 @@
-"""Mission-bound persistent semantic session for BEEP."""
+"""Persistent semantic session with optional exact boot/lease binding for BEEP."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -22,14 +22,16 @@ class SessionIdentityError(ValueError):
 
 
 class AgentSession:
-    """Keep world, goal and executive state bound to one physical mission."""
+    """Keep world, goal and executive state across explicitly released leases."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, *, robot_id: str, mission_id: str | None,
                  fixed_goal: EmbodiedGoal | None = None, world: WorldModel | None = None,
-                 session_id: str | None = None, created_at: float | None = None) -> None:
+                 session_id: str | None = None, created_at: float | None = None,
+                 boot_id: str | None = None) -> None:
         self.robot_id = str(robot_id)
+        self.boot_id = None if boot_id is None else str(boot_id)
         self.mission_id = None if mission_id is None else str(mission_id)
         self.session_id = session_id or f"agent-{uuid.uuid4().hex[:12]}"
         self.created_at = time.time() if created_at is None else float(created_at)
@@ -42,7 +44,32 @@ class AgentSession:
         self.execution: dict[str, Any] = {"lease_id": None, "latest_frame_at": 0.0,
                                          "issued": {}, "last_outcome": None,
                                          "executor_fence": None,
-                                         "reobserve_through_sequence": -1}
+                                         "reobserve_through_sequence": -1,
+                                         "lease_history": []}
+
+    def bind_motion(self, *, mission_id: str, lease_id: str, boot_id: str) -> None:
+        """Bind only after exact release of any prior owner; never infer stop."""
+        if not all(isinstance(x, str) and x.strip() for x in (mission_id, lease_id, boot_id)):
+            raise SessionIdentityError("motion binding needs nonempty IDs")
+        if self.boot_id is not None and boot_id != self.boot_id:
+            raise SessionIdentityError("motion binding belongs to a different boot")
+        existing = self.execution["lease_id"]
+        if existing is not None:
+            if (self.mission_id, existing) == (mission_id, lease_id):
+                return
+            raise SessionIdentityError("release exact current lease before rebinding")
+        self.boot_id = boot_id
+        self.mission_id = mission_id
+        self.execution["lease_id"] = lease_id
+        self.execution["lease_history"].append({"mission_id": mission_id,
+                                                 "lease_id": lease_id, "state": "bound"})
+
+    def release_motion(self, *, mission_id: str, lease_id: str) -> None:
+        if (self.mission_id, self.execution["lease_id"]) != (mission_id, lease_id):
+            raise SessionIdentityError("cannot release a different motion owner")
+        self.execution["lease_id"] = None
+        self.execution["lease_history"].append({"mission_id": mission_id,
+                                                 "lease_id": lease_id, "state": "released"})
 
     def _adopt(self, candidate: GoalSelection, *, preserve_executive: bool = False) -> None:
         self.selection = candidate
@@ -84,10 +111,13 @@ class AgentSession:
                 self._adopt(candidate, preserve_executive=True)
 
     def update(self, perception: dict[str, Any], *, observed_at: float, packet_id: str,
-               mission_id: str | None = None) -> dict[str, Any]:
+               mission_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
         incoming = self.mission_id if mission_id is None else str(mission_id)
         if self.mission_id is not None and incoming != self.mission_id:
             raise SessionIdentityError("perception mission does not match agent session")
+        if self.boot_id is not None and (self.execution["lease_id"] is None or
+                                         lease_id != self.execution["lease_id"]):
+            raise SessionIdentityError("perception does not belong to exact active lease")
         snapshot = self.world.update(perception, observed_at=observed_at, packet_id=packet_id)
         self._select_if_needed()
         self.updated_at = float(observed_at)
@@ -106,6 +136,9 @@ class AgentSession:
         intent = outcome.get("intent") or {}
         if intent.get("mission_id") != self.mission_id or intent.get("session_id") != self.session_id:
             raise SessionIdentityError("execution outcome belongs to a different session or mission")
+        if self.boot_id is not None and (self.execution["lease_id"] is None or
+                                         intent.get("lease_id") != self.execution["lease_id"]):
+            raise SessionIdentityError("execution outcome belongs to a different lease")
         key = intent["decision_id"]
         previous = self.execution["issued"].get(key)
         if previous is not None and previous.get("intent") != intent:
@@ -137,6 +170,7 @@ class AgentSession:
             "schema_version": self.SCHEMA_VERSION,
             "session_id": self.session_id,
             "robot_id": self.robot_id,
+            "boot_id": self.boot_id,
             "mission_id": self.mission_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -171,13 +205,17 @@ class AgentSession:
     @classmethod
     def from_dict(cls, value: dict[str, Any], *, expected_robot_id: str | None = None,
                   expected_mission_id: str | None = None, max_age_s: float | None = None,
-                  now: float | None = None) -> "AgentSession":
-        if int(value.get("schema_version", 0)) != cls.SCHEMA_VERSION:
+                  now: float | None = None,
+                  expected_boot_id: str | None = None) -> "AgentSession":
+        if int(value.get("schema_version", 0)) not in {1, cls.SCHEMA_VERSION}:
             raise SessionIdentityError("unsupported agent session schema")
         robot_id = str(value["robot_id"])
+        boot_id = value.get("boot_id")
         mission_id = value.get("mission_id")
         if expected_robot_id is not None and robot_id != str(expected_robot_id):
             raise SessionIdentityError("agent session belongs to a different robot")
+        if expected_boot_id is not None and boot_id != str(expected_boot_id):
+            raise SessionIdentityError("agent session belongs to a different boot")
         if expected_mission_id is not None and mission_id != str(expected_mission_id):
             raise SessionIdentityError("agent session belongs to a different mission")
         current = time.time() if now is None else float(now)
@@ -187,7 +225,8 @@ class AgentSession:
         session = cls(robot_id=robot_id, mission_id=mission_id,
                       fixed_goal=None if fixed is None else EmbodiedGoal(**fixed),
                       world=WorldModel.from_dict(value["world"]),
-                      session_id=value["session_id"], created_at=float(value["created_at"]))
+                      session_id=value["session_id"], created_at=float(value["created_at"]),
+                      boot_id=boot_id)
         selected = value.get("selection")
         if selected is not None:
             session.selection = GoalSelection(EmbodiedGoal(**selected["goal"]), selected["drive"], selected["rationale"])
