@@ -1,0 +1,126 @@
+{
+  "packet": {
+    "bridge_status": {
+      "motion_lease_id": "motion-831a9c7418ea4321b795dc3b206404d9-5",
+      "pose": {
+        "confidence": 0.9,
+        "scan_match_score": null,
+        "source": "guarded_cartographer_slam",
+        "x": 4.4184,
+        "y": -0.7965,
+        "yaw": 1.6604
+      }
+    },
+    "frames": [
+      {
+        "bytes": 75252,
+        "captured_at": 1794131397.4218607,
+        "frame_id": "m000000",
+        "localization": {
+          "map_age_s": 0.975,
+          "pose_age_s": 0.042,
+          "pose_guard_reason": "moving_update",
+          "pose_valid": true,
+          "usable": true
+        },
+        "motion": {
+          "last_command": "app:forward",
+          "motion_lease_id": "motion-831a9c7418ea4321b795dc3b206404d9-5",
+          "moving": true,
+          "scan_age_s": 0.08
+        },
+        "pose": {
+          "confidence": 0.9,
+          "scan_match_score": null,
+          "source": "guarded_cartographer_slam",
+          "x": 4.4184,
+          "y": -0.7965,
+          "yaw": 1.6604
+        },
+        "quality": {
+          "brightness": 67.53,
+          "contrast": 38.89,
+          "difference_from_previous": null,
+          "edge_stddev": 28.08,
+          "height": 480,
+          "mean_rgb": [
+            78.38,
+            62.75,
+            63.63
+          ],
+          "width": 640
+        }
+      }
+    ],
+    "inference": {
+      "completed_at": 1794131400.3448353,
+      "latency_s": 2.363,
+      "newer_window_available": true,
+      "newest_frame_id_at_completion": "m000008",
+      "requested_latest_frame_id": "m000000",
+      "started_at": 1794131397.98142
+    }
+  },
+  "response": {
+    "attention": {
+      "reason": "Target green baseball cap located on the floor.",
+      "target_id": "green_baseball_cap",
+      "target_type": "object"
+    },
+    "confidence": 0.95,
+    "escalate": false,
+    "escalation_reason": null,
+    "plan": {
+      "goal": "Approach and verify the green baseball cap.",
+      "steps": [
+        {
+          "distance_m": 0.15,
+          "reason": "Move closer to inspect the target cap.",
+          "skill": "advance"
+        }
+      ]
+    },
+    "scene": {
+      "changes": [
+        "Identified target green baseball cap on floor near the sofa."
+      ],
+      "hazards": [
+        {
+          "confidence": 0.9,
+          "description": "Low coffee table directly ahead",
+          "position": "center",
+          "type": "obstacle"
+        }
+      ],
+      "objects": [
+        {
+          "confidence": 0.95,
+          "description": "Green baseball cap on the floor near the sofa",
+          "id": "green_baseball_cap",
+          "position": "right",
+          "proximity": "mid",
+          "visible_features": [
+            "front_face",
+            "top"
+          ]
+        },
+        {
+          "confidence": 0.99,
+          "description": "Dark wooden coffee table",
+          "id": "coffee_table",
+          "position": "center",
+          "proximity": "mid",
+          "visible_features": [
+            "front_face",
+            "left_side",
+            "right_side"
+          ]
+        }
+      ],
+      "people": [],
+      "summary": "Living room interior showing a coffee table, sofa, and a green baseball cap on the floor to the right of the table."
+    },
+    "schema_version": "1.0",
+    "uncertainty": []
+  }
+}

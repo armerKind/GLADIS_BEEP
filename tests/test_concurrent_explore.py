@@ -185,6 +185,25 @@ class ConcurrentExploreTests(unittest.TestCase):
         self.assertEqual([path for path, _ in bridge.calls], ["/mission/start"])
         self.assertEqual(bridge.lease, "lease-new")
 
+    def test_terminal_mission_waits_for_lease_release_without_cancel(self):
+        class FinishingBridge(FakeBridge):
+            finish_polls = 0
+            def mission(self):
+                if self.active is not None and self.active["state"] == "completed":
+                    self.finish_polls += 1
+                    if self.finish_polls >= 3:
+                        self.lease = None
+                return super().mission()
+        bridge = FinishingBridge()
+        def finishes(*_, **__):
+            assert bridge.active is not None
+            bridge.active["state"] = "completed"
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        result = run(options(), adapter=bridge, runner=finishes)
+        self.assertEqual(result["final_mission_state"], "completed")
+        self.assertTrue(result["original_lease_released"])
+        self.assertEqual([path for path, _ in bridge.calls], ["/mission/start"])
+
 
 if __name__ == "__main__":
     unittest.main()

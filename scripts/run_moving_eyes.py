@@ -21,6 +21,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from beep_agent import AgentSession, EmbodiedGoal, BridgeBodyAdapter
+from beep_agent.target_confirmation import TargetConfirmation
 from beep_agent.executor import ClosedLoopExecutor
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
@@ -53,6 +54,8 @@ def parse_args() -> argparse.Namespace:
                         help="Resume only when robot, mission identity and freshness match")
     parser.add_argument("--mode", choices=("shadow", "supervised"), default="shadow")
     parser.add_argument("--arm", action="store_true", help="Permit mission intents; also requires onboard opt-in")
+    parser.add_argument("--end-on-confirmed-target", action="store_true",
+                        help="Exit observer after two changed-viewpoint sightings; never dispatches a stop")
     return parser.parse_args()
 
 
@@ -102,6 +105,8 @@ def main() -> int:
         raise SystemExit("--max-inferences must be within [0, 1000]")
     if args.inference_interval < 0 or args.inference_interval > 600:
         raise SystemExit("--inference-interval must be within [0, 600]")
+    if getattr(args, "end_on_confirmed_target", False) and (args.target == "scene" or args.allow_no_mission):
+        raise SystemExit("target confirmation requires a named target and active mission")
 
     initial_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
     if not args.allow_no_mission and (
@@ -141,6 +146,8 @@ def main() -> int:
     deadline = time.monotonic() + args.duration
     inference_count = 0
     inference_errors = 0
+    confirmation = TargetConfirmation(args.target) if getattr(args, "end_on_confirmed_target", False) else None
+    confirmed_target = None
     last_inference_finished = 0.0
     capture.start()
     try:
@@ -243,6 +250,14 @@ def main() -> int:
                 and latest_mission.get("id") == current_mission_id
                 and latest_mission.get("state") in {"starting", "running"}
             )
+            # The observer may report a goal result but cannot cancel or steer
+            # hardware. Only the launcher, holding the exact lease, may stop it.
+            if (confirmation is not None and mission_valid
+                    and isinstance(latest_mission, dict)
+                    and current_mission_id == mission_id
+                    and latest_status.get("motion_lease_id") == latest_mission.get("lease_id")):
+                confirmed_target = confirmation.observe(
+                    response, packet, track_id=session.world.attention_track_id)
             course = recommend_course(response, latest_status, mission_valid=mission_valid)
             policy = evaluate_proposal(response, latest_status, mode="shadow")
             semantic["camera_assisted_course"] = course
@@ -251,6 +266,9 @@ def main() -> int:
             write_window(window_dir, frames, sheet, packet, response, policy, semantic, slam_map)
             (window_dir / "course_recommendation.json").write_text(
                 json.dumps(course, indent=2, sort_keys=True))
+            if confirmed_target is not None:
+                (window_dir / "target_confirmation.json").write_text(
+                    json.dumps(confirmed_target, indent=2, sort_keys=True))
             event = {
                 "window": inference_count,
                 "distinct_appearance_count": packet["distinct_appearance_count"],
@@ -265,12 +283,15 @@ def main() -> int:
                 "course_reason": course["reason"],
                 "dispatch_performed": execution["dispatch_performed"],
                 "execution_state": execution["state"],
+                "target_confirmed": confirmed_target is not None,
             }
             with trace_path.open("a") as trace:
                 trace.write(json.dumps(event, sort_keys=True) + "\n")
             print(json.dumps(event, sort_keys=True), flush=True)
             inference_count += 1
             last_inference_finished = time.monotonic()
+            if confirmed_target is not None:
+                break
             if args.max_inferences and inference_count >= args.max_inferences:
                 break
     finally:
@@ -289,6 +310,7 @@ def main() -> int:
         "agent_session": str(session_path),
         "agent_session_id": session.session_id,
         "mission_id": session.mission_id,
+        "target_confirmation": confirmed_target,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, sort_keys=True))
