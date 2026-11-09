@@ -27,6 +27,79 @@ def render(index, stamp, samples, confirmed=True):
 
 
 class AdaptiveTests(unittest.TestCase):
+    def test_second_tts_turn_rewarms_without_wiping_new_render_reference(self):
+        echo = AdaptiveEcho('s', 'b', delay_s=.04, echo_gain=.5)
+        sound = pcm(lambda k: 1000)
+        mic = pcm(lambda k: 500)
+        residual = None
+        for i in range(20):
+            echo.submit_render(render(i, i * .02, sound))
+            echo.process(capture(i, .04 + i * .02, mic))
+        # Capture continues while playback is off; BargeInGate skips echo.process().
+        for j in range(12):
+            echo.submit_render(render(20 + j, .50 + j * .02, sound))
+            residual = echo.process(capture(25 + j, .54 + j * .02, mic))
+            if j < 11:
+                self.assertIsNone(residual)
+        self.assertEqual(residual, pcm(lambda k: 0))
+        self.assertEqual(echo._renders[0].sequence, 20)
+
+    def test_render_pause_with_continuous_capture_rewarms_new_segment(self):
+        echo = AdaptiveEcho('s', 'b', delay_s=.04, echo_gain=.5)
+        residual = None
+        for i in range(20):
+            echo.submit_render(render(i, i * .02, pcm(lambda k: 1000)))
+            echo.process(capture(i, .04 + i * .02, pcm(lambda k: 500)))
+        # A short render underrun, not a capture discontinuity.
+        for i in range(20, 25):
+            echo.process(capture(i, .04 + i * .02, pcm(lambda k: 0)))
+        for j in range(12):
+            echo.submit_render(render(25 + j, .50 + j * .02, pcm(lambda k: 1000)))
+            residual = echo.process(capture(25 + j, .54 + j * .02,
+                                            pcm(lambda k: 500)))
+            if j < 11:
+                self.assertIsNone(residual)
+        self.assertEqual(residual, pcm(lambda k: 0))
+        self.assertEqual(echo._renders[0].sequence, 25)
+
+    def test_capture_gap_preserves_contiguous_render_history(self):
+        echo = AdaptiveEcho('s', 'b', delay_s=.04, echo_gain=.5)
+        for i in range(20):
+            echo.submit_render(render(i, i * .02, pcm(lambda k: 1000)))
+            echo.process(capture(i, .04 + i * .02, pcm(lambda k: 500)))
+        echo.submit_render(render(20, .40, pcm(lambda k: 1000)))
+        self.assertIsNone(echo.process(capture(25, .44, pcm(lambda k: 500))))
+        self.assertEqual(echo._renders[0].sequence, 0)
+        self.assertEqual(len(echo._captures), 1)
+        residual = None
+        for j in range(1, 12):
+            echo.submit_render(render(20 + j, .40 + j * .02, pcm(lambda k: 1000)))
+            residual = echo.process(capture(25 + j, .44 + j * .02,
+                                            pcm(lambda k: 500)))
+        self.assertEqual(residual, pcm(lambda k: 0))
+
+    def test_capture_callback_jitter_is_smoothed_and_outlier_rejected(self):
+        echo = AdaptiveEcho('s', 'b', delay_s=.04, echo_gain=.5,
+                            max_jitter_s=.0005)
+        errors = []
+        for i in range(45):
+            rtime = i * .02
+            echo.submit_render(render(i, rtime,
+                pcm(lambda k: wave(rtime + k / 16000))))
+            if i >= 2:
+                real = i * .02
+                jitter = 0. if i == 2 else (.0003 if i % 2 else -.0003)
+                stamp = real + jitter
+                mic = pcm(lambda k: round(.5 * wave(real - .04 + k / 16000)))
+                residual = echo.process(capture(i - 2, stamp, mic))
+                if i >= 20:
+                    assert residual is not None
+                    errors.append(max(abs(x) for x in struct.unpack('<320h', residual)))
+        self.assertLess(max(errors), 110)
+        echo.submit_render(render(45, .90, pcm(lambda k: 1000)))
+        self.assertIsNone(echo.process(capture(43, .9015,
+                                               pcm(lambda k: 500))))
+
     def test_exhausted_render_history_does_not_reuse_a_newer_reference(self):
         echo = AdaptiveEcho('s', 'b', delay_s=.04, echo_gain=.5)
         for index in range(140):
@@ -137,8 +210,10 @@ class SocialTests(unittest.TestCase):
             if action.transcription is not None:
                 requests.append(action.transcription)
         self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0].pcm_s16le[:640], pcm(lambda k: 1000))
-        self.assertEqual(requests[0].utterance_id, 'b:14')
+        self.assertLessEqual(int(requests[0].utterance_id.split(':')[1]), 13)
+        self.assertIn(pcm(lambda k: 1000),
+                      [requests[0].pcm_s16le[i:i+640]
+                       for i in range(0, len(requests[0].pcm_s16le), 640)])
         self.assertFalse(requests[0].motor_authority)
 
     def test_tts_cut_then_utterance_end_yields_one_consented_request(self):
@@ -195,13 +270,14 @@ class SocialTests(unittest.TestCase):
 
     def test_unmeasured_capture_and_invalid_decision_cannot_be_uploaded(self):
         handoff = SocialHandoff('s', 'b')
+        unmeasured = handoff.observe(capture(0, 0., pcm(lambda k: 10), 'ingest_approximate'),
+                                     BargeDecision(False, False, 'vad_onset', 'synthetic',
+                                                   near_end_pcm_s16le=pcm(lambda k: 10)),
+                                     mission_id=None, lease_id=None, upload_consented=True)
+        self.assertTrue(unmeasured.utterance_aborted)
+        self.assertIsNone(unmeasured.transcription)
         with self.assertRaises(AudioContractError):
-            handoff.observe(capture(0, 0., pcm(lambda k: 10), 'ingest_approximate'),
-                            BargeDecision(False, False, 'vad_onset', 'synthetic',
-                                          near_end_pcm_s16le=pcm(lambda k: 10)),
-                            mission_id=None, lease_id=None, upload_consented=True)
-        with self.assertRaises(AudioContractError):
-            handoff.observe(capture(0, 0., pcm(lambda k: 10)),
+            handoff.observe(capture(1, .02, pcm(lambda k: 10)),
                             BargeDecision(False, False, 'vad_onset', 'synthetic', True),
                             mission_id=None, lease_id=None, upload_consented=True)
 
@@ -212,6 +288,48 @@ class SocialTests(unittest.TestCase):
                                  mission_id=None, lease_id=None, upload_consented=True)
         self.assertTrue(result.utterance_aborted)
         self.assertIsNone(result.transcription)
+
+    def test_preroll_captures_first_vad_above_threshold_frame(self):
+        handoff = SocialHandoff('s', 'b')
+        speech = pcm(lambda k: 900)
+        for index, event in ((0, None), (1, None), (2, 'vad_onset'),
+                             (3, None), (4, 'vad_end')):
+            near_end = speech if index in (1, 2, 3) else pcm(lambda k: 0)
+            action = handoff.observe(capture(index, 1. + index * .02, near_end),
+                BargeDecision(False, False, event, 'synthetic',
+                              near_end_pcm_s16le=near_end), mission_id=None,
+                lease_id=None, upload_consented=True)
+        assert action.transcription is not None
+        self.assertEqual(action.transcription.utterance_id, 'b:0')
+        self.assertEqual(action.transcription.pcm_s16le[640:1280], speech)
+
+    def test_preroll_never_crosses_owner_gap_consent_or_invalid_residual(self):
+        sound = pcm(lambda k: 900)
+        def decision(event: str | None = None, residual: bytes | None = sound):
+            return BargeDecision(False, False, event, 'synthetic',
+                                 near_end_pcm_s16le=residual)
+        for change in ('owner', 'gap', 'consent', 'approximate', 'missing'):
+            with self.subTest(change=change):
+                handoff = SocialHandoff('s', 'b')
+                handoff.observe(capture(0, 1., sound), decision(), mission_id='m',
+                                lease_id='l', upload_consented=True)
+                seq = 2 if change == 'gap' else 1
+                owner = 'other' if change == 'owner' else 'l'
+                consent = change != 'consent'
+                quality = 'ingest_approximate' if change == 'approximate' else 'measured_capture'
+                residual = None if change == 'missing' else sound
+                handoff.observe(capture(seq, 1. + seq * .02, sound, quality),
+                                decision(residual=residual), mission_id='m',
+                                lease_id=owner, upload_consented=consent)
+                onset = handoff.observe(capture(seq + 1, 1. + (seq + 1) * .02, sound),
+                                        decision('vad_onset'), mission_id='m',
+                                        lease_id=owner, upload_consented=True)
+                self.assertFalse(onset.utterance_aborted)
+                action = handoff.observe(capture(seq + 2, 1. + (seq + 2) * .02, sound),
+                                         decision('vad_end'), mission_id='m',
+                                         lease_id=owner, upload_consented=True)
+                assert action.transcription is not None
+                self.assertGreaterEqual(int(action.transcription.utterance_id.split(':')[1]), seq)
 
     def test_transcript_return_is_exact_once_fresh_and_advisory_only(self):
         handoff = SocialHandoff('s', 'b')

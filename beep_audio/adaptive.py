@@ -13,13 +13,11 @@ from .capture import AudioContractError, AudioFrame, _identity
 from .echo import RenderFrame
 
 
-def _period(frames, *, min_frames=12):
+def _period(frames, stamp_attr: str):
     """Least-squares frame period, smoothing zero-mean callback timestamp jitter."""
-    if len(frames) < min_frames:
-        return .02, frames[0].rendered_at_robot if frames else 0., frames[0].sequence if frames else 0
     first_seq = frames[0].sequence
     xs = [frame.sequence - first_seq for frame in frames]
-    ys = [frame.rendered_at_robot for frame in frames]
+    ys = [getattr(frame, stamp_attr) for frame in frames]
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
     denom = sum((x - mx) ** 2 for x in xs)
     slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
@@ -71,7 +69,11 @@ class AdaptiveEcho:
             if (frame.sequence != previous.sequence + 1 or
                     abs(frame.rendered_at_robot - previous.rendered_at_robot - .02)
                     > 2 * self.max_jitter_s + .02 * self.max_ppm / 1e6):
-                self._healthy = False  # Explicit reacquisition required.
+                # A playback pause starts a new regression segment. Keep the
+                # monotonic fences, but never mix turns or erase this new frame.
+                self._renders.clear()
+                self._captures.clear()
+                self._healthy = True
         self._renders.append(frame)
         self._last_render_seq, self._last_render_stamp = frame.sequence, frame.rendered_at_robot
 
@@ -83,32 +85,44 @@ class AdaptiveEcho:
             raise AudioContractError('stale or wrong-owner capture')
         previous_seq, previous_stamp = self._last_capture_seq, self._last_capture_stamp
         self._last_capture_seq, self._last_capture_stamp = capture.sequence, capture.acquired_at_robot
-        if (capture.timestamp_quality != 'measured_capture'
-                or (previous_seq >= 0 and (capture.sequence != previous_seq + 1
-                    or not .015 <= capture.acquired_at_robot - previous_stamp <= .025))):
+        if capture.timestamp_quality != 'measured_capture':
             self.reset_route()
             return None
+        if previous_seq >= 0 and (capture.sequence != previous_seq + 1 or not
+                .015 <= capture.acquired_at_robot - previous_stamp <= .025):
+            # The newly submitted render frames may already belong to turn 2.
+            # Discard only the stale capture regression, not that render segment.
+            self._captures.clear()
         self._captures.append(capture)
         if not self._healthy or len(self._renders) < 12 or len(self._captures) < 12:
             return None  # Period fit not yet stable enough to assert near-end audio.
-        render_period, render_origin, render_first = _period(list(self._renders)[-64:])
+        rframes = list(self._renders)[-64:]
+        render_period, render_origin, render_first = _period(rframes, 'rendered_at_robot')
         # The cap clock may drift independently. Both estimates must stay bounded.
         cframes = list(self._captures)
-        # Same fields as render frames, without pretending acquisition was render.
-        cap_x = [f.sequence - cframes[0].sequence for f in cframes]
-        cap_y = [f.acquired_at_robot for f in cframes]
-        mx, my = sum(cap_x) / len(cap_x), sum(cap_y) / len(cap_y)
-        cap_period = sum((x-mx)*(y-my) for x, y in zip(cap_x, cap_y)) / sum((x-mx)**2 for x in cap_x)
+        cap_period, cap_origin, cap_first = _period(cframes, 'acquired_at_robot')
+        if (any(abs(f.rendered_at_robot -
+                           (render_origin + (f.sequence-render_first)*render_period))
+                       > self.max_jitter_s for f in rframes)
+                or any(abs(f.acquired_at_robot -
+                           (cap_origin + (f.sequence-cap_first)*cap_period))
+                       > self.max_jitter_s for f in cframes)):
+            self._healthy = False
+            return None
         if (abs(render_period / .02 - 1) * 1e6 > self.max_ppm
                 or abs(cap_period / .02 - 1) * 1e6 > self.max_ppm):
-            self._healthy = False
+            # A short fit can mistake bounded callback jitter for clock drift.
+            # Withhold residuals until the fit settles; latch a sustained fault.
+            if len(cframes) >= 32 and len(rframes) >= 32:
+                self._healthy = False
             return None
         render_map = {f.sequence: f for f in self._renders}
         values = {seq: struct.unpack('<320h', f.pcm_s16le) for seq, f in render_map.items()}
         mic = struct.unpack('<320h', capture.pcm_s16le)
         out = []
+        cap_start = cap_origin + (capture.sequence - cap_first) * cap_period
         for index, sample in enumerate(mic):
-            time = capture.acquired_at_robot + index * cap_period / 320 - self.delay_s
+            time = cap_start + index * cap_period / 320 - self.delay_s
             position = (time - render_origin) / render_period * 320 + render_first * 320
             if render_first * 320 - 1e-6 <= position < render_first * 320:
                 position = render_first * 320

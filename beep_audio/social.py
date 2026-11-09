@@ -1,7 +1,7 @@
 """Offline social-interruption/ASR handoff, without playback or cloud side effects."""
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from math import isfinite
 
@@ -87,6 +87,8 @@ class SocialHandoff:
         self.session_id, self.boot_id, self.max_frames = session_id, boot_id, max_frames
         self._frames: list[AudioFrame] = []
         self._owner: tuple[str | None, str | None] | None = None
+        self._preroll: deque[AudioFrame] = deque(maxlen=min(4, max_frames - 1))
+        self._preroll_owner: tuple[str | None, str | None] | None = None
         # Retain metadata only. The request carries PCM out to its consumer;
         # waiting for a transcript must not hold raw audio indefinitely.
         self._pending: OrderedDict[str, _PendingReceipt] = OrderedDict()
@@ -96,6 +98,8 @@ class SocialHandoff:
     def _clear(self) -> None:
         self._frames.clear()
         self._owner = None
+        self._preroll.clear()
+        self._preroll_owner = None
 
     def observe(self, frame: AudioFrame, decision: BargeDecision, *,
                 mission_id: str | None, lease_id: str | None,
@@ -117,6 +121,12 @@ class SocialHandoff:
         gap = (self._last_seq >= 0 and (frame.sequence != self._last_seq + 1 or not
                .015 <= frame.acquired_at_robot - self._last_stamp <= .025))
         self._last_seq, self._last_stamp = frame.sequence, frame.acquired_at_robot
+        owner = (mission_id, lease_id)
+        if (gap or self._preroll_owner != owner or not upload_consented
+                or frame.timestamp_quality != 'measured_capture'
+                or not _pcm(decision.near_end_pcm_s16le)):
+            self._preroll.clear()
+            self._preroll_owner = None
         if not upload_consented or any(
                 (receipt.mission_id, receipt.lease_id) != (mission_id, lease_id)
                 for receipt in self._pending.values()):
@@ -141,11 +151,23 @@ class SocialHandoff:
                 return SocialAction(cut, chunks, None, True)
             if upload_consented:
                 if frame.timestamp_quality != 'measured_capture':
-                    raise AudioContractError('unmeasured capture cannot form transcription request')
-                self._owner = (mission_id, lease_id)
+                    self._clear()
+                    return SocialAction(cut, chunks, None, True)
+                self._owner = owner
+                self._frames.extend(self._preroll)
+                self._preroll.clear()
+                self._preroll_owner = None
                 self._frames.append(replace(frame, pcm_s16le=decision.near_end_pcm_s16le))
             return SocialAction(cut, chunks, None, False)
         if not self._frames:
+            if (decision.audio_event is None and upload_consented
+                    and frame.timestamp_quality == 'measured_capture'
+                    and _pcm(decision.near_end_pcm_s16le)):
+                self._preroll.append(replace(frame, pcm_s16le=decision.near_end_pcm_s16le))
+                self._preroll_owner = owner
+            elif decision.audio_event is not None:
+                self._preroll.clear()
+                self._preroll_owner = None
             return SocialAction(cut, chunks, None, False)
         if len(self._frames) >= self.max_frames:
             self._clear()
