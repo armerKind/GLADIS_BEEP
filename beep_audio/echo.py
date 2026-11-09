@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass
 from math import isfinite
 import struct
+from typing import Protocol
 
 from .capture import AudioContractError, AudioFrame, _identity, _pcm
 from .vad import HysteresisVad
@@ -91,12 +92,20 @@ class BargeDecision:
     audio_event: str | None
     reason: str
     motor_authority: bool = False
+    near_end_pcm_s16le: bytes | None = None  # Raw mic only without playback; otherwise AEC residual.
+
+
+class EchoProcessor(Protocol):
+    session_id: str
+    boot_id: str
+
+    def process(self, capture: AudioFrame) -> bytes | None: ...
 
 
 class BargeInGate:
     """Never closes the mic during TTS. No reference means no asserted barge-in."""
 
-    def __init__(self, echo: FrameAlignedEcho, vad: HysteresisVad):
+    def __init__(self, echo: EchoProcessor, vad: HysteresisVad):
         self.echo, self.vad = echo, vad
         self._last_capture_seq = -1
         self._last_capture_stamp = -1.0
@@ -132,7 +141,7 @@ class BargeInGate:
         if not playback_active:
             event = self.vad.observe(capture.pcm_s16le)
             return BargeDecision(False, False, None if event is None else 'vad_' + event,
-                                 'mic_vad_only')
+                                 'mic_vad_only', near_end_pcm_s16le=capture.pcm_s16le)
         residual = self.echo.process(capture)
         if residual is None:
             aborted = self.vad.abort()
@@ -142,4 +151,5 @@ class BargeInGate:
         return BargeDecision(self.vad.active, False,
                              None if event is None else 'vad_' + event,
                              'near_end_vad_onset' if event == 'onset' else
-                             'near_end_active' if self.vad.active else 'aligned_reference')
+                             'near_end_active' if self.vad.active else 'aligned_reference',
+                             near_end_pcm_s16le=residual)

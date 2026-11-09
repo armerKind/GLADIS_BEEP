@@ -15,7 +15,7 @@ def _identity(value: str) -> bool:
     return isinstance(value, str) and 0 < len(value) <= 256 and bool(value.strip())
 
 
-def _pcm(value: bytes) -> bool:
+def _pcm(value: bytes | None) -> bool:
     return isinstance(value, bytes) and len(value) == 640  # 20 ms, 16 kHz, signed LE mono
 
 
