@@ -1,6 +1,6 @@
 # Phase B offline cognition checkpoint
 
-**Status:** Offline tactical/strategy shadow-contract slice reviewed and accepted by Max on November 8, 2026. No Pi producer, model-session adapter, audio mixer, motor dispatch, bridge deployment or hardware validation is included; **the live Phase B integration gates below remain open**.
+**Status:** Offline tactical/strategy shadow-contract slice reviewed and accepted by Max on November 8, 2026. An additional [host-only strategy adapter and paired checkpoint](OFFLINE_STRATEGY_WIRING.md) now exists. No Pi producer, actual GLADIS model connection, audio mixer, motor dispatch, bridge deployment or hardware validation is included; **the live Phase B integration gates below remain open**.
 
 ## Implemented
 
@@ -19,7 +19,7 @@ Synthetic tests cover delayed/stale model replies, exact lease handoff, wrong ma
 ## Remaining Phase B gates
 
 1. Wire actual camera/VAD/LiDAR producers with measured acquisition clocks and provenance. Frame difference and mic RMS alone must never claim a person, recognized keyword, or motor stop.
-2. Connect the *one* persistent GLADIS strategic model session to bounded context/proposals and actual `EventJournal` evidence, with one active inference and stale-window supersession. A class accepting proposals is not evidence that an LLM is running.
+2. Connect the *one* actual GLADIS strategic model session to the host-tested journal-backed adapter, then prove live single-inference/stale-window behavior. The injected offline provider and persistent adapter object are **not evidence that an LLM is running**; its pending queue is not restart-durable.
 3. Route any cached cue through the real consent/privacy/audio mixer policy, measure gait-only noise and quiet speech, and preserve a separate reliable stop method.
 4. Benchmark optional fast classifier on BEEP's Pi under ROS/video/audio load before asserting a latency bound. Add replay fixtures from actual gait and speech; prove no second goal planner and no motor side effects.
 
