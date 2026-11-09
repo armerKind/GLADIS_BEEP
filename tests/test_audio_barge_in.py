@@ -135,6 +135,87 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(gate.observe(frame(3, pcm(0)), playback_active=False).audio_event,
                          'vad_end')
 
+    def test_barge_cut_transition_preserves_utterance_until_single_end(self):
+        echo = FrameAlignedEcho('s', 'b', delay_s=.04, echo_gain=.5)
+        gate = BargeInGate(echo, HysteresisVad(onset_rms=300, offset_rms=150,
+                                               onset_frames=2, offset_frames=2))
+        for index in (0, 1):
+            echo.submit_render(rendered(index, pcm(1000)))
+            decision = gate.observe(frame(index, pcm(1500), time=.04 + index * .02),
+                                    playback_active=True)
+        self.assertEqual(decision.audio_event, 'vad_onset')
+        self.assertTrue(decision.cut_tts)
+        self.assertIsNone(gate.observe(frame(2, pcm(1000), time=.08),
+                                       playback_active=False).audio_event)
+        self.assertEqual(gate.observe(frame(3, pcm(0), time=.10),
+                                      playback_active=False).audio_event, None)
+        self.assertEqual(gate.observe(frame(4, pcm(0), time=.12),
+                                      playback_active=False).audio_event, 'vad_end')
+        self.assertIsNone(gate.observe(frame(5, pcm(0), time=.14),
+                                       playback_active=False).audio_event)
+
+    def test_cut_tts_holds_during_sustained_speech_and_preexisting_speech(self):
+        echo = FrameAlignedEcho('s', 'b', delay_s=.04, echo_gain=.5)
+        gate = BargeInGate(echo, HysteresisVad(onset_rms=300, offset_rms=150,
+                                               onset_frames=2, offset_frames=2))
+        self.assertIsNone(gate.observe(frame(0, pcm(1000)), playback_active=False).audio_event)
+        self.assertEqual(gate.observe(frame(1, pcm(1000)),
+                                      playback_active=False).audio_event, 'vad_onset')
+        for index in (2, 3, 4):
+            echo.submit_render(rendered(index, pcm(1000), time=(index - 2) * .02))
+            decision = gate.observe(frame(index, pcm(1500), time=index * .02),
+                                    playback_active=True)
+            self.assertTrue(decision.cut_tts)
+            self.assertIsNone(decision.audio_event)
+        for index in (5, 6):
+            echo.submit_render(rendered(index, pcm(1000), time=(index - 2) * .02))
+            decision = gate.observe(frame(index, pcm(500), time=index * .02),
+                                    playback_active=True)
+        self.assertEqual(decision.audio_event, 'vad_end')
+        self.assertFalse(decision.cut_tts)
+
+    def test_clock_gap_aborts_active_utterance_and_does_not_combine_noise_spikes(self):
+        gate = BargeInGate(FrameAlignedEcho('s', 'b', delay_s=.04, echo_gain=.5),
+                           HysteresisVad(onset_rms=300, offset_rms=150,
+                                         onset_frames=2, offset_frames=2))
+        self.assertIsNone(gate.observe(frame(0, pcm(1000)), playback_active=False).audio_event)
+        self.assertIsNone(gate.observe(frame(1, pcm(1000), time=.30),
+                                       playback_active=False).audio_event)
+        self.assertEqual(gate.observe(frame(2, pcm(1000), time=.32),
+                                      playback_active=False).audio_event, 'vad_onset')
+        aborted = gate.observe(frame(3, pcm(1000), time=.62), playback_active=False)
+        self.assertEqual(aborted.audio_event, 'vad_aborted')
+        self.assertFalse(gate.vad.active)
+        self.assertIsNone(gate.observe(frame(4, pcm(1000), time=.64),
+                                       playback_active=False).audio_event)
+
+    def test_early_clock_gap_also_resets_partial_onset(self):
+        gate = BargeInGate(FrameAlignedEcho('s', 'b', delay_s=.04, echo_gain=.5),
+                           HysteresisVad(onset_rms=300, offset_rms=150,
+                                         onset_frames=2, offset_frames=2))
+        self.assertIsNone(gate.observe(frame(0, pcm(1000)), playback_active=False).audio_event)
+        self.assertIsNone(gate.observe(frame(1, pcm(1000), time=.010),
+                                       playback_active=False).audio_event)
+        self.assertEqual(gate.observe(frame(2, pcm(1000), time=.030),
+                                      playback_active=False).audio_event, 'vad_onset')
+
+    def test_missing_echo_reference_aborts_active_utterance(self):
+        echo = FrameAlignedEcho('s', 'b', delay_s=.04, echo_gain=.5)
+        gate = BargeInGate(echo, HysteresisVad(onset_rms=300, offset_rms=150,
+                                               onset_frames=2, offset_frames=2))
+        for index in (0, 1):
+            echo.submit_render(rendered(index, pcm(1000)))
+            gate.observe(frame(index, pcm(1500), time=.04 + index * .02),
+                         playback_active=True)
+        self.assertTrue(gate.vad.active)
+        missing = gate.observe(frame(2, pcm(1500), time=.08), playback_active=True)
+        self.assertEqual(missing.audio_event, 'vad_aborted')
+        self.assertTrue(missing.short_tts_chunks)
+        self.assertFalse(missing.cut_tts)
+        self.assertFalse(gate.vad.active)
+        self.assertIsNone(gate.observe(frame(3, pcm(0), time=.10),
+                                       playback_active=True).audio_event)
+
     def test_capture_gap_resets_partial_onset_and_playback_transition(self):
         gate = BargeInGate(FrameAlignedEcho('s', 'b', delay_s=.04, echo_gain=.5),
                            HysteresisVad(onset_rms=300, offset_rms=150,

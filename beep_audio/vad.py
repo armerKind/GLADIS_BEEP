@@ -27,6 +27,16 @@ class HysteresisVad:
         self.active = False
         self._above = self._below = 0
 
+    def clear_partial(self) -> None:
+        """Switch capture mode without losing an active utterance edge."""
+        self._above = self._below = 0
+
+    def abort(self) -> bool:
+        """Return whether an open utterance needs a terminal aborted event."""
+        was_active = self.active
+        self.reset()
+        return was_active
+
     def observe(self, pcm_s16le: bytes) -> str | None:
         if not _pcm(pcm_s16le):
             raise AudioContractError('invalid VAD PCM')

@@ -110,22 +110,36 @@ class BargeInGate:
                 or capture.acquired_at_robot <= self._last_capture_stamp
                 or type(playback_active) is not bool):
             raise AudioContractError('invalid barge-in observation')
-        # Dropped capture frames invalidate a consecutive VAD onset.
-        if ((self._last_capture_seq >= 0 and capture.sequence != self._last_capture_seq + 1)
-                or (self._was_playback is not None and playback_active != self._was_playback)):
-            self.vad.reset()
+        # Sequence is not a clock: consecutive reads can straddle an ALSA stall.
+        discontinuity = (self._last_capture_seq >= 0 and
+                         (capture.sequence != self._last_capture_seq + 1 or not
+                          .015 <= capture.acquired_at_robot - self._last_capture_stamp <= .025))
+        mode_changed = self._was_playback is not None and playback_active != self._was_playback
+        if discontinuity:
+            aborted = self.vad.abort()
+        else:
+            aborted = False
+            if mode_changed:
+                self.vad.clear_partial()  # Keep active utterance across TTS cut/start.
         self._last_capture_seq = capture.sequence
         self._last_capture_stamp = capture.acquired_at_robot
         self._was_playback = playback_active
+        if aborted:
+            if playback_active:
+                self.echo.process(capture)  # Consume this reference; do not count the frame.
+            return BargeDecision(False, playback_active, 'vad_aborted',
+                                 'capture_discontinuity')
         if not playback_active:
             event = self.vad.observe(capture.pcm_s16le)
             return BargeDecision(False, False, None if event is None else 'vad_' + event,
                                  'mic_vad_only')
         residual = self.echo.process(capture)
         if residual is None:
-            self.vad.reset()
-            return BargeDecision(False, True, None, 'echo_reference_unavailable')
+            aborted = self.vad.abort()
+            return BargeDecision(False, True, 'vad_aborted' if aborted else None,
+                                 'echo_reference_unavailable')
         event = self.vad.observe(residual)
-        return BargeDecision(event == 'onset', False,
+        return BargeDecision(self.vad.active, False,
                              None if event is None else 'vad_' + event,
-                             'near_end_vad_onset' if event == 'onset' else 'aligned_reference')
+                             'near_end_vad_onset' if event == 'onset' else
+                             'near_end_active' if self.vad.active else 'aligned_reference')
