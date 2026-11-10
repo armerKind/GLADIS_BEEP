@@ -4,11 +4,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from dataclasses import replace
 from unittest.mock import patch
 
 from beep_agent.coordinator import CoordinatorContext, GoalCoordinator
 from beep_agent.events import EventEnvelope
-from beep_agent.journal import EventJournal
+from beep_agent.journal import EventJournal, JournalError
 from beep_agent.session import AgentSession
 from beep_agent.strategy import StrategicOwner
 from beep_agent.checkpoint import CombinedCheckpoint, CheckpointError
@@ -123,7 +124,162 @@ class CheckpointTests(unittest.TestCase):
             self.assertEqual(CombinedCheckpoint(path).load(expected_boot_id='b')[0].session_id, 's')
 
 
+class JournalLookupTests(unittest.TestCase):
+    def test_lookup_reuses_cache_and_parses_only_external_append_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'events.jsonl'
+            journal = EventJournal(path)
+            for i in range(30):
+                journal.append(event(f'e{i}', 1. + i * .02))
+            original = EventJournal._parse
+            parsed_sizes = []
+            def spy(text):
+                parsed_sizes.append(len(text))
+                return original(text)
+            with patch.object(EventJournal, '_parse', side_effect=spy):
+                self.assertEqual(set(journal.lookup(('e0', 'e29'))), {'e0', 'e29'})
+                self.assertEqual(len(journal.replay()), 30)
+                self.assertEqual(parsed_sizes, [])
+                EventJournal(path).append(event('external', 2.))
+                self.assertEqual(set(journal.lookup(('external',))), {'external'})
+                self.assertEqual(len(parsed_sizes), 2)  # other instance initializes; ours reads tail
+                self.assertLess(parsed_sizes[-1], path.stat().st_size / 2)
+                self.assertEqual(len(journal.replay()), 31)
+                self.assertEqual(len(parsed_sizes), 2)
+
+    def test_lookup_rejects_cached_rewrite_and_partial_external_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'events.jsonl'
+            journal = EventJournal(path)
+            journal.append(event('e1', 1.))
+            path.write_bytes(path.read_bytes().replace(b'synthetic', b'fabricate'))
+            with self.assertRaises(JournalError):
+                journal.lookup(('e1',))
+            with self.assertRaises(JournalError):
+                journal.replay()
+            # Fresh instance detects a partial appended record rather than repairing it.
+            fresh = EventJournal(path)
+            self.assertEqual(set(fresh.lookup(('e1',))), {'e1'})
+            with path.open('ab') as stream:
+                stream.write(b'{')
+            with self.assertRaises(JournalError):
+                fresh.lookup(('e1',))
+
+
 class AdapterTests(unittest.TestCase):
+    def test_cached_records_are_isolated_from_caller_payload_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            original = event('e1', 1.)
+            journal.append(original)
+            original.payload['note'] = 'mutated-after-append'
+            journal.lookup(('e1',))['e1'].payload['note'] = 'mutated-lookup'
+            journal.replay()[0].payload['note'] = 'mutated-replay'
+            self.assertEqual(journal.lookup(('e1',))['e1'].payload['note'], 'synthetic')
+
+    def test_stationary_and_current_lease_evidence_can_share_one_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            journal.append(event('stationary', 1.))
+            session.bind_motion(mission_id='m1', lease_id='l1', boot_id='b')
+            journal.append(EventEnvelope.from_dict(replace(event('moving', 1.02),
+                mission_id='m1', lease_id='l1').to_dict()))
+            adapter = StrategicModelSession(session, journal, lambda c: proposal(c))
+            adapter.offer(window(1, evidence=('stationary', 'moving'), acquired=1.02))
+            self.assertEqual(adapter.run_one(now_robot=lambda: 2.,
+                current_map=lambda: (1, 2)).status, 'admitted')
+
+    def test_memory_source_failure_fails_closed_before_model_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            journal.append(event('e1', 1.))
+            called = []
+            def broken():
+                raise OSError('offline store unavailable')
+            adapter = StrategicModelSession(session, journal,
+                lambda c: (called.append(c) or proposal(c)), episodes_source=broken)
+            adapter.offer(window(1))
+            self.assertEqual(adapter.run_one(now_robot=lambda: 2.,
+                current_map=lambda: (1, 2)).status, 'context_error')
+            self.assertEqual(called, [])
+
+    def test_historical_and_stationary_evidence_survives_exact_lease_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            journal.append(event('stationary', 1.))
+            session.bind_motion(mission_id='m1', lease_id='l1', boot_id='b')
+            journal.append(EventEnvelope.from_dict(replace(event('moving', 1.02),
+                mission_id='m1', lease_id='l1').to_dict()))
+            session.release_motion(mission_id='m1', lease_id='l1')
+            adapter = StrategicModelSession(session, journal, lambda c: proposal(c))
+            adapter.offer(window(1, evidence=('stationary', 'moving'), acquired=1.02))
+            self.assertEqual(adapter.run_one(now_robot=lambda: 2.,
+                current_map=lambda: (1, 2)).status, 'admitted')
+
+    def test_lease_release_during_inference_does_not_invalidate_same_session_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            session.bind_motion(mission_id='m1', lease_id='l1', boot_id='b')
+            journal.append(EventEnvelope.from_dict(replace(event('moving', 1.),
+                mission_id='m1', lease_id='l1').to_dict()))
+            def provider(ctx):
+                session.release_motion(mission_id='m1', lease_id='l1')
+                return proposal(ctx)
+            adapter = StrategicModelSession(session, journal, provider)
+            adapter.offer(window(1, evidence=('moving',)))
+            self.assertEqual(adapter.run_one(now_robot=lambda: 2.,
+                current_map=lambda: (1, 2)).status, 'admitted')
+
+    def test_foreign_lease_record_not_admitted_without_session_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            journal.append(EventEnvelope.from_dict(replace(event('foreign', 1.),
+                mission_id='m9', lease_id='l9').to_dict()))
+            adapter = StrategicModelSession(session, journal, lambda c: proposal(c))
+            with self.assertRaises(AdapterError):
+                adapter.offer(window(1, evidence=('foreign',)))
+
+    def test_queued_window_uses_world_at_prompt_build_not_offer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            journal.append(event('e1', 1.))
+            seen = []
+            def provider(ctx):
+                seen.append(ctx['world']['sequence'])
+                return proposal(ctx)
+            adapter = StrategicModelSession(session, journal, provider)
+            adapter.offer(window(1))
+            fixture = Path(__file__).parent / 'fixtures' / 'box_far_response.json'
+            session.update(json.loads(fixture.read_text()), observed_at=1.5,
+                           packet_id='new-evidence')
+            self.assertEqual(adapter.run_one(now_robot=lambda: 2.,
+                current_map=lambda: (1, 2)).status, 'admitted')
+            self.assertEqual(seen, [session.world.sequence])
+
+    def test_episode_and_place_sources_reach_bounded_model_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session, _ = session_and_owner()
+            journal = EventJournal(Path(directory) / 'events.jsonl')
+            journal.append(event('e1', 1.))
+            seen = []
+            def provider(ctx):
+                seen.append((ctx['episodes'], ctx['places']))
+                return proposal(ctx)
+            adapter = StrategicModelSession(session, journal, provider,
+                episodes_source=lambda: [{'summary': 'Remember this room'}],
+                places_source=lambda: [{'node_id': 'place-1'}])
+            adapter.offer(window(1))
+            self.assertEqual(adapter.run_one(now_robot=lambda: 2.,
+                current_map=lambda: (1, 2)).status, 'admitted')
+            self.assertEqual(seen, [([{'summary': 'Remember this room'}],
+                                     [{'node_id': 'place-1'}])])
+
     def test_newer_window_supersedes_inflight_and_one_provider_session_is_reused(self):
         with tempfile.TemporaryDirectory() as directory:
             session, coordinator = session_and_owner()

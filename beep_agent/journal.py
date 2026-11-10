@@ -1,9 +1,11 @@
 """Durable append-only event journal; corruption never gets silently repaired."""
 from __future__ import annotations
 
+from copy import deepcopy
 import fcntl
 import json
 import os
+import threading
 from pathlib import Path
 
 from .events import EventEnvelope, EventValidationError
@@ -20,6 +22,7 @@ class EventJournal:
         self._identity: tuple[int, int] | None = None
         self._offset = 0
         self._ctime_ns: int | None = None
+        self._cache_lock = threading.RLock()
 
     @staticmethod
     def _parse(text: str) -> list[EventEnvelope]:
@@ -39,52 +42,75 @@ class EventJournal:
         return events
 
     def replay(self) -> list[EventEnvelope]:
-        if not self.path.exists():
-            return []
-        with self.path.open("r", encoding="utf-8") as stream:
-            fcntl.flock(stream, fcntl.LOCK_SH)
-            return self._parse(stream.read())
+        with self._cache_lock:
+            if not self.path.exists():
+                if self._index is not None:
+                    raise JournalError("journal disappeared after validation")
+                return []
+            with self.path.open("rb") as stream:
+                fcntl.flock(stream, fcntl.LOCK_SH)
+                self._sync_locked(stream)
+                assert self._index is not None
+                return deepcopy(list(self._index.values()))
+
+    def lookup(self, event_ids: tuple[str, ...]) -> dict[str, EventEnvelope]:
+        """Read only requested validated records; parse an external append tail once."""
+        if (not isinstance(event_ids, tuple) or len(event_ids) > 16
+                or any(not isinstance(i, str) or not i.strip() for i in event_ids)):
+            raise JournalError("invalid bounded journal lookup")
+        with self._cache_lock:
+            if not self.path.exists():
+                if self._index is not None:
+                    raise JournalError("journal disappeared after validation")
+                return {}
+            with self.path.open("rb") as stream:
+                fcntl.flock(stream, fcntl.LOCK_SH)
+                self._sync_locked(stream)
+                assert self._index is not None
+                return deepcopy({i: self._index[i] for i in event_ids if i in self._index})
+
+    def _sync_locked(self, stream) -> None:
+        """Validate identity and append-only tail under file and process locks."""
+        stat = os.fstat(stream.fileno())
+        path_stat = self.path.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity != (path_stat.st_dev, path_stat.st_ino):
+            raise JournalError("journal path changed during access")
+        if self._index is None:
+            stream.seek(0)
+            try:
+                previous = self._parse(stream.read().decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise JournalError("invalid journal encoding") from exc
+            self._index = {old.event_id: old for old in previous}
+        else:
+            if identity != self._identity or stat.st_size < self._offset:
+                raise JournalError("journal replaced or truncated; preserve evidence")
+            if stat.st_size == self._offset and stat.st_ctime_ns != self._ctime_ns:
+                raise JournalError("journal overwritten in place; preserve evidence")
+            if stat.st_size > self._offset:
+                stream.seek(self._offset)
+                try:
+                    tail = self._parse(stream.read().decode("utf-8"))
+                except UnicodeDecodeError as exc:
+                    raise JournalError("invalid journal encoding") from exc
+                if any(old.event_id in self._index for old in tail):
+                    raise JournalError("duplicate event ID in journal tail")
+                self._index.update((old.event_id, old) for old in tail)
+        self._identity = identity
+        self._offset = stat.st_size
+        self._ctime_ns = stat.st_ctime_ns
 
     def append(self, event: EventEnvelope) -> None:
         if not isinstance(event, EventEnvelope):
             raise JournalError("journal accepts only validated EventEnvelope")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        new_file = not self.path.exists()
-        # Advisory flock protects cooperating writers. Cache only validated
-        # IDs; detect external append by byte offset and never repair damage.
-        with self.path.open("a+b") as stream:
+        # The in-process lock protects cache state; flock protects cooperating
+        # processes. Neither silently repairs an invalid external journal.
+        with self._cache_lock, self.path.open("a+b") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
-            stat = os.fstat(stream.fileno())
-            path_stat = self.path.stat()
-            identity = (stat.st_dev, stat.st_ino)
-            if identity != (path_stat.st_dev, path_stat.st_ino):
-                raise JournalError("journal path changed during append")
-            if self._index is None:
-                stream.seek(0)
-                try:
-                    previous = self._parse(stream.read().decode("utf-8"))
-                except UnicodeDecodeError as exc:
-                    raise JournalError("invalid journal encoding") from exc
-                self._index = {old.event_id: old for old in previous}
-                self._identity = identity
-                self._offset = stat.st_size
-                self._ctime_ns = stat.st_ctime_ns
-            else:
-                if identity != self._identity or stat.st_size < self._offset:
-                    raise JournalError("journal replaced or truncated; preserve evidence")
-                if stat.st_size == self._offset and stat.st_ctime_ns != self._ctime_ns:
-                    raise JournalError("journal overwritten in place; preserve evidence")
-                if stat.st_size > self._offset:
-                    stream.seek(self._offset)
-                    try:
-                        tail = self._parse(stream.read().decode("utf-8"))
-                    except UnicodeDecodeError as exc:
-                        raise JournalError("invalid journal encoding") from exc
-                    if any(old.event_id in self._index for old in tail):
-                        raise JournalError("duplicate event ID in journal tail")
-                    self._index.update((old.event_id, old) for old in tail)
-                    self._offset = stat.st_size
-                    self._ctime_ns = stat.st_ctime_ns
+            self._sync_locked(stream)
+            assert self._index is not None
             previous = self._index.get(event.event_id)
             if previous is not None:
                 if previous == event:
@@ -98,10 +124,10 @@ class EventJournal:
             final = os.fstat(stream.fileno())
             if (final.st_dev, final.st_ino) != (self.path.stat().st_dev, self.path.stat().st_ino):
                 raise JournalError("journal path changed during append")
-            self._index[event.event_id] = event
+            self._index[event.event_id] = deepcopy(event)
             self._offset = final.st_size
             self._ctime_ns = final.st_ctime_ns
-            if new_file:
+            if self._offset == len(payload):
                 directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
                 try:
                     os.fsync(directory)
