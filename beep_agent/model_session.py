@@ -75,7 +75,9 @@ class StrategicModelSession:
         self.owner = StrategicOwner(session)
         self._lock = threading.RLock()
         self._in_flight = False
-        self._highest_sequence = -1
+        # Restored world windows are already consumed even though pending model
+        # requests are deliberately not persisted across process restarts.
+        self._highest_sequence = session.world.sequence
         self._pending: tuple[ModelWindow, dict] | None = None
 
     def _evidence(self, window: ModelWindow) -> dict:

@@ -5,13 +5,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from beep_agent.checkpoint import CombinedCheckpoint
 from beep_agent.coordinator import CoordinatorContext, GoalCoordinator
 from beep_agent.events import EventEnvelope
 from beep_agent.journal import EventJournal
 from beep_agent.map_revision import MapRevisionTracker
-from beep_agent.model_session import StrategicModelSession
+from beep_agent.model_session import AdapterError, ModelWindow, StrategicModelSession
 from beep_agent.phase_a import PhaseARecorder
 from beep_agent.session import AgentSession
 from beep_agent.tactical import TacticalEvent, TacticalGate
@@ -109,13 +110,82 @@ class ObserveSupervisorTests(unittest.TestCase):
     def test_journal_ahead_of_checkpoint_fails_closed_on_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runner, _, journal, _ = build(root)
+            runner, _, journal, checkpoint = build(root)
             runner.observe(*observation(0), context=context(1.1))
             journal.append(observation(1)[0])  # injected crash after append, before state commit
-            restored, _, _, checkpoint = build(root, restored=True)
-            with self.assertRaises(SupervisorError):
-                restored.observe(*observation(1), context=context(1.3))
+            with self.assertRaisesRegex(SupervisorError, 'out of sync with checkpoint'):
+                build(root, restored=True)
             self.assertEqual(checkpoint.generation, 1)
+
+    def test_journal_ahead_rejects_different_next_frame_and_runtime_append(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner, session, journal, checkpoint = build(root)
+            runner.observe(*observation(0), context=context(1.1))
+            journal.append(observation(1)[0])
+            # A different incoming ID must not conceal the uncheckpointed tail.
+            event, attention, response = observation(1)
+            next_event = EventEnvelope.from_dict(dict(event.to_dict(), event_id='next-frame',
+                acquired_at_robot=1.4, received_at_robot=1.41))
+            next_attention = TacticalEvent.from_dict(dict(attention.to_dict(),
+                event_id='next-attention', acquired_at_robot=1.4,
+                evidence_ids=['next-frame']))
+            with self.assertRaisesRegex(SupervisorError, 'out of sync with checkpoint'):
+                runner.observe(next_event, next_attention, response, context=context(1.5))
+            self.assertEqual(session.world.sequence, 1)
+            self.assertEqual(checkpoint.generation, 1)
+
+    def test_failed_checkpoint_save_cannot_be_hidden_by_next_frame_same_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner, session, journal, checkpoint = build(Path(directory))
+            with patch.object(checkpoint, 'save', side_effect=OSError('disk failed')):
+                with self.assertRaisesRegex(OSError, 'disk failed'):
+                    runner.observe(*observation(0), context=context(1.1))
+            self.assertEqual(session.world.sequence, 1)
+            self.assertEqual(len(journal.replay()), 1)
+            with self.assertRaisesRegex(SupervisorError, 'out of sync with checkpoint'):
+                runner.observe(*observation(1), context=context(1.3))
+            self.assertEqual(len(journal.replay()), 1)
+
+    def test_invalid_perception_does_not_journal_or_mutate_tactical_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner, session, journal, checkpoint = build(Path(directory))
+            event, attention, _ = observation(0)
+            with self.assertRaises((ValueError, KeyError, TypeError)):
+                runner.observe(event, attention, {'scene': {}}, context=context(1.1))
+            self.assertEqual(journal.replay(), [])
+            self.assertEqual(session.world.sequence, 0)
+            self.assertEqual(checkpoint.generation, 0)
+            self.assertEqual(runner.tactical._seen, {})
+
+    def test_ingest_approximate_timestamp_regression_rejected_after_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner, _, _, _ = build(root)
+            runner.observe(*observation(0), context=context(1.1))
+            restored, session, journal, checkpoint = build(root, restored=True)
+            event, attention, response = observation(1)
+            regressed = EventEnvelope.from_dict(dict(event.to_dict(),
+                acquired_at_robot=.9, received_at_robot=1.21))
+            regressed_attention = TacticalEvent.from_dict(dict(attention.to_dict(),
+                acquired_at_robot=.9))
+            with self.assertRaisesRegex(SupervisorError, 'timestamp'):
+                restored.observe(regressed, regressed_attention, response, context=context(1.3))
+            self.assertEqual(len(journal.replay()), 1)
+            self.assertEqual(session.world.sequence, 1)
+            self.assertEqual(checkpoint.generation, 1)
+
+    def test_restored_adapter_rejects_prior_world_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner, _, _, _ = build(root)
+            runner.observe(*observation(0), context=context(1.1))
+            restored, session, _, _ = build(root, restored=True)
+            event = observation(0)[0]
+            with self.assertRaisesRegex(AdapterError, 'stale or duplicate'):
+                restored.model.offer(ModelWindow(session.world.sequence,
+                    event.acquired_at_robot, event.map_epoch, event.map_revision,
+                    (event.event_id,)))
 
     def test_wrong_owner_or_map_and_active_lease_are_not_observe_only(self):
         with tempfile.TemporaryDirectory() as directory:
