@@ -1,6 +1,6 @@
 # Offline observe-only supervisor checkpoint
 
-**Status:** host-only integration replay. BEEP is off; no bridge, ROS, ALSA, network, mixer, semantic motor dispatcher or live model is used. This does **not** authorize Phase E motion or claim live observation.
+**Status:** this particular harness remains a host-only **saved-fixture** replay: no bridge, ROS, ALSA, network, mixer, semantic motor dispatcher or live model is used by it. BEEP was off when this offline slice was accepted; later stationary powered readbacks are recorded separately in [Phase E stationary readback](PHASE_E_STATIONARY_READBACK.md). This harness does **not** authorize Phase E motion or itself claim live observation.
 
 Run `python scripts/run_beep_autonomy.py --observe-only --output /path/to/report.json`. The required flag has no complementary motion mode. The script replays two saved **qualitative** camera/model packets through `PhaseARecorder` → `TacticalGate` → persistent `AgentSession` world → `StrategicModelSession` with an injected typed fake GLADIS proposal → `GoalCoordinator` → `CombinedCheckpoint`. A reconstructed supervisor loads the saved session/coordinator pair between windows. The report records journal count, model/coordinator decisions and checkpoint generations; it hard-labels the synthetic map/owner/clock context and `dispatch_performed=false`, `route_validated=false`, `physical_stop_verified=false`.
 

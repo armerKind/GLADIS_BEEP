@@ -1,5 +1,7 @@
 # Phase C offline checkpoint: viewpoint cones, map scoring, discrepancy and transport review
 
+**Later status (November 11, 2026):** The deployment state in the historical checkpoint below has changed. `0.21.1-phase-c-audit` plus a readback-only semantic-disable field was deployed stationary and verified; see [Phase E stationary readback](PHASE_E_STATIONARY_READBACK.md). No powered motion or stop-distance commissioning was performed on this source.
+
 **Status:** Shadow-only Phase C slices 1–2 were approved; the reviewed goal coordinator and recorded-packet replay received four corrective audit fixes, now exercised by offline regressions. This completes the **implemented offline Phase C contracts**, not live integration, independent review of these corrective changes, or physical commissioning. Phase A offline contract is approved; Phase B offline tactical/strategy contracts were reviewed and accepted. The source bridge is now `0.21.1-phase-c-audit`, but **was not deployed to BEEP**; the last confirmed deployed bridge is `0.20.9-steering-sweep`. No semantic motor dispatch was enabled, and no live camera/TF producer or measured stop-distance bound exists.
 
 ## Implemented and replayed
