@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from beep_bridge import beep_bridge as bridge
+from scripts import jupyter_deploy_bridge
 from scripts import replay_motion_policy
 
 
@@ -119,6 +120,16 @@ class MotionProfileTests(unittest.TestCase):
         self.assertIn("systemctl','daemon-reload", deploy)
         self.assertIn("systemctl','restart','beep-bridge", deploy)
         self.assertIn("127.0.0.1:8766/config", deploy)
+
+    def test_deployment_readback_version_is_taken_from_uploaded_source(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "beep_bridge" / "beep_bridge.py").read_text()
+        self.assertEqual(jupyter_deploy_bridge.bridge_source_version(source),
+                         bridge.state["version"])
+        with self.assertRaises(ValueError):
+            jupyter_deploy_bridge.bridge_source_version('state = {"version": call()}')
+        self.assertNotIn("'version': '0.20.9-steering-sweep'",
+                         (root / "scripts" / "jupyter_deploy_bridge.py").read_text())
 
 
 class MotionPolicyReplayTests(unittest.TestCase):

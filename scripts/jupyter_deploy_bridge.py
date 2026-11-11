@@ -37,6 +37,13 @@ SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map
 SERVICE_SRC = Path(os.environ.get("BEEP_SERVICE_SRC", "systemd/beep-bridge.service"))
 BASE = f"http://{HOST}:8888"
 
+def bridge_source_version(content: str) -> str:
+    """Fail closed unless the version can be read from the uploaded bridge."""
+    match = re.search(r'(?m)^state\s*=\s*\{\s*\n\s*"version"\s*:\s*"([a-zA-Z0-9_.-]{1,64})"\s*,', content)
+    if match is None:
+        raise ValueError('bridge source has no static state version')
+    return match.group(1)
+
 
 def login() -> tuple[requests.Session, str]:
     session = requests.Session()
@@ -59,8 +66,7 @@ def login() -> tuple[requests.Session, str]:
     return session, xsrf
 
 
-def put_bridge(session: requests.Session, xsrf: str) -> None:
-    content = BRIDGE_SRC.read_text()
+def put_bridge(session: requests.Session, xsrf: str, content: str) -> None:
     intent_content = INTENT_SRC.read_text()  # Fail before changing the remote if missing.
     headers = {"X-XSRFToken": xsrf, "Content-Type": "application/json"}
     # Best-effort backup.
@@ -128,7 +134,7 @@ def put_bridge(session: requests.Session, xsrf: str) -> None:
         print("uploaded: /home/pi/beep_bridge/beep-bridge.service")
 
 
-async def restart_bridge(session: requests.Session, xsrf: str) -> None:
+async def restart_bridge(session: requests.Session, xsrf: str, expected_version: str) -> None:
     headers = {"X-XSRFToken": xsrf, "Content-Type": "application/json"}
     kr = session.post(f"{BASE}/api/kernels", json={"name": "python3"}, headers=headers, timeout=8)
     kr.raise_for_status()
@@ -214,7 +220,7 @@ if svc.returncode == 0:
             time.sleep(0.5)
     if config is None:
         raise SystemExit('bridge active but /config did not become ready within 15 seconds')
-    expected = {'version': '0.20.9-steering-sweep',
+    expected = {'version': __EXPECTED_VERSION__,
                 'motor_backend': 'app', 'sdk_gait': 'firmware', 'sdk_pace': 'normal',
                 'sdk_body_height': 108, 'sdk_shoulder_yaw': 0, 'sdk_imu': 0}
     mismatches = {key: {'expected': value, 'actual': config.get(key)}
@@ -265,6 +271,7 @@ else:
     time.sleep(1.5)
     print('alive', proc.poll() is None)
 '''
+    code = code.replace('__EXPECTED_VERSION__', json.dumps(expected_version))
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"
     try:
         async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8) as ws:
@@ -283,6 +290,8 @@ else:
                     m = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.monotonic())))
                 except asyncio.TimeoutError as exc:
                     raise TimeoutError("restart outcome indeterminate; reconcile live bridge state") from exc
+                if m.get("parent_header", {}).get("msg_id") != msg["header"]["msg_id"]:
+                    continue
                 if m.get("msg_type") == "stream":
                     output.append(m["content"].get("text", ""))
                 elif m.get("msg_type") == "error":
@@ -310,6 +319,8 @@ def main() -> int:
     if not SERVICE_SRC.exists():
         print(f"missing service source: {SERVICE_SRC}", file=sys.stderr)
         return 2
+    content = BRIDGE_SRC.read_text()
+    expected_version = bridge_source_version(content)
     session, xsrf = login()
     preflight = session.get(f"http://{HOST}:8766/mission", timeout=5)
     preflight.raise_for_status()
@@ -319,8 +330,8 @@ def main() -> int:
             or live.get("status", {}).get("moving") is not False
             or live.get("status", {}).get("motion_lease_id") is not None):
         raise RuntimeError("refusing deployment during active mission, motion or lease")
-    put_bridge(session, xsrf)
-    asyncio.run(restart_bridge(session, xsrf))
+    put_bridge(session, xsrf, content)
+    asyncio.run(restart_bridge(session, xsrf, expected_version))
     return 0
 
 
