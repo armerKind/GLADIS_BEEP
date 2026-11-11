@@ -12,6 +12,9 @@ from scripts import replay_motion_policy
 
 
 class MotionProfileTests(unittest.TestCase):
+    def test_health_snapshot_exposes_disabled_semantic_execution(self):
+        self.assertIs(bridge.snapshot()["semantic_execution_enabled"], False)
+
     def test_vendor_equivalent_profile_preserves_firmware_gait(self):
         dog = MagicMock()
         with patch.object(bridge, "sdk_init", return_value=dog), \

@@ -1161,6 +1161,9 @@ def ros_thread():
 def snapshot(full=False):
     with state_lock:
         out = dict(state)
+        # Explicit live readback of the existing hard-disabled semantic path.
+        # This field does not grant or change execution authority.
+        out["semantic_execution_enabled"] = False
         out["uptime_s"] = round(time.time() - state["started_at"], 2)
         out["scan_age_s"] = None if not state.get("scan_at") else round(time.time() - state["scan_at"], 3)
         slam = dict(out.get("slam") or {})
@@ -3446,7 +3449,8 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/mission":
                 self.send_json({"mission": mission_snapshot(), "status": snapshot()})
             elif p.path == "/config":
-                self.send_json({"version": state["version"], "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
+                self.send_json({"version": state["version"], "semantic_execution_enabled": False,
+                                "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "sdk_body_height": SDK_BODY_HEIGHT, "sdk_shoulder_yaw": SDK_SHOULDER_YAW, "sdk_imu": SDK_IMU,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
                                 "http_port": HTTP_PORT, "max_move_s": MAX_MOVE_S, "forward_until_max_s": FORWARD_UNTIL_MAX_S,
