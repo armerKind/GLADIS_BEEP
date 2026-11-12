@@ -178,8 +178,6 @@ python3 -m compileall -q beep_agent beep_audio beep_bridge beep_eyes scripts tes
 git diff --check
 ```
 
-Behind an HTTP proxy, set `NO_PROXY=127.0.0.1,localhost` so the loopback bridge tests reach their local servers. Vision and the Stack 2 modules run fully offline against saved frames and fixtures; BEEP is needed only for hardware validation.
-
 ## Further documentation
 
 - [`docs/HANDOFF.md`](docs/HANDOFF.md) — one-page onboarding: cutover, verified hardware, Stack 2 modules, next tasks
