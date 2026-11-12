@@ -4,8 +4,8 @@
 The capture thread keeps filling a bounded ring while the main thread performs one
 Gemini request at a time. There is no inference queue: after a result arrives, the
 next request uses the newest complete window and silently supersedes stale evidence.
-Shadow by default. Explicitly armed execution submits bounded mission-owned intents;
-only the onboard deterministic navigation controller can apply them.
+Shadow only: each window updates the persistent AgentSession and records its
+decision, but nothing here sends motion. The onboard bridge owns gait and safety.
 """
 from __future__ import annotations
 
@@ -20,14 +20,10 @@ import uuid
 # The companion launcher invokes this file directly, not with ``python -m``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from beep_agent import AgentSession, EmbodiedGoal, BridgeBodyAdapter
-from beep_agent.target_confirmation import TargetConfirmation
-from beep_agent.executor import ClosedLoopExecutor
+from beep_agent import AgentSession, EmbodiedGoal
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
-from beep_eyes.policy import evaluate_proposal
-from beep_eyes.course import recommend_course
 from beep_eyes.schema import validate_perception_response
 
 
@@ -52,10 +48,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mark", action="store_true")
     parser.add_argument("--resume-session", type=Path,
                         help="Resume only when robot, mission identity and freshness match")
-    parser.add_argument("--mode", choices=("shadow", "supervised"), default="shadow")
-    parser.add_argument("--arm", action="store_true", help="Permit mission intents; also requires onboard opt-in")
-    parser.add_argument("--end-on-confirmed-target", action="store_true",
-                        help="Exit observer after two changed-viewpoint sightings; never dispatches a stop")
     return parser.parse_args()
 
 
@@ -75,7 +67,7 @@ def gemini_client(args: argparse.Namespace) -> GeminiVisionClient:
 
 
 def write_window(directory: Path, frames, contact_sheet: bytes, packet: dict, response: dict,
-                 decision: dict, semantic: dict, slam_map: dict | None = None) -> None:
+                 semantic: dict, slam_map: dict | None = None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for frame in frames:
         (directory / f"{frame.frame_id}.jpg").write_bytes(frame.jpeg)
@@ -89,34 +81,23 @@ def write_window(directory: Path, frames, contact_sheet: bytes, packet: dict, re
     packet["artifacts"] = artifacts
     (directory / "observation_packet.json").write_text(json.dumps(packet, indent=2, sort_keys=True))
     (directory / "model_response.json").write_text(json.dumps(response, indent=2, sort_keys=True))
-    (directory / "policy_decision.json").write_text(json.dumps(decision, indent=2, sort_keys=True))
     (directory / "semantic_decision.json").write_text(json.dumps(semantic, indent=2, sort_keys=True))
 
 
 def main() -> int:
     args = parse_args()
-    if args.mode == "supervised" and (not args.arm or args.allow_no_mission or args.mock_response):
-        raise SystemExit("supervised mode requires --arm, an existing mission, and live perception")
-    if args.arm and args.mode != "supervised":
-        raise SystemExit("--arm requires --mode supervised")
     if args.duration < 5 or args.duration > 600:
         raise SystemExit("--duration must be within [5, 600]")
     if args.max_inferences < 0 or args.max_inferences > 1000:
         raise SystemExit("--max-inferences must be within [0, 1000]")
     if args.inference_interval < 0 or args.inference_interval > 600:
         raise SystemExit("--inference-interval must be within [0, 600]")
-    if getattr(args, "end_on_confirmed_target", False) and (args.target == "scene" or args.allow_no_mission):
-        raise SystemExit("target confirmation requires a named target and active mission")
 
     initial_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
     if not args.allow_no_mission and (
         not isinstance(initial_mission, dict) or initial_mission.get("state") not in {"starting", "running"}
     ):
         raise SystemExit("no active autonomous mission; moving eyes did not start")
-
-    if args.mode == "supervised" and (not isinstance(initial_mission, dict)
-                                       or initial_mission.get("semantic_execution_enabled") is not True):
-        raise SystemExit("onboard semantic execution is disabled; shadow mode only")
 
     mock = validate_perception_response(json.loads(args.mock_response.read_text())) if args.mock_response else None
     client = None if mock is not None else gemini_client(args)
@@ -140,14 +121,9 @@ def main() -> int:
     else:
         session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
     session_path = output_dir / "agent_session.json"
-    executor = ClosedLoopExecutor(session, BridgeBodyAdapter(args.base_url, args.timeout),
-                                  mode=args.mode, armed=args.arm, state_path=session_path)
-    dispatch_performed = False
     deadline = time.monotonic() + args.duration
     inference_count = 0
     inference_errors = 0
-    confirmation = TargetConfirmation(args.target) if getattr(args, "end_on_confirmed_target", False) else None
-    confirmed_target = None
     last_inference_finished = 0.0
     capture.start()
     try:
@@ -160,8 +136,6 @@ def main() -> int:
                 continue
             mission_payload = fetch_json(args.base_url, "/mission", args.timeout)
             mission = mission_payload.get("mission")
-            if isinstance(mission, dict):
-                executor.reconcile(mission)
             if not args.allow_no_mission and (
                 not isinstance(mission, dict) or mission.get("state") not in {"starting", "running"}
             ):
@@ -219,56 +193,22 @@ def main() -> int:
                 "newest_frame_id_at_completion": newest_latest,
                 "newer_window_available": newest_latest != requested_latest,
             }
-            current_mission_id = mission.get("id") if isinstance(mission, dict) else None
-            latest_status = fetch_json(args.base_url, "/status", args.timeout)
-            latest_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
-            if isinstance(latest_mission, dict):
-                execution = executor.step(response, packet_id=f"{run_id}-{inference_count:04d}",
-                                          frames=packet["frames"], mission=latest_mission,
-                                          status=latest_status)
-                decision_dict = execution["decision"]
-            else:
-                if args.mode == "supervised" or not args.allow_no_mission:
-                    raise RuntimeError("mission disappeared during inference")
-                session.update(response, observed_at=frames[-1].captured_at,
-                               packet_id=f"{run_id}-{inference_count:04d}")
-                decision_dict = session.decide(rollout_mode="shadow").to_dict()
-                execution = {"dispatch_performed": False, "state": "shadow", "reason": "no_mission"}
-            dispatch_performed |= execution["dispatch_performed"]
+            # Shadow only: the session plans from this evidence, nothing is dispatched.
+            session.update(response, observed_at=frames[-1].captured_at,
+                           packet_id=f"{run_id}-{inference_count:04d}")
+            decision = session.decide(rollout_mode="shadow").to_dict()
             assert session.selection is not None
             semantic = {
                 "session_id": session.session_id,
                 "mission_id": session.mission_id,
                 "selection": asdict(session.selection),
-                "next_decision": decision_dict,
-                "dispatch_performed": execution["dispatch_performed"],
-                "execution": execution,
+                "next_decision": decision,
+                "rollout_mode": "shadow",
+                "dispatch_performed": False,
             }
             session.save(session_path)
-            mission_valid = (
-                isinstance(latest_mission, dict)
-                and latest_mission.get("id") == current_mission_id
-                and latest_mission.get("state") in {"starting", "running"}
-            )
-            # The observer may report a goal result but cannot cancel or steer
-            # hardware. Only the launcher, holding the exact lease, may stop it.
-            if (confirmation is not None and mission_valid
-                    and isinstance(latest_mission, dict)
-                    and current_mission_id == mission_id
-                    and latest_status.get("motion_lease_id") == latest_mission.get("lease_id")):
-                confirmed_target = confirmation.observe(
-                    response, packet, track_id=session.world.attention_track_id)
-            course = recommend_course(response, latest_status, mission_valid=mission_valid)
-            policy = evaluate_proposal(response, latest_status, mode="shadow")
-            semantic["camera_assisted_course"] = course
-            semantic["dispatch_performed"] = execution["dispatch_performed"]
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
-            write_window(window_dir, frames, sheet, packet, response, policy, semantic, slam_map)
-            (window_dir / "course_recommendation.json").write_text(
-                json.dumps(course, indent=2, sort_keys=True))
-            if confirmed_target is not None:
-                (window_dir / "target_confirmation.json").write_text(
-                    json.dumps(confirmed_target, indent=2, sort_keys=True))
+            write_window(window_dir, frames, sheet, packet, response, semantic, slam_map)
             event = {
                 "window": inference_count,
                 "distinct_appearance_count": packet["distinct_appearance_count"],
@@ -278,20 +218,14 @@ def main() -> int:
                 "latency_s": packet["inference"]["latency_s"],
                 "scene": response["scene"]["summary"],
                 "confidence": response["confidence"],
-                "next_skill": semantic["next_decision"]["skill_call"]["name"],
-                "course_recommendation": course["recommendation"],
-                "course_reason": course["reason"],
-                "dispatch_performed": execution["dispatch_performed"],
-                "execution_state": execution["state"],
-                "target_confirmed": confirmed_target is not None,
+                "next_skill": decision["skill_call"]["name"],
+                "dispatch_performed": False,
             }
             with trace_path.open("a") as trace:
                 trace.write(json.dumps(event, sort_keys=True) + "\n")
             print(json.dumps(event, sort_keys=True), flush=True)
             inference_count += 1
             last_inference_finished = time.monotonic()
-            if confirmed_target is not None:
-                break
             if args.max_inferences and inference_count >= args.max_inferences:
                 break
     finally:
@@ -306,11 +240,10 @@ def main() -> int:
         "inferences": inference_count,
         "inference_errors": inference_errors,
         "capture": capture.stats(),
-        "dispatch_performed": dispatch_performed,
+        "dispatch_performed": False,
         "agent_session": str(session_path),
         "agent_session_id": session.session_id,
         "mission_id": session.mission_id,
-        "target_confirmation": confirmed_target,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, sort_keys=True))

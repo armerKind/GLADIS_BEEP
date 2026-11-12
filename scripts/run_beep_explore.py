@@ -28,8 +28,6 @@ def parse_args():
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument("--inference-interval", type=float, default=2.0)
     parser.add_argument("--target", default="scene")
-    parser.add_argument("--stop-on-target", action="store_true",
-                        help="Exit on two changed-viewpoint sightings and cancel the exact mission")
     parser.add_argument("--mock-response", type=Path, help="Offline/test perception only")
     parser.add_argument("--max-inferences", type=int, default=0)
     parser.add_argument("--output-root", type=Path, default=Path("captures/eyes/moving"))
@@ -39,10 +37,6 @@ def parse_args():
 def run(args, *, adapter=None, runner=None):
     if not 5 <= args.duration <= 600:
         raise ValueError("duration must be within [5, 600]")
-    if getattr(args, "stop_on_target", False) and args.target == "scene":
-        raise ValueError("--stop-on-target requires a named --target")
-    if getattr(args, "stop_on_target", False) and args.mock_response:
-        raise ValueError("mock perception cannot end a physical search as found")
     adapter = adapter or BridgeBodyAdapter(args.base_url, args.timeout)
     runner = runner or subprocess.run
     preflight = adapter.mission()
@@ -79,12 +73,9 @@ def run(args, *, adapter=None, runner=None):
             "--panel", str(args.panel), "--fps", str(args.fps),
             "--timeout", str(args.timeout), "--inference-interval", str(args.inference_interval),
             "--target", args.target, "--output-root", str(args.output_root),
-            "--mode", "shadow",
         ]
         if args.mock_response:
             command += ["--mock-response", str(args.mock_response)]
-        if getattr(args, "stop_on_target", False):
-            command += ["--goal", "find", "--end-on-confirmed-target"]
         if args.max_inferences:
             command += ["--max-inferences", str(args.max_inferences)]
         child_result = runner(command, capture_output=True, text=True, timeout=args.duration + args.timeout + 15)
@@ -92,30 +83,6 @@ def run(args, *, adapter=None, runner=None):
                         "eyes_exit_code": child_result.returncode,
                         "eyes_output": child_result.stdout[-3000:],
                         "eyes_error": child_result.stderr[-1000:]})
-        if child_result.returncode == 0 and getattr(args, "stop_on_target", False):
-            # The last JSON line is the observer summary; earlier lines are
-            # per-window events. Do not trust unbounded arbitrary child text.
-            for line in reversed(child_result.stdout.splitlines()):
-                try:
-                    summary = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(summary, dict) and summary.get("run_id"):
-                    if summary.get("mission_id") != mission_id:
-                        raise RuntimeError("observer summary belongs to a different mission")
-                    found = summary.get("target_confirmation")
-                    if found is not None and (
-                        not isinstance(found, dict) or found.get("target") != args.target
-                        or len(found.get("evidence") or []) != 2
-                        or any(sighting.get("lease_id") != lease_id
-                               for sighting in found["evidence"])
-                    ):
-                        raise RuntimeError("observer target evidence does not match exact goal/lease")
-                    outcome["target_confirmation"] = summary.get("target_confirmation")
-                    outcome["eyes_output_dir"] = summary.get("output_dir")
-                    break
-            else:
-                raise RuntimeError("observer exited without a mission-bound summary")
         return outcome
     finally:
         if started:

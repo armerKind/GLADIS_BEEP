@@ -2,11 +2,13 @@
 
 ## Source and deployment state
 
-See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and unresolved executor integration.
+See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and next engineering tasks.
 
-Last confirmed deployed/read-back bridge: `0.21.1-phase-c-audit` (November 11, 2026), plus the **readback-only** semantic-disable field in `ddb363a`. See [live stationary Phase E readback](PHASE_E_STATIONARY_READBACK.md) for the exact version, no-lease, six-sector scan and occupancy-grid evidence and outstanding Task 16/audio work. Earlier guarded motion trials were on `0.20.9-steering-sweep` (November 7); they do not validate the newer bridge's physical stop priority. Semantic executor motion remains hard-disabled. Recheck identity and sensors before any future motion.
+Repository bridge source: `0.22.0-stack2-cutover` (not yet deployed). It removes the Stack 1 intent mailbox, `/mission/intent`, `/mission/executor/claim` and `/observer/stop`; the deployed bridge still serves them.
 
-At the earlier November 7 checkpoint, the offline suite passed 291 tests; see [Phase C gate](PHASE_C_GATE.md) for current verification commands. Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
+Last confirmed deployed/read-back bridge: `0.21.1-phase-c-audit` (November 11, 2026), plus the **readback-only** semantic-disable field in `ddb363a`: stopped, no lease, fresh six-sector scan and usable occupancy grid. Earlier guarded motion trials were on `0.20.9-steering-sweep` (November 7); they do not validate the newer bridge's physical stop priority. Recheck identity and sensors before any future motion.
+
+Run the offline suite before any deployment (see the README's Development section). Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
 
 ## Pi paths
 
@@ -70,7 +72,7 @@ The deployment helper:
 
 1. logs into BEEP's Jupyter server,
 2. backs up the deployed bridge,
-3. uploads `beep_bridge.py`, `frontier_planner.py` and `semantic_intent.py`,
+3. uploads `beep_bridge.py` and `frontier_planner.py`,
 4. uploads `config/beep_2d.lua`,
 5. uploads and makes executable `scripts/save_slam_map.sh`,
 6. compiles the Python source on BEEP,
@@ -106,7 +108,7 @@ profile. On a full battery and clear level floor:
 This isolates posture from navigation policy. It also prevents the traditional
 robotics method of changing five variables and learning nothing.
 
-Before declaring repository source deployed, require `/health` field `status.version` to equal the source version under review, `status.semantic_execution_enabled == false`, `status.moving == false`, and no active lease. Also verify `/slam_map.ok`, sustained six-sector scan/map/pose freshness and no repeated mapper resets after restart. These stationary criteria passed on November 11, 2026 for `0.21.1-phase-c-audit` plus readback-only commit `ddb363a`; see [live evidence](PHASE_E_STATIONARY_READBACK.md). The last guarded **physical motion** trials were on the older `0.20.9-steering-sweep`; this deployment does not establish physical stop priority or authorize motion. A successful upload alone is not deployment.
+Before declaring repository source deployed, require `/health` field `status.version` to equal the source version under review, `status.semantic_execution_enabled == false`, `status.moving == false`, and no active lease. Also verify `/slam_map.ok`, sustained six-sector scan/map/pose freshness and no repeated mapper resets after restart. These stationary criteria passed on November 11, 2026 for `0.21.1-phase-c-audit` plus readback-only commit `ddb363a` (the full evidence record is on branch `archive/stack1-cap-prototype`, `docs/PHASE_E_STATIONARY_READBACK.md`). The last guarded **physical motion** trials were on the older `0.20.9-steering-sweep`; this deployment does not establish physical stop priority or authorize motion. A successful upload alone is not deployment.
 
 The Jupyter deployment helper uploads and installs the checked-in systemd unit,
 runs `daemon-reload`, explicitly restarts the service, and rejects a live `/config`
@@ -338,7 +340,7 @@ Frontier in-place turns use step 30 and calibrated longer durations. A controlle
 
 ## Networking and boot recovery
 
-See [`fair_remote_control_status.md`](fair_remote_control_status.md) for the last verified Tailscale addresses, adapter history, and enrollment state. Initial enrollment uses:
+The README's Networking section lists the last verified addresses; adapter history is on branch `archive/stack1-cap-prototype` (`docs/fair_remote_control_status.md`). Initial enrollment uses:
 
 ```bash
 sudo tailscale up --ssh --hostname beep

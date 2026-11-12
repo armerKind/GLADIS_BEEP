@@ -121,9 +121,13 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 with Image.open(run / windows[0].name / "contact_sheet.jpg") as panel:
                     self.assertEqual(panel.size, (960, 760))
                 self.assertFalse(semantics[0]["dispatch_performed"])
-                self.assertFalse(semantics[0]["camera_assisted_course"]["dispatch_performed"])
-                self.assertEqual(semantics[0]["camera_assisted_course"]["recommendation"], "hold_and_reobserve")
-                self.assertTrue((windows[0] / "course_recommendation.json").exists())
+                self.assertEqual(semantics[0]["rollout_mode"], "shadow")
+                self.assertIn("skill_call", semantics[0]["next_decision"])
+                for window in windows:
+                    for name in ("observation_packet.json", "model_response.json",
+                                 "semantic_decision.json"):
+                        self.assertTrue((window / name).exists(), name)
+                    self.assertFalse((window / "policy_decision.json").exists())
                 self.assertEqual(semantics[0]["session_id"], semantics[1]["session_id"])
                 self.assertEqual(semantics[0]["mission_id"], "mission-1")
                 self.assertTrue((run / "agent_session.json").exists())

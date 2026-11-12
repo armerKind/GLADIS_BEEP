@@ -5,13 +5,13 @@ append-only file and is NOT atomically committed with this checkpoint.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from pathlib import Path
 import tempfile
 
 from .coordinator import CoordinatorError, GoalCoordinator
+from .fsutil import fsync_directory, lock_exclusive
 from .session import AgentSession, SessionIdentityError
 
 
@@ -45,7 +45,7 @@ class CombinedCheckpoint:
     def _lock(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         stream = (self.path.parent / (self.path.name + '.lock')).open('a+b')
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        lock_exclusive(stream)
         return stream
 
     def load(self, *, expected_robot_id: str | None = None,
@@ -93,11 +93,7 @@ class CombinedCheckpoint:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, self.path)
-                directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                fsync_directory(self.path.parent)
             finally:
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)

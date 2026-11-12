@@ -8,7 +8,6 @@ Environment variables:
   BEEP_JUPYTER_PASSWORD     default: yahboom
   BEEP_BRIDGE_SRC           default: beep_bridge/beep_bridge.py
   BEEP_PLANNER_SRC          default: beep_bridge/frontier_planner.py
-  BEEP_INTENT_SRC           default: beep_bridge/semantic_intent.py
   BEEP_SLAM_CONFIG_SRC      default: config/beep_2d.lua
   BEEP_SAVE_SLAM_SRC        default: scripts/save_slam_map.sh
   BEEP_SERVICE_SRC          default: systemd/beep-bridge.service
@@ -31,7 +30,6 @@ HOST = os.environ.get("BEEP_HOST", "192.168.8.88")
 PASSWORD = os.environ.get("BEEP_JUPYTER_PASSWORD", "yahboom")
 BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"))
 PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
-INTENT_SRC = Path(os.environ.get("BEEP_INTENT_SRC", "beep_bridge/semantic_intent.py"))
 SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
 SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map.sh"))
 SERVICE_SRC = Path(os.environ.get("BEEP_SERVICE_SRC", "systemd/beep-bridge.service"))
@@ -67,7 +65,7 @@ def login() -> tuple[requests.Session, str]:
 
 
 def put_bridge(session: requests.Session, xsrf: str, content: str) -> None:
-    intent_content = INTENT_SRC.read_text()  # Fail before changing the remote if missing.
+    planner_content = PLANNER_SRC.read_text()  # Fail before changing the remote if missing.
     headers = {"X-XSRFToken": xsrf, "Content-Type": "application/json"}
     # Best-effort backup.
     old = session.get(f"{BASE}/api/contents/beep_bridge/beep_bridge.py?content=1", timeout=8)
@@ -88,23 +86,14 @@ def put_bridge(session: requests.Session, xsrf: str, content: str) -> None:
     )
     resp.raise_for_status()
     print("uploaded: /home/pi/beep_bridge/beep_bridge.py")
-    intent_module = session.put(
-        f"{BASE}/api/contents/beep_bridge/semantic_intent.py",
+    planner = session.put(
+        f"{BASE}/api/contents/beep_bridge/frontier_planner.py",
         headers=headers,
-        json={"type": "file", "format": "text", "content": intent_content},
+        json={"type": "file", "format": "text", "content": planner_content},
         timeout=10,
     )
-    intent_module.raise_for_status()
-    print("uploaded: /home/pi/beep_bridge/semantic_intent.py")
-    if PLANNER_SRC.exists():
-        planner = session.put(
-            f"{BASE}/api/contents/beep_bridge/frontier_planner.py",
-            headers=headers,
-            json={"type": "file", "format": "text", "content": PLANNER_SRC.read_text()},
-            timeout=10,
-        )
-        planner.raise_for_status()
-        print("uploaded: /home/pi/beep_bridge/frontier_planner.py")
+    planner.raise_for_status()
+    print("uploaded: /home/pi/beep_bridge/frontier_planner.py")
     if SLAM_CONFIG_SRC.exists():
         slam_config = session.put(
             f"{BASE}/api/contents/cartographer_ws2/install/cartographer_ros/share/cartographer_ros/configuration_files/beep_2d.lua",
@@ -153,12 +142,12 @@ if ((mission is not None and mission.get('state') not in ('completed', 'failed',
 (base/'maps').mkdir(parents=True, exist_ok=True)
 if (base/'save_slam_map.sh').exists():
     (base/'save_slam_map.sh').chmod(0o755)
-p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(base/'frontier_planner.py'),str(base/'semantic_intent.py')], text=True, capture_output=True, timeout=10)
+p = subprocess.run(['python3','-m','py_compile',str(base/'beep_bridge.py'),str(base/'frontier_planner.py')], text=True, capture_output=True, timeout=10)
 print('py_compile', p.returncode, p.stderr)
 if p.returncode:
     raise SystemExit(p.returncode)
-smoke = subprocess.run(['python3', '-c', "import sys; sys.path.insert(0, sys.argv[1]); import semantic_intent", str(base)], text=True, capture_output=True, timeout=10)
-print('semantic_import', smoke.returncode, smoke.stderr)
+smoke = subprocess.run(['python3', '-c', "import sys; sys.path.insert(0, sys.argv[1]); import frontier_planner", str(base)], text=True, capture_output=True, timeout=10)
+print('planner_import', smoke.returncode, smoke.stderr)
 if smoke.returncode:
     raise SystemExit(smoke.returncode)
 unit = base/'beep-bridge.service'

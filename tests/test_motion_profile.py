@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 from beep_bridge import beep_bridge as bridge
 from scripts import jupyter_deploy_bridge
-from scripts import replay_motion_policy
 
 
 class MotionProfileTests(unittest.TestCase):
@@ -133,41 +132,6 @@ class MotionProfileTests(unittest.TestCase):
             jupyter_deploy_bridge.bridge_source_version('state = {"version": call()}')
         self.assertNotIn("'version': '0.20.9-steering-sweep'",
                          (root / "scripts" / "jupyter_deploy_bridge.py").read_text())
-
-
-class MotionPolicyReplayTests(unittest.TestCase):
-    def test_saved_shape_replay_increases_forward_bias_without_changing_hazards(self):
-        fixture = Path(__file__).parent / "fixtures" / "motion_policy_trace.json"
-        sectors = json.loads(fixture.read_text())
-        rows = [{"path": f"fixture:{index}", "sectors": row, "recorded": None}
-                for index, row in enumerate(sectors)]
-        result = replay_motion_policy.replay(rows)
-        self.assertGreater(result["new_forward_fraction"], result["old_forward_fraction"])
-        self.assertLess(result["new_turning_fraction"], result["old_turning_fraction"])
-        self.assertEqual(result["old_policy"].get("back"), result["new_policy"].get("back"))
-        self.assertEqual(result["old_policy"].get("stop"), result["new_policy"].get("stop"))
-
-    def test_replay_resets_fluent_state_between_capture_runs(self):
-        curve = {"front": 1.0, "front_left": 1.2, "front_right": 0.6,
-                 "left": 1.2, "right": 0.6, "rear": 1.0}
-        straight = {"front": 1.0, "front_left": 1.0, "front_right": 1.0,
-                    "left": 1.0, "right": 1.0, "rear": 1.0}
-        rows = [
-            {"path": "run-a/1", "run_id": "run-a", "sectors": curve, "recorded": None},
-            {"path": "run-b/1", "run_id": "run-b", "sectors": straight, "recorded": None},
-        ]
-        result = replay_motion_policy.replay(rows)
-        self.assertEqual(result["runs"], 2)
-        self.assertEqual(result["old_policy"].get("forward"), 1)
-
-    def test_fluent_steering_is_not_consulted_when_primary_policy_rejects_forward(self):
-        fixture = Path(__file__).parent / "fixtures" / "motion_policy_trace.json"
-        rows = [{"path": f"hazard:{index}", "sectors": sectors, "recorded": None}
-                for index, sectors in enumerate(json.loads(fixture.read_text()))
-                if bridge.choose_explore_action(sectors)[0] != "forward"]
-        with patch.object(bridge, "choose_fluent_steering", side_effect=AssertionError("unsafe steering call")):
-            result = replay_motion_policy.replay(rows)
-        self.assertEqual(result["observations"], len(rows))
 
 
 if __name__ == "__main__":

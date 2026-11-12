@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import fcntl
 import json
 import os
 import threading
 from pathlib import Path
 
 from .events import EventEnvelope, EventValidationError
+from .fsutil import fsync_directory, lock_exclusive, lock_shared
 
 
 class JournalError(ValueError):
@@ -48,7 +48,7 @@ class EventJournal:
                     raise JournalError("journal disappeared after validation")
                 return []
             with self.path.open("rb") as stream:
-                fcntl.flock(stream, fcntl.LOCK_SH)
+                lock_shared(stream)
                 self._sync_locked(stream)
                 assert self._index is not None
                 return deepcopy(list(self._index.values()))
@@ -64,7 +64,7 @@ class EventJournal:
                     raise JournalError("journal disappeared after validation")
                 return {}
             with self.path.open("rb") as stream:
-                fcntl.flock(stream, fcntl.LOCK_SH)
+                lock_shared(stream)
                 self._sync_locked(stream)
                 assert self._index is not None
                 return deepcopy({i: self._index[i] for i in event_ids if i in self._index})
@@ -108,7 +108,7 @@ class EventJournal:
         # The in-process lock protects cache state; flock protects cooperating
         # processes. Neither silently repairs an invalid external journal.
         with self._cache_lock, self.path.open("a+b") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            lock_exclusive(stream)
             self._sync_locked(stream)
             assert self._index is not None
             previous = self._index.get(event.event_id)
@@ -128,8 +128,4 @@ class EventJournal:
             self._offset = final.st_size
             self._ctime_ns = final.st_ctime_ns
             if self._offset == len(payload):
-                directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                fsync_directory(self.path.parent)

@@ -14,6 +14,7 @@ from typing import Any
 
 from .drives import GoalArbiter, GoalSelection
 from .executive import EmbodiedExecutive, EmbodiedGoal, ExecutiveDecision
+from .fsutil import fsync_directory
 from .world_model import WorldModel
 from .skills import skill
 
@@ -213,11 +214,7 @@ class AgentSession:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            fsync_directory(path.parent)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

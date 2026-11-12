@@ -28,8 +28,7 @@ class InferenceFaultTests(unittest.TestCase):
                   "sectors": {"front": 2.0, "front_left": 1.0, "front_right": 1.0,
                               "left": 1.0, "right": 1.0, "rear": 1.0},
                   "slam": {"usable": True, "pose_valid": True}}
-        mission = {"id": "mission-1", "lease_id": lease, "state": "running",
-                   "intent_outcomes": []}
+        mission = {"id": "mission-1", "lease_id": lease, "state": "running"}
         sample = MovingFrameSample(CapturedFrame("f000", now, jpeg), status)
 
         class Capture:
@@ -72,7 +71,7 @@ class InferenceFaultTests(unittest.TestCase):
                                       mock_response=None, allow_no_mission=False,
                                       max_inferences=2, output_root=Path(directory),
                                       goal=None, target="green baseball cap", mark=False,
-                                      resume_session=None, mode="shadow", arm=False)
+                                      resume_session=None)
             def get_json(base_url, path, timeout):
                 if path == "/mission":
                     return {"mission": mission}

@@ -86,7 +86,7 @@ class ConcurrentExploreTests(unittest.TestCase):
                     self_outer["starts"] += 1
                     self_outer["lease"] = "lease-http"
                     self_outer["mission"] = {"id": "mission-http", "lease_id": "lease-http",
-                                             "state": "running", "intent_outcomes": []}
+                                             "state": "running"}
                     payload = {"accepted": True, "mission": self_outer["mission"]}
                 elif self.path == "/mission/cancel":
                     if body != {"mission_id": "mission-http", "lease_id": "lease-http"}:
@@ -142,8 +142,9 @@ class ConcurrentExploreTests(unittest.TestCase):
             self.assertEqual(bridge.lease, "lease-exact")
             self.assertEqual([path for path, _ in bridge.calls], ["/mission/start"])
             self.assertEqual(bridge.calls[0][1]["mode"], "coverage")
-            self.assertIn("--mode", command)
-            self.assertEqual(command[command.index("--mode") + 1], "shadow")
+            # The child is shadow-only by construction: no arming flag exists.
+            self.assertNotIn("--arm", command)
+            self.assertNotIn("--mode", command)
             self.assertIn("run_moving_eyes.py", command[1])
             self.assertLessEqual(kwargs["timeout"], 25)
             time.sleep(0.25)  # Simulated slow model; onboard owner keeps its gait.

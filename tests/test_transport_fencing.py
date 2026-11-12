@@ -2,7 +2,7 @@
 
 Only observations and external I/O are faked. Navigation, packet construction,
 leases, cancellation, watchdog and stop transactions execute production code.
-The final test documents why host-side hardening does NOT lift the interlock.
+The final test documents the known limit: an already-entered write cannot be revoked.
 """
 import importlib.util
 from pathlib import Path
@@ -107,7 +107,6 @@ class TransportFencingTests(unittest.TestCase):
             "id": "transport-mission", "lease_id": self.lease.lease_id,
             "lease": self.lease, "mode": "explore", "state": "running",
             "duration_s": 0.15, "started_at": None, "finished_at": None,
-            "intent_mailbox": bridge.IntentMailbox(),
         }
         bridge._active_motion_lease = self.lease
         bridge._active_mission = self.mission
@@ -116,7 +115,6 @@ class TransportFencingTests(unittest.TestCase):
         patches: Any = (
             ("snapshot", {"side_effect": lambda *a, **k: self.status}),
             ("MOTOR_BACKEND", {"new": "app"}),
-            ("SEMANTIC_INTENTS_ENABLED", {"new": True}),
             ("sdk_init", {"side_effect": AssertionError("SDK hardware forbidden")}),
         )
         for target, kwargs in patches:
@@ -159,12 +157,6 @@ class TransportFencingTests(unittest.TestCase):
 
     def first_writes(self):
         return [packet for connection, packet in self.rig.writes if connection == 1]
-
-    def enroll(self, expiry=None):
-        # Set mailbox authority directly, independent of the parallel worker's
-        # evolving admission schema. All execution/interlock paths are real.
-        self.mission["intent_mailbox"].expires_at = expiry or time.time() + 10
-        self.mission["semantic_deadline"] = time.monotonic() + 10
 
     def test_worker_happy_path_reaches_nonblocking_transport(self):
         worker = self.start()
@@ -239,19 +231,6 @@ class TransportFencingTests(unittest.TestCase):
         self.assertEqual(self.rig.writes, [])
         self.assertIs(bridge.active_motion_lease(), replacement)
         self.assertFalse(replacement.cancel_event.is_set())
-
-    def test_enrollment_during_connect_closes_transport_interlock(self):
-        worker = self.start("connect")
-        self.enroll()
-        self.finish(worker)
-        self.assertEqual(self.first_writes(), [])
-        self.assertFalse(bridge.mission_snapshot()["semantic_execution_enabled"])
-
-    def test_expired_semantic_evidence_after_connect_cannot_write(self):
-        worker = self.start("connect")
-        self.enroll(time.time() - 1)
-        self.finish(worker)
-        self.assertEqual(self.first_writes(), [])
 
     def test_watchdog_latches_without_waiting_for_blocked_worker_transport(self):
         worker = self.start("recv")
@@ -364,7 +343,7 @@ class TransportFencingTests(unittest.TestCase):
                                                bridge.pkt(0x11, [0, 100])])
         self.assertEqual(bridge.state["last_command"], "app:stop")
 
-    def test_inflight_write_is_not_revocable_so_semantic_interlock_stays_closed(self):
+    def test_inflight_write_is_not_revocable_known_limit(self):
         worker = self.start("motion", "late_accept", curve=True)
         self.lease.cancel_event.set()
         self.finish(worker)

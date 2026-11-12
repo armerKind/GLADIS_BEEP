@@ -12,7 +12,6 @@ Goals:
 """
 from __future__ import annotations
 
-import hmac
 import json
 import math
 import os
@@ -29,15 +28,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from semantic_intent import IntentMailbox, sensor_gate, validate_intent
 
 # Restart-proof identities: old persisted clients cannot own a new process.
 BOOT_ID = uuid.uuid4().hex
-SEMANTIC_INTENTS_ENABLED = os.environ.get("BEEP_SEMANTIC_INTENTS_ENABLED", "0") == "1"
-# Admission may be armed, but execution is fail-closed until BOTH vendor
-# transports provide a cancellation-linearizable handoff that rechecks evidence
-# and deadlines before EACH non-stop packet, after all potentially blocking waits.
-SEMANTIC_TRANSPORT_DISABLED_REASON = "semantic_transport_safety_disabled"
 from frontier_planner import (  # noqa: E402
     OccupancyGrid as FrontierGrid,
     astar_path,
@@ -97,8 +90,6 @@ TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PR
 TURN_SETTLE_SAMPLES = 3
 TURN_SETTLE_YAW_TOLERANCE_RAD = math.radians(2.0)
 TURN_SETTLE_MAX_S = 0.35
-OBSERVER_STOP_TOKEN = os.environ.get("BEEP_OBSERVER_STOP_TOKEN", "")
-OBSERVER_STOP_MIN_INTERVAL_S = max(0.5, float(os.environ.get("BEEP_OBSERVER_STOP_MIN_INTERVAL_S", "2.0")))
 
 CMD_PAYLOAD = {"stop": 0x00, "turnleft": 0x05, "turnright": 0x06}
 APP_ANALOG_PAYLOAD = {
@@ -167,11 +158,9 @@ motion_context = threading.local()
 _active_motion_lease = None
 _motion_lease_sequence = 0
 events = deque(maxlen=300)
-observer_stop_lock = threading.Lock()
-observer_last_stop_at = None
 last_run = None
 state = {
-    "version": "0.21.1-phase-c-audit",
+    "version": "0.22.0-stack2-cutover",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -369,8 +358,8 @@ def pkt(cmd: int, payload=()):
 def app_packet_guard(action, lease, deadline, stop_seq=None):
     """Host-side fence, not a guarantee that TCP bytes can be revoked.
 
-    Recheck after every potentially blocking wait. The semantic interlock stays
-    closed: the receiver does not enforce these tokens and SDK writes are opaque.
+    Recheck after every potentially blocking wait. The receiver does not
+    enforce these tokens and SDK writes are opaque.
     """
     # Read identity without waiting for ownership: cancellation holds that lock
     # while draining app I/O. This is intentionally not claimed linearizable.
@@ -393,16 +382,6 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
             raise MotionCancelled("app packet cancelled")
         return
     status = snapshot()
-    # Do not acquire mission_lock under app_io_lock: mission cancellation may
-    # hold it while waiting to send stop. Enrollment only ever closes this gate.
-    mission = _active_mission
-    if mission is not None and mission.get("lease") is lease:
-        mailbox = mission["intent_mailbox"]
-        if mailbox.expires_at is not None:
-            if (time.time() >= mailbox.expires_at
-                    or time.monotonic() >= mission.get("semantic_deadline", float("inf"))):
-                raise MotionCancelled("semantic_evidence_expired")
-            raise MotionCancelled(SEMANTIC_TRANSPORT_DISABLED_REASON)
     sec = validated_sector_values(status.get("sectors") or {})
     if not scan_ok(status) or sec is None:
         raise MotionCancelled("app packet local sensors invalid")
@@ -2014,9 +1993,6 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
         st = snapshot()
         if not scan_ok(st):
             return {"ok": False, "reason": "scan_stale_during_lidar_walk", "elapsed_s": time.time() - started}
-        semantic_reason = navigation_intent_guard(st)
-        if semantic_reason is not None:
-            return {"ok": False, "reason": semantic_reason, "elapsed_s": time.time() - started}
         sec = sector_values(st, ("front", "front_left", "front_right", "left", "right", "rear"))
         if sec is None:
             return {"ok": False, "reason": "lidar_sector_missing_during_lidar_walk", "elapsed_s": time.time() - started}
@@ -2235,12 +2211,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         break
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
-                semantic_action, semantic_intent, semantic_reason = navigation_intent_boundary(st, action, current_action)
-                if semantic_reason is not None:
-                    reason = semantic_reason
-                    break
                 remaining = max_duration - (time.time() - started)
-                if forced_turn_action and semantic_intent is None and min(sec.values()) >= TURN_SWEEP_M:
+                if forced_turn_action and min(sec.values()) >= TURN_SWEEP_M:
                     action, duration, why = forced_turn_action, 2.5, "alternate_after_ineffective_turn"
                     forced_turn_action = None
                 if (current_action in ("curveleft", "curveright") and
@@ -2258,24 +2230,11 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     consecutive_escape_actions = 0
                     total_escape_actions = 0
                     desired_action = choose_fluent_steering(sec, current_action=current_action)
-                    if semantic_action is not None:
-                        desired_action = semantic_action
-                    current_action, gait_started, dispatch_error = apply_navigation_course(
-                        current_action, desired_action, semantic_intent)
-                    if dispatch_error is not None:
-                        reason = dispatch_error
-                        break
-                    if semantic_intent is not None:
-                        finish_navigation_intent(semantic_intent, "applied", "fluent_registers_updated")
-                    semantic_remaining = navigation_intent_remaining()
-                    segment_s = min(0.50, remaining, semantic_remaining)
+                    current_action, gait_started = apply_navigation_course(current_action, desired_action)
+                    segment_s = min(0.50, remaining)
                     supervised = (supervise_lidar_motion(current_action, segment_s)
                                   if current_action in ("curveleft", "curveright")
                                   else supervise_lidar_forward(segment_s))
-                    if semantic_intent is not None:
-                        finish_navigation_intent(semantic_intent,
-                                                 "completed" if supervised["ok"] else "rejected",
-                                                 str(supervised["reason"]))
                     trace.append({"action": desired_action, "gait_started": gait_started,
                                   "duration": round(float(supervised.get("elapsed_s", 0.0)), 3),
                                   "why": why, "sectors": sec})
@@ -2390,185 +2349,16 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     return result
 
 
-def live_mission_owner(mission, lease, value):
-    """Caller holds mission_lock and motion_owner_lock for the whole mutation."""
-    return (isinstance(value, dict) and mission is not None and lease is not None
-            and value.get("mission_id") == mission["id"]
-            and value.get("lease_id") == mission["lease_id"] == lease.lease_id
-            and lease is mission.get("lease") and not lease.cancel_event.is_set()
-            and not lease.ended_event.is_set() and time.monotonic() < lease.deadline
-            and mission["state"] == "running")
-
-
-def claim_navigation_executor(value):
-    """Claim host authority only; this NEVER enables semantic execution.
-
-    Try (never wait for) transport locks under the ownership locks. A busy
-    writer must drain before retry; no client quiescence assertion is accepted.
-    Drained host I/O is not proof of stopped motors or revoked TCP bytes.
-    """
-    with mission_lock, motion_owner_lock:
-        mission, lease = _active_mission, _active_motion_lease
-        if not SEMANTIC_INTENTS_ENABLED:
-            return {"ok": False, "reason": "onboard_not_armed"}
-        if not live_mission_owner(mission, lease, value):
-            return {"ok": False, "reason": "mission_or_lease_mismatch"}
-        if not app_io_lock.acquire(blocking=False):
-            return {"ok": False, "reason": "executor_transport_busy"}
-        try:
-            if not sdk_io_lock.acquire(blocking=False):
-                return {"ok": False, "reason": "executor_transport_busy"}
-            try:
-                return mission["intent_mailbox"].claim(value, safe_to_takeover=True)
-            finally:
-                sdk_io_lock.release()
-        finally:
-            app_io_lock.release()
-
-
-def submit_navigation_intent(value):
-    """Queue only: HTTP never sends motion. Opt-in is local startup configuration."""
-    with mission_lock, motion_owner_lock:
-        mission = _active_mission
-        lease = _active_motion_lease
-        if not SEMANTIC_INTENTS_ENABLED:
-            return {"ok": False, "state": "rejected", "reason": "onboard_not_armed"}
-        if not live_mission_owner(mission, lease, value):
-            return {"ok": False, "state": "rejected", "reason": "mission_or_lease_mismatch"}
-        mailbox = mission["intent_mailbox"]
-        if mailbox.fence is None or not mailbox.fence.matches(value):
-            return {"ok": False, "state": "rejected", "reason": "stale_executor_fence"}
-        is_new = isinstance(value.get("decision_id"), str) and value["decision_id"] not in mailbox.records
-        now = time.time()
-        result = mailbox.submit(value, now)
-        if is_new and result.get("state") == "accepted":
-            mission["semantic_deadline"] = time.monotonic() + value["expires_at"] - now
-        return result
-
-
-def navigation_intent_guard(status):
-    with mission_lock:
-        mission = _active_mission
-        lease = getattr(motion_context, "lease", None)
-        if mission is None or mission.get("lease") is not lease:
-            return None
-        mailbox = mission["intent_mailbox"]
-        if mailbox.expires_at is None and mailbox.fence is None:
-            return None
-        if (active_motion_lease() is not lease or lease.cancel_event.is_set()
-                or lease.ended_event.is_set() or time.monotonic() >= lease.deadline):
-            return "semantic_ownership_lost"
-        if ((mailbox.expires_at is not None and time.time() >= mailbox.expires_at)
-                or time.monotonic() >= mission.get("semantic_deadline", float("inf"))):
-            return "semantic_evidence_expired"
-        if not sensor_gate(status) or not scan_ok(status):
-            return "semantic_local_sensors_invalid"
-        # Enrollment must also halt recovery/local paths before they can bypass
-        # the course-dispatch interlock. Queue acceptance is not execution.
-        return SEMANTIC_TRANSPORT_DISABLED_REASON
-
-
-def apply_navigation_course(current_action, desired_action, intent):
-    # Fail closed rather than authorize a multi-packet blocking transaction from
-    # one preflight check. Removing these locks alone would break cancellation
-    # linearizability; holding them across vendor I/O starves the watchdog.
-    # No semantic dispatch reaches transport, including subsequent enrolled
-    # segments with no new intent or no register change.
-    with mission_lock, motion_owner_lock:
-        mission = _active_mission
-        enrolled = mission is not None and (mission["intent_mailbox"].expires_at is not None
-                                           or mission["intent_mailbox"].fence is not None)
-        if enrolled or intent is not None:
-            reason = SEMANTIC_TRANSPORT_DISABLED_REASON
-            lease = getattr(motion_context, "lease", None)
-            if lease is not None:
-                lease.cancel_event.set()
-            if intent is not None:
-                finish_navigation_intent(intent, "rejected", reason)
-            return current_action, False, reason
-        if MOTOR_BACKEND == "sdk":
-            # The opaque SDK still needs the old admission ordering. It has no
-            # per-packet fence; semantic execution remains disabled for it too.
-            action, started = start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
-            return action, started, None
-    # Transport checks enrollment again per packet. Do not hold mission/owner
+def apply_navigation_course(current_action, desired_action):
+    """Start or update the fluent gait for one bounded local-navigation segment."""
+    if MOTOR_BACKEND == "sdk":
+        # The opaque SDK has no per-packet fence; keep admission serialized
+        # against mission cancellation and lease replacement.
+        with mission_lock, motion_owner_lock:
+            return start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
+    # The app transport fences every packet itself. Do not hold mission/owner
     # locks across vendor waits: admission and watchdog latching must proceed.
-    action, started = start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
-    return action, started, None
-
-
-def navigation_intent_remaining():
-    with mission_lock:
-        mission = _active_mission
-        if mission is None or mission.get("lease") is not getattr(motion_context, "lease", None):
-            return 0.50
-        expiry = mission["intent_mailbox"].expires_at
-        return 0.50 if expiry is None else max(0.0, min(
-            expiry - time.time(), mission.get("semantic_deadline", float("inf")) - time.monotonic()))
-
-
-def finish_navigation_intent(intent, state_name, reason):
-    with mission_lock, motion_owner_lock:
-        mission = _active_mission
-        lease = getattr(motion_context, "lease", None)
-        if (not isinstance(intent, dict) or mission is None or lease is None
-                or _active_motion_lease is not lease or mission.get("lease") is not lease
-                or intent.get("mission_id") != mission["id"]
-                or intent.get("lease_id") != mission["lease_id"] or lease.lease_id != mission["lease_id"]):
-            return
-        mailbox = mission["intent_mailbox"]
-        record = mailbox.records.get(intent.get("decision_id"))
-        if (mailbox.closed or mailbox.fence is None or not mailbox.fence.matches(intent)
-                or record is None or record["intent"] != intent):
-            return
-        mailbox.outcome(intent["decision_id"], state_name, reason)
-
-
-def navigation_intent_boundary(status, local_action, current_action):
-    """Called only by the owned navigation worker, before a bounded gait segment.
-
-    After enrollment, lost visual authority ends the mission; it never silently
-    falls back to blind exploration. Stop/yield deliberately end this slice.
-    """
-    with mission_lock, motion_owner_lock:
-        mission = _active_mission
-        lease = getattr(motion_context, "lease", None)
-        if mission is None or mission.get("lease") is not lease:
-            return None, None, None
-        mailbox = mission["intent_mailbox"]
-        if mailbox.expires_at is None:
-            return None, None, None
-        intent = mailbox.take(time.time())
-        reason = None
-        if (active_motion_lease() is not lease or lease.cancel_event.is_set()
-                or lease.ended_event.is_set() or time.monotonic() >= lease.deadline):
-            reason = "semantic_ownership_lost"
-        elif mailbox.expires_at <= time.time():
-            reason = "semantic_evidence_expired"
-        elif not sensor_gate(status) or not scan_ok(status):
-            reason = "semantic_local_sensors_invalid"
-        elif local_action != "forward":
-            reason = "semantic_local_navigation_veto"
-        if (intent is not None and intent["kind"] in {"yield", "stop"}
-                and reason != "semantic_ownership_lost"):
-            # Stop does not require healthy range sensors. No cancellation of a
-            # replacement lease: this is the owning worker's final-stop path.
-            error = stop_burst(3)
-            mailbox.outcome(intent["decision_id"], "applied", "stop_attempted")
-            mailbox.outcome(intent["decision_id"], "completed" if error is None else "rejected",
-                            "intentional_" + intent["kind"] if error is None else "stop_failed")
-            return None, None, "semantic_" + intent["kind"]
-        desired = None
-        if intent is not None and reason is None:
-            desired = {"continue": current_action or "forward", "course_left": "curveleft",
-                       "course_right": "curveright"}[intent["kind"]]
-            if desired in {"curveleft", "curveright"} and min(status["sectors"].values()) < TURN_SWEEP_M:
-                reason = "semantic_turn_envelope_veto"
-        if reason is not None:
-            if intent is not None:
-                mailbox.outcome(intent["decision_id"], "rejected", reason)
-            return None, None, reason
-        return desired, intent, None
+    return start_or_update_fluent_motion(current_action, desired_action, step=10, yaw_step=18)
 
 
 def mission_snapshot():
@@ -2577,14 +2367,9 @@ def mission_snapshot():
         mission = _active_mission or _latest_mission
         if mission is None:
             return None
-        value = {key: item for key, item in mission.items() if key not in ("thread", "lease", "intent_mailbox")}
-        value["intent_outcomes"] = mission["intent_mailbox"].snapshot() if "intent_mailbox" in mission else []
-        value["semantic_intents_enabled"] = SEMANTIC_INTENTS_ENABLED
-        value["executor_fencing_enabled"] = True
-        mailbox = mission.get("intent_mailbox")
-        value["executor_fence"] = mailbox.fence_snapshot() if mailbox is not None else None
+        value = {key: item for key, item in mission.items() if key not in ("thread", "lease")}
+        # Backwards-compatible readback: no semantic execution path exists.
         value["semantic_execution_enabled"] = False
-        value["semantic_execution_disabled_reason"] = SEMANTIC_TRANSPORT_DISABLED_REASON
     now = time.time()
     started_at = value.get("started_at")
     finished_at = value.get("finished_at")
@@ -2629,7 +2414,6 @@ def _autonomous_mission_worker(mission, lease, options):
         if getattr(motion_context, "lease", None) is lease:
             del motion_context.lease
         with mission_lock:
-            mission["intent_mailbox"].close("mission_finished")
             mission["finished_at"] = time.time()
             mission["result"] = result
             mission["error"] = error
@@ -2671,7 +2455,6 @@ def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
         _mission_sequence += 1
         mission = {
             "id": f"mission-{BOOT_ID}-{_mission_sequence}",
-            "intent_mailbox": IntentMailbox(require_fencing=True),
             "mode": mode,
             "state": "starting",
             "duration_s": duration_s,
@@ -2705,36 +2488,6 @@ def cancel_autonomous_mission(mission_id=None, source="mission_cancel", lease_id
             return {"ok": False, "cancelled": False, "reason": "mission_finishing_or_lease_mismatch", "mission": mission_snapshot()}
         error = request_stop(source)
         return {"ok": error is None, "cancelled": True, "error": error, "mission": mission_snapshot(), "status": snapshot()}
-
-
-def observer_stop_request(provided_token, mission_id, event_id=None, reason=None, now=None):
-    """Authenticated, rate-limited, exact-mission stop capability."""
-    global observer_last_stop_at
-    if not OBSERVER_STOP_TOKEN:
-        return {"ok": False, "reason": "observer_stop_disabled", "status_code": 503}
-    if not provided_token or not hmac.compare_digest(str(provided_token), OBSERVER_STOP_TOKEN):
-        return {"ok": False, "reason": "observer_auth_rejected", "status_code": 403}
-    if not mission_id:
-        return {"ok": False, "reason": "mission_id_required", "status_code": 400}
-    with mission_lock:
-        mission = _active_mission
-        if mission is None:
-            return {"ok": False, "reason": "no_active_mission", "status_code": 409, "mission": mission_snapshot()}
-        if str(mission_id) != str(mission["id"]):
-            return {"ok": False, "reason": "mission_id_mismatch", "status_code": 409, "mission": mission_snapshot()}
-    observed_now = time.monotonic() if now is None else float(now)
-    with observer_stop_lock:
-        if observer_last_stop_at is not None and observed_now - observer_last_stop_at < OBSERVER_STOP_MIN_INTERVAL_S:
-            return {"ok": False, "reason": "observer_stop_rate_limited", "status_code": 429}
-        observer_last_stop_at = observed_now
-    result = cancel_autonomous_mission(str(mission_id), source="external_observer")
-    result.update({"reason": result.get("reason") or "observer_stop_delivered",
-                   "status_code": 200 if result.get("ok") else 409,
-                   "event_id": None if event_id is None else str(event_id),
-                   "observer_reason": None if reason is None else str(reason)[:240]})
-    remember("observer_stop_request", mission_id=str(mission_id), event_id=event_id,
-             reason=reason, delivered=bool(result.get("ok")))
-    return result
 
 
 def start_or_continue_fluent_forward(current_action, step):
@@ -3480,8 +3233,6 @@ class Handler(BaseHTTPRequestHandler):
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
                                 "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "modes": ["coverage", "local"]},
-                                "external_observer": {"stop": "POST /observer/stop", "enabled": bool(OBSERVER_STOP_TOKEN),
-                                                      "exact_mission_required": True, "min_interval_s": OBSERVER_STOP_MIN_INTERVAL_S},
                                 "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
             elif p.path == "/motion/profile":
                 self.send_json({"ok": True, "profile": motion_profile_snapshot(),
@@ -3624,12 +3375,6 @@ class Handler(BaseHTTPRequestHandler):
             if p.path == "/stop":
                 err = request_stop("http_post")
                 self.send_json({"ok": err is None, "error": err, "status": snapshot()})
-            elif p.path == "/observer/stop":
-                authorization = self.headers.get("Authorization", "")
-                provided_token = authorization[7:] if authorization.startswith("Bearer ") else ""
-                result = observer_stop_request(provided_token, body.get("mission_id"),
-                                               event_id=body.get("event_id"), reason=body.get("reason"))
-                self.send_json(result, int(result.get("status_code", 500)))
             elif p.path == "/mission/start":
                 result = start_autonomous_mission(
                     mode=body.get("mode", "coverage"),
@@ -3643,12 +3388,6 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/mission/cancel":
                 result = cancel_autonomous_mission(body.get("mission_id"), source="http_mission_cancel", lease_id=body.get("lease_id"))
                 self.send_json(result, 200 if result.get("ok") else 409)
-            elif p.path == "/mission/executor/claim":
-                result = claim_navigation_executor(body)
-                self.send_json(result, 200 if result.get("ok") else 409)
-            elif p.path == "/mission/intent":
-                result = submit_navigation_intent(body)
-                self.send_json(result, 202 if result.get("ok") else 409)
             elif p.path == "/motion/profile":
                 result = configure_stationary_posture(
                     body_height=body.get("body_height"), shoulder_yaw=body.get("shoulder_yaw"),

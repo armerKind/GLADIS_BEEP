@@ -6,46 +6,27 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 
 ## Current state
 
-**Fresh-agent entry point: [docs/HANDOFF.md](docs/HANDOFF.md).** It records the verified offline checkpoint, unresolved perception-to-action integration, and next acceptance tests. Historical trials below are not current deployment guarantees.
+**New session entry point: [docs/HANDOFF.md](docs/HANDOFF.md).** It covers what is verified on hardware, what is ready for live wiring, and the next three engineering tasks.
 
-Current repository bridge source (semantic execution is disabled; see [closed-loop status](docs/CLOSED_LOOP_STATUS.md)):
+`main` holds the **Stack 2** continuous autonomous embodiment architecture plus the hardware, ROS, vision and audio infrastructure. The earlier Stack 1 prototype (cap-search stop-think-act policy, `ClosedLoopExecutor`, bridge `IntentMailbox`, external room-camera observer, fair/presentation scripts and per-phase gate docs) is archived on branch `archive/stack1-cap-prototype`.
 
 ```text
-0.20.9-steering-sweep
+bridge source    0.22.0-stack2-cutover   (not yet deployed)
+bridge deployed  0.21.1-phase-c-audit    (stationary readback verified 2026-11-11)
 ```
 
-Bridge `0.18.8-stop-measure-turns` confirmed that both reverse and short pivots remain physically inconsistent in the constrained pose. Release `0.18.9-lateral-turn-setup` added one narrowly authorized 0.35-second rightward setup shift at step 5 when the right side exceeds 0.55 m; it continuously guards the full envelope and accepts progress only if left clearance gains at least 0.008 m without frontal loss.
+Verified on hardware (stationary, November 11, 2026):
 
-Release `0.19.0-app-analog-motion` moved translation to app analog command `0x11`, explicitly writing both axes. D-pad translation was rejected because it leaves persistent axis state. Live testing then showed that ordinary `walk` reverse moved forward at slow, normal, and high pace.
+- onboard bridge with stop-priority lock split, ~10 Hz six-sector LiDAR guard, Cartographer 2D SLAM with healthy `SubmapList`/`/map`/TF cadence, and A* frontier planning
+- direct MJPEG camera (port 6500, 640x480), moving-frame diversity ring, contact sheets, and live `gemini-3.5-flash-lite` structured scene perception
+- USB microphone and analog speaker streams through PortAudio/ALSA (bind by card name; card numbers swap across boots)
 
-Release `0.19.1-high-walk-reverse` uses app width `100`, analog negative X (`-20`), `high_walk`, and normal pace for reverse, then restores width `50`, normal pace, and the standard `walk` profile after stop. In its completed 0.8-second LiDAR- and SLAM-supervised trial, settled displacement was `x=-0.0564 m`, `y=-0.0007 m`, yaw drift was `3.27 degrees`, front clearance gained `0.031 m`, and rear clearance decreased `0.101 m`. This is the first physically verified straight backward primitive.
+Implemented and tested offline, not yet joined to live producers:
 
-Release `0.19.2-supervised-arcs` adds LiDAR-supervised `turnleft`/`turnright` calibration, raises app-backed measured turn segments from 0.50 to 0.90 seconds, and adds reverse-left/right arcs by combining the verified high-walk negative-X profile with persistent yaw. Reverse arcs retain the 0.42 m full sweep floor, 0.45 m rear floor, 0.35 m side floor, and 0.02 m maximum frontal worsening. Live 1.2-second trials completed in both directions with moving onboard-camera evidence and no visible contact.
+- Stack 2 spatial memory and attention in `beep_agent/`: event envelope and journal, map revision, pose history, place graph, episodes, tactical gate, strategic owner, visual grounding, viewpoint scoring, goal coordinator, atomic checkpoint, model session and observe-only supervisor
+- audio contracts in `beep_audio/`: PCM capture, VAD, echo reference and barge-in, clock alignment, social interruption
 
-Release `0.19.3-fluent-steering` keeps compatible gait active while alternating straight and gentle curve registers from local six-sector LiDAR, adds firmware action `12` as the named `sit`/upward social-camera posture, and exposes the observed near-zero front/rear plus missing-sector pattern as `fall_suspected`. A powered run produced a genuinely changing nine-frame panel and semantic obstacle detection. BEEP's normal vendor-app remote movements in every direction are physically safe and have not caused falls. GLADIS's bridge recreation of reverse is unvalidated: one bridge-commanded high-walk sequence moved toward the obstacle and toppled BEEP, so that bridge path was removed pending faithful app-state reproduction and attitude supervision. Subsequent room trials reduced continuous gait speed, reassess safe curve stops, alternate ineffective turns, and cap consecutive escape maneuvers at four. A bridge command labelled right physically moved toward the frontal obstacle, so autonomous lateral escape also remains disabled until GLADIS reproduces the app correctly.
-
-Historical note: the final powered run removed the forced high-walk/width-100 setup and showed that GLADIS's guessed negative analog value did not yet reproduce app reverse. That blocker is superseded by the later packet capture and `0.20.3-vendor-app-reverse` bridge configuration below; the app-backed bridge path still needs a guarded physical validation.
-
-The historical `0.20.3-vendor-app-reverse` checkpoint has been superseded. The live bridge is `0.20.9-steering-sweep`; the 291-test suite passed and guarded local missions produced SLAM/range evidence of forward translation. The camera frames looked similar across that short straight run, which does not establish a camera failure. LiDAR/SLAM drive continuous exploration; camera panels supply scene context concurrently, without blocking gait while the model thinks. Semantic executor motion is disabled. See [closed-loop status](docs/CLOSED_LOOP_STATUS.md) for trial results and the parallel-observer architecture.
-
-- SDK-backed locomotion through `DOGZILLALib`
-- fresh-LiDAR gates and final SDK stop attempts in autonomous LiDAR-aware controllers
-- conservative forward gait, short supervised reverse recovery, and clearance-gated bounded turns; autonomous arcs and lateral escapes are disabled
-- camera frame capture from the Yahboom MJPEG service
-- named vendor actions such as stretch, pray, and the right-leg `pee` preset
-- continuous LiDAR-supervised approach and marking sequence
-- persistent ROS 2 Cartographer and occupancy-grid services
-- raw-versus-guarded Cartographer pose with stationary-drift and impossible-jump rejection
-- systematic frontier planning over the ROS occupancy grid
-- local presentation-safe LiDAR walking when global localization is not trustworthy
-- coverage-driven room exploration that stops when mapped known-space growth plateaus
-- asynchronous guarded missions with responsive status/cancellation and an independent lease-deadline watchdog
-- continuous moving-camera capture into bounded chronological 4/6/9-frame panels without app-level motor-stop injection
-- LLM panels include the Cartographer occupancy grid, per-frame guarded poses/view yaw, and a current heading marker; invalid/stale localization is explicitly marked, and lens FOV is not claimed
-- optional local external-camera observer contracts with record-only default and authenticated exact-mission stop authority
-- strict Gemini semantic perception, mission-bound persistent agent sessions, autonomous drive arbitration, atomic resume snapshots, and typed body-adapter dispatch
-- Jupyter-based deployment, SLAM reset/export, diagnostics, and speaker playback helpers
-- MAC-bound dual Wi-Fi boot configu...[truncated]
+Semantic perception never drives motors. `scripts/run_moving_eyes.py` updates a persistent `AgentSession` in shadow mode while the onboard bridge owns gait, collision safety, leases and stop. Older bridge releases and physical motion trials are recorded in git history.
 
 ## What “SLAM” means here
 
@@ -60,8 +41,9 @@ This is genuine online mapping with pose-graph SLAM, but it is not a finished co
 ```text
 GLADIS / operator
       |
-      |-- moving-eyes ring + Gemini semantic inference + persistent world model
-      |-- typed semantic skill adapter
+      |-- moving-eyes ring + Gemini scene perception (shadow)
+      |-- Stack 2 agent: journal, spatial memory, tactical/strategic owners
+      |-- typed skill adapter (explore / observe / stop)
       |
       | HTTP over DOGZILLA_WIFI or Tailscale
       v
@@ -82,12 +64,16 @@ Normal autonomy does not depend on an open Jupyter notebook or a responsive remo
 ## Repository layout
 
 ```text
-beep_bridge/       HTTP bridge and frontier planner
+beep_bridge/       onboard HTTP bridge, frontier A* planner, progress monitor
+beep_agent/        Stack 2 embodiment: events/journal, spatial memory, tactical and
+                   strategic owners, grounding, coordinator, checkpoint, session
+beep_eyes/         moving-frame capture ring, contact sheets, Gemini client, scene schema
+beep_audio/        offline PCM capture, VAD, echo/barge-in, clock alignment, social turn-taking
 config/            Cartographer configuration
-systemd/           bridge, Cartographer, and occupancy-grid units
-scripts/           deployment, synchronization, SLAM, capture, and audio helpers
-tests/             planner, bridge integration, pose-guard, and behavior tests
-docs/              architecture, API, deployment, and network notes
+systemd/           bridge, Cartographer, occupancy-grid and vendor-app units
+scripts/           deployment, synchronization, SLAM, capture, perception and audio helpers
+tests/             unit and offline integration tests for all of the above
+docs/              handoff, architecture, bridge API and deployment
 assets/ros_maps/   selected historical Cartographer artifacts
 maps/              placeholder for ignored generated bridge maps
 ```
@@ -119,20 +105,20 @@ See [`docs/bridge_api.md`](docs/bridge_api.md) for parameters and safety semanti
 ## Useful scripts
 
 ```bash
-scripts/check_bridge.sh                 # Check live bridge health
-scripts/capture_bridge_state.sh         # Capture status/maps/frame locally
-scripts/sync_from_pi.py                 # Pull bridge and selected Pi artifacts
-scripts/jupyter_deploy_bridge.py        # Upload bridge/planner/config and restart
-scripts/jupyter_reset_slam.py           # Start a clean Cartographer trajectory
-scripts/jupyter_save_slam.py            # Finish and export pbstream/PGM/YAML
+scripts/check_bridge.sh                  # Check live bridge health
+scripts/capture_bridge_state.sh          # Capture status/maps/frame locally
+scripts/sync_from_pi.py                  # Pull bridge and selected Pi artifacts
+scripts/jupyter_deploy_bridge.py         # Upload bridge/planner/config and restart
+scripts/jupyter_reset_slam.py            # Start a clean Cartographer trajectory
+scripts/jupyter_save_slam.py             # Finish and export pbstream/PGM/YAML
 scripts/jupyter_play_audio.py FILE.mp3   # Upload and play through Pi analog audio
 scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency, and Pi resources
-scripts/replay_motion_policy.py          # Replay captured LiDAR observations through old/current steering
-scripts/run_beep_eyes.py                 # Temporal camera/replay → Gemini → typed shadow policy
-scripts/run_moving_eyes.py               # Continuous 4/6/9-frame moving vision → world-model planning
-scripts/run_beep_mission.py              # Persistent world → autonomous goal → optional typed dispatch
-scripts/install_systemd_service.py      # Install the bridge systemd service
-scripts/save_slam_map.sh                # Pi-side Cartographer exporter
+scripts/run_moving_eyes.py               # Continuous 4/6/9-frame moving vision → shadow AgentSession
+scripts/run_beep_explore.py              # One bounded coverage mission + parallel moving eyes
+scripts/run_beep_autonomy.py             # Offline observe-only supervisor replay
+scripts/replay_goal_coordinator.py       # Offline goal-coordinator replay over recorded packets
+scripts/install_systemd_service.py       # Install the bridge systemd service
+scripts/save_slam_map.sh                 # Pi-side Cartographer exporter
 ```
 
 Jupyter helpers default to `192.168.8.88`; set `BEEP_HOST=beep.tailb08b32.ts.net` for the Tailscale path. The source retains Yahboom's vendor-default Jupyter password for the stock image; use `BEEP_JUPYTER_PASSWORD` for any changed credential and never commit private alternatives or tokens.
@@ -188,24 +174,18 @@ Run validation from the repository root:
 
 ```bash
 PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m compileall -q beep_agent beep_eyes beep_bridge scripts tests
+python3 -m compileall -q beep_agent beep_audio beep_bridge beep_eyes scripts tests
 git diff --check
 ```
 
-The eyes subsystem supports fully offline saved-frame replay. BEEP is required only at explicit hardware-validation gates; see the continuous-development procedure in `docs/EYES_ARCHITECTURE.md`.
+Behind an HTTP proxy, set `NO_PROXY=127.0.0.1,localhost` so the loopback bridge tests reach their local servers. Vision and the Stack 2 modules run fully offline against saved frames and fixtures; BEEP is needed only for hardware validation.
 
 ## Further documentation
 
-- [`docs/AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md`](docs/AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md) — canonical system-level design, proposed tactical attention, visual grounding, memory, motor transport, audio, and hardware gates
-- [`docs/architecture.md`](docs/architecture.md) — onboard components, mapping layers, autonomy modes, and limits
+- [`docs/HANDOFF.md`](docs/HANDOFF.md) — one-page onboarding: cutover, verified hardware, Stack 2 modules, next tasks
+- [`docs/AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md`](docs/AUTONOMOUS_EMBODIMENT_ARCHITECTURE.md) — canonical system design: tactical attention, visual grounding, memory, motor transport, audio, and hardware gates
 - [`docs/bridge_api.md`](docs/bridge_api.md) — HTTP API and safety behavior
 - [`docs/deployment.md`](docs/deployment.md) — deployment, systemd, Jupyter, SLAM reset/export, and verification
-- [`docs/fair_remote_control_status.md`](docs/fair_remote_control_status.md) — current network topology and historical adapter notes
-- [`docs/perception_baseline.md`](docs/perception_baseline.md) — measured camera, microphone, bridge-latency, and Pi-resource baseline
-- [`docs/EYES_ARCHITECTURE.md`](docs/EYES_ARCHITECTURE.md) — multipanel Gemini eyes, typed proposals, offline workflow, and rollout gates
-- [`docs/EMBODIED_MIDDLE_LAYER.md`](docs/EMBODIED_MIDDLE_LAYER.md) — persistent world, personality/drives, autonomous goals, and callable body skills
-- [`docs/EXTERNAL_OBSERVER.md`](docs/EXTERNAL_OBSERVER.md) — local room-camera supervision, privacy, evidence, and bounded stop authority
-- [`docs/SLAM_PRESENTATION_RUNBOOK.md`](docs/SLAM_PRESENTATION_RUNBOOK.md) — preserved synchronous Friday demo and staged rehearsal
 - [`assets/ros_maps/README.md`](assets/ros_maps/README.md) — retained Cartographer artifacts
 
 ## Version-control policy
