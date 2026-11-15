@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import re
 import unittest
@@ -34,6 +35,23 @@ class SlamConfigTests(unittest.TestCase):
         self.assertNotIn("'restart', 'YahboomStart'", text)
         self.assertIn("'XGO_Start': 'inactive'", text)
         self.assertIn("'YahboomStart': 'active'", text)
+
+    def test_reset_is_stopped_fenced_and_checks_remote_execution(self):
+        text = RESET_SCRIPT.read_text()
+        tree = ast.parse(text)
+        method = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == 'reset_slam')
+        remote = next(node.value.value for node in ast.walk(method)
+                      if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                      and target.id == 'code' for target in node.targets)
+                      and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))
+        compile(remote, '<remote-slam-reset>', 'exec')
+        self.assertLess(remote.index('require_stopped()'), remote.index("'stop', 'XGO_Start'"))
+        self.assertIn('if index > 0:\n        require_stopped()', remote)
+        self.assertIn("'is-active','YahboomStart'", remote)
+        self.assertIn('msg.get("parent_header", {}).get("msg_id")', text)
+        self.assertIn('msg.get("content", {}).get("status") != "ok"', text)
+        self.assertIn('session.delete(', text)
 
 
 if __name__ == "__main__":

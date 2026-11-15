@@ -4,9 +4,9 @@
 
 See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and next engineering tasks.
 
-Repository bridge source: `0.22.0-stack2-cutover` (not yet deployed). It removes the Stack 1 intent mailbox, `/mission/intent`, `/mission/executor/claim` and `/observer/stop`; the deployed bridge still serves them.
+Repository bridge source: `0.22.1-stack2-live-observe`. It removes the Stack 1 intent mailbox, `/mission/intent`, `/mission/executor/claim` and `/observer/stop`.
 
-Last confirmed deployed/read-back bridge: `0.21.1-phase-c-audit` (November 11, 2026), plus the **readback-only** semantic-disable field in `ddb363a`: stopped, no lease, fresh six-sector scan and usable occupancy grid. Earlier guarded motion trials were on `0.20.9-steering-sweep` (November 7); they do not validate the newer bridge's physical stop priority. Recheck identity and sensors before any future motion.
+Last confirmed deployed/read-back bridge: `0.22.1-stack2-live-observe` (November 15, 2026). **Stationary Stage 1 passed** after a stopped-only downstream SLAM reset and guarded vendor camera patch. Across eleven seconds, `robot_monotonic_s` advanced `1747.49 → 1758.50`, scans `534 → 644`, verified map revision stayed `0`, `/slam_map` was usable on all twelve polls, and occupancy snapshots advanced `grid-52 → grid-63`. Ten successive `/frame.jpg` responses were decodable 640×480 JPEGs. `last_command=app:stop` and `last_command_at=1794750002.9193337` stayed unchanged; no new `app_send` or stop events appeared. Final readback: no mission, `moving=false`, lease null, `slam.usable=true`. Earlier failed gate and root-cause details are in `HANDOFF.md`. This is **not** moving-hardware validation.
 
 Run the offline suite before any deployment (see the README's Development section). Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
 
@@ -78,6 +78,8 @@ The deployment helper:
 6. compiles the Python source on BEEP,
 7. restarts `beep-bridge.service`,
 8. verifies that the service is active.
+
+For the **opt-in** vendor camera disconnect fix, set `BEEP_PATCH_VENDOR_CAMERA=1` when deploying while stationary. It uploads `scripts/patch_vendor_app.py`, rejects an unfamiliar vendor single-client/camera source shape, checks the stopped/no-lease mission again and verifies startup stretch is disabled, backs up the installed vendor file, patches only Standard-mode disconnect persistence, then restarts the vendor camera service before the bridge. The control socket still closes after each request; never hold the vendor's single-client port 6000 socket across a camera read and block motor/stop packets. Applied on the Pi on November 15; source was read back, the service was active, and ten valid JPEGs passed the zero-stop gate. Repeat after a vendor-image replacement.
 
 The helper checks stopped/no lease and rejects an active mission before upload and again just before restart; a completed mission in the `/mission` history is allowed. **These are observational checks, not an atomic maintenance lock.** Do not run deployment while another client can start motion concurrently. If the helper errors or times out after upload, query `/health` and the service before retrying; service activation can lag its HTTP listener. It cleans up its temporary Jupyter kernel even on failures.
 
@@ -165,7 +167,7 @@ Use this after moving BEEP to a different room or after raw localization/map cor
 python3 scripts/jupyter_reset_slam.py
 ```
 
-The helper stops the duplicate `XGO_Start` launch, restarts the authoritative `YahboomStart` LiDAR publisher, then restarts Cartographer, occupancy-grid publication, and the bridge. It discards the active unsaved trajectory. Verify numeric LiDAR sectors, a fresh guarded pose near the new origin, and a fresh non-empty map before autonomous movement.
+The helper stops the duplicate `XGO_Start` launch, **keeps** the healthy `YahboomStart` publisher, requires its scan to remain fresh, then restarts Cartographer, occupancy-grid publication, and the bridge. It refuses active motion/leases and discards the unsaved trajectory. On November 15, XGO was already inactive, YahboomStart was active with one MS200 publisher, the base/laser TF chain was present, and Cartographer logged 10 Hz scan insertion and submaps; the old raw pose was approximately (−92.6, −80.7) m and its 1975×1747 grid exceeded the bridge's million-cell ceiling. This stopped-only downstream reset restored a 131×107 grid, a fresh guarded pose, revision 0 and usable `/slam_map`; it was a mapping-origin reset, not evidence that TF was missing. Verify numeric sectors, a fresh guarded pose near the new origin, and a fresh non-empty map before any autonomous movement.
 
 ### Pose freshness nuance
 

@@ -39,6 +39,24 @@ OLD_TCP = 'task_tcp = threading.Thread(target=start_tcp_server, name="task_tcp",
 NEW_TCP = 'task_tcp = threading.Thread(target=start_tcp_server, name="task_tcp", args=("0.0.0.0", 6000))'
 OLD_ACTION = '    g_dog.action(14) # 开机展示伸懒腰动作'
 NEW_ACTION = "    if os.environ.get('DOGZILLA_SKIP_STARTUP_ACTION') != '1':\n        g_dog.action(14) # 开机展示伸懒腰动作"
+# Yahboom ties MJPEG production to g_mode. The TCP listener accepts only one
+# client, so a camera socket held across every frame would obstruct emergency
+# motor control. Preserve Standard camera mode across its normal disconnect
+# instead; retain the original cleanup for all other app modes.
+OLD_CAMERA_DISCONNECT = '''        print("socket disconnected!")
+        g_socket.close()
+        g_mode = 'Home'
+'''
+NEW_CAMERA_DISCONNECT = '''        print("socket disconnected!")
+        g_socket.close()
+        # Standard mode enables MJPEG; keeping the mode is not a motor command.
+        # The single-client control socket still closes for the next command.
+        if g_mode != 'Standard':
+            g_mode = 'Home'
+'''
+CAMERA_GATES = ("sock.listen(1)",
+                "if g_mode == 'Standard' or g_mode == 'Fullscreen':",
+                "g_mode = 'Standard'")
 
 
 def apply_patch(path: Path) -> bool:
@@ -60,8 +78,20 @@ def apply_patch(path: Path) -> bool:
             raise RuntimeError("unexpected vendor startup-action source")
         text = text.replace(OLD_ACTION, NEW_ACTION)
 
+    # The held-socket alternative would block motor/stop packets on this
+    # single-client listener. Do not patch an unfamiliar vendor camera path.
+    for gate in CAMERA_GATES:
+        if text.count(gate) != 1:
+            raise RuntimeError("unexpected vendor camera gate: " + gate)
+
+    if NEW_CAMERA_DISCONNECT not in text:
+        if text.count(OLD_CAMERA_DISCONNECT) != 1:
+            raise RuntimeError("unexpected vendor camera disconnect source")
+        text = text.replace(OLD_CAMERA_DISCONNECT, NEW_CAMERA_DISCONNECT)
+
     if text == original:
         return False
+    compile(text, str(path), "exec")
 
     backup = path.with_suffix(path.suffix + ".gladis-original")
     if not backup.exists():

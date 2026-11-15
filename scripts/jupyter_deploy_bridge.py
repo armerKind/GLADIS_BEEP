@@ -34,6 +34,8 @@ MAP_REVISION_SRC = Path("beep_agent/map_revision.py")
 SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
 SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map.sh"))
 SERVICE_SRC = Path(os.environ.get("BEEP_SERVICE_SRC", "systemd/beep-bridge.service"))
+PATCH_VENDOR_CAMERA = os.environ.get("BEEP_PATCH_VENDOR_CAMERA", "0") == "1"
+VENDOR_PATCH_SRC = Path("scripts/patch_vendor_app.py")
 BASE = f"http://{HOST}:8888"
 
 def bridge_source_version(content: str) -> str:
@@ -135,6 +137,15 @@ def put_bridge(session: requests.Session, xsrf: str, content: str) -> None:
         )
         service.raise_for_status()
         print("uploaded: /home/pi/beep_bridge/beep-bridge.service")
+    if PATCH_VENDOR_CAMERA:
+        vendor_patch = session.put(
+            f"{BASE}/api/contents/beep_bridge/patch_vendor_app.py",
+            headers=headers,
+            json={"type": "file", "format": "text", "content": VENDOR_PATCH_SRC.read_text()},
+            timeout=10,
+        )
+        vendor_patch.raise_for_status()
+        print("uploaded: /home/pi/beep_bridge/patch_vendor_app.py")
 
 
 async def restart_bridge(session: requests.Session, xsrf: str, expected_version: str) -> None:
@@ -164,6 +175,40 @@ smoke = subprocess.run(['python3', '-c', "import sys; sys.path.insert(0, sys.arg
 print('planner_import', smoke.returncode, smoke.stderr)
 if smoke.returncode:
     raise SystemExit(smoke.returncode)
+if __APPLY_VENDOR_CAMERA_PATCH__:
+    import socket
+    fresh = json.load(urllib.request.urlopen('http://127.0.0.1:8766/mission', timeout=5))
+    active = fresh.get('mission')
+    if ((active is not None and active.get('state') not in ('completed', 'failed', 'cancelled'))
+            or fresh['status'].get('moving') is not False
+            or fresh['status'].get('motion_lease_id') is not None):
+        raise SystemExit('refusing vendor camera patch/restart during motion or active lease')
+    unit_env = subprocess.run(['systemctl','show','beep-vendor-app','-p','Environment'],
+                              text=True, capture_output=True, timeout=5)
+    if unit_env.returncode or 'DOGZILLA_SKIP_STARTUP_ACTION=1' not in unit_env.stdout:
+        raise SystemExit('refusing vendor app restart: startup stretch is not disabled')
+    patch = subprocess.run(['python3',str(base/'patch_vendor_app.py')],
+                           text=True,capture_output=True,timeout=10)
+    print('vendor_camera_patch',patch.returncode,patch.stdout.strip(),patch.stderr.strip())
+    if patch.returncode:
+        raise SystemExit('vendor source mismatch; original app left running')
+    vendor = subprocess.run(['sudo','systemctl','restart','beep-vendor-app'],
+                            text=True,capture_output=True,timeout=25)
+    print('vendor_app_restart',vendor.returncode,vendor.stderr.strip())
+    if vendor.returncode:
+        raise SystemExit(vendor.returncode)
+    for attempt in range(20):
+        try:
+            with socket.create_connection(('127.0.0.1',6000),timeout=.5):
+                pass
+            with socket.create_connection(('127.0.0.1',6500),timeout=.5):
+                pass
+            print('vendor_camera_ports_ready',6000,6500)
+            break
+        except OSError:
+            if attempt == 19:
+                raise SystemExit('vendor camera/control ports did not become ready')
+            time.sleep(.5)
 unit = base/'beep-bridge.service'
 if unit.exists():
     install = subprocess.run(['sudo','install','-m','0644',str(unit),'/etc/systemd/system/beep-bridge.service'], text=True, capture_output=True, timeout=10)
@@ -275,6 +320,7 @@ else:
     print('alive', proc.poll() is None)
 '''
     code = code.replace('__EXPECTED_VERSION__', json.dumps(expected_version))
+    code = code.replace('__APPLY_VENDOR_CAMERA_PATCH__', str(PATCH_VENDOR_CAMERA))
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"
     try:
         async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8) as ws:
@@ -321,6 +367,9 @@ def main() -> int:
         return 2
     if not SERVICE_SRC.exists():
         print(f"missing service source: {SERVICE_SRC}", file=sys.stderr)
+        return 2
+    if PATCH_VENDOR_CAMERA and not VENDOR_PATCH_SRC.exists():
+        print(f"missing vendor patch source: {VENDOR_PATCH_SRC}", file=sys.stderr)
         return 2
     content = BRIDGE_SRC.read_text()
     expected_version = bridge_source_version(content)

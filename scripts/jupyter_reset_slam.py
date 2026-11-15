@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 
@@ -26,12 +27,33 @@ async def reset_slam(session: requests.Session, xsrf: str) -> None:
     cookie = "; ".join(f"{c.name}={c.value}" for c in session.cookies)
     code = r'''
 import subprocess, time
+import json, urllib.request
+def require_stopped():
+    data = json.load(urllib.request.urlopen('http://127.0.0.1:8766/mission', timeout=5))
+    mission = data.get('mission')
+    status = data.get('status') or {}
+    if ((mission is not None and mission.get('state') not in ('completed', 'failed', 'cancelled'))
+            or status.get('moving') is not False or status.get('motion_lease_id') is not None):
+        raise RuntimeError('refusing SLAM reset during active motion or lease')
+require_stopped()
 steps = [
     (['sudo', 'systemctl', 'stop', 'XGO_Start'], 2),
     (['sudo', 'systemctl', 'restart', 'beep-cartographer', 'beep-occupancy-grid'], 4),
     (['sudo', 'systemctl', 'restart', 'beep-bridge'], 3),
 ]
-for command, pause_s in steps:
+for index, (command, pause_s) in enumerate(steps):
+    if index > 0:
+        require_stopped()
+    if index == 1:
+        lidar = subprocess.run(['systemctl','is-active','YahboomStart'],
+                               text=True,capture_output=True,timeout=5)
+        if lidar.stdout.strip() != 'active':
+            raise RuntimeError('authoritative YahboomStart LiDAR is not active')
+        observed = json.load(urllib.request.urlopen('http://127.0.0.1:8766/status', timeout=5))
+        scan_age = observed.get('scan_age_s')
+        if (not isinstance(scan_age, (int, float)) or not 0 <= scan_age <= .6
+                or observed.get('scan_count', 0) < 1):
+            raise RuntimeError('authoritative YahboomStart scan is not fresh after XGO stop')
     result = subprocess.run(command, text=True, capture_output=True, timeout=40)
     print('step', command, result.returncode, result.stderr.strip())
     if result.returncode:
@@ -52,30 +74,52 @@ for service, wanted in expected.items():
         raise SystemExit(1)
 '''
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"
-    async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8, ping_interval=None) as ws:
-        message = {
-            "header": {"msg_id": str(uuid.uuid4()), "username": "gladis", "session": str(uuid.uuid4()), "msg_type": "execute_request", "version": "5.3"},
-            "parent_header": {}, "metadata": {},
-            "content": {"code": code, "silent": False, "store_history": False, "user_expressions": {}, "allow_stdin": False, "stop_on_error": True},
-            "channel": "shell", "buffers": [],
-        }
-        await ws.send(json.dumps(message))
-        deadline = time.time() + 60
-        output: list[str] = []
-        while time.time() < deadline:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.time())))
-            if msg.get("msg_type") == "stream":
-                output.append(msg["content"].get("text", ""))
-            elif msg.get("msg_type") == "error":
-                raise RuntimeError(json.dumps(msg["content"]))
-            elif msg.get("msg_type") == "execute_reply":
-                print("".join(output), end="")
-                return
-        raise TimeoutError("SLAM reset timed out")
+    try:
+        async with websockets.connect(uri, additional_headers={"Cookie": cookie}, open_timeout=8, ping_interval=None) as ws:
+            message = {
+                "header": {"msg_id": str(uuid.uuid4()), "username": "gladis", "session": str(uuid.uuid4()), "msg_type": "execute_request", "version": "5.3"},
+                "parent_header": {}, "metadata": {},
+                "content": {"code": code, "silent": False, "store_history": False, "user_expressions": {}, "allow_stdin": False, "stop_on_error": True},
+                "channel": "shell", "buffers": [],
+            }
+            await ws.send(json.dumps(message))
+            deadline = time.monotonic() + 75
+            output: list[str] = []
+            while time.monotonic() < deadline:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.monotonic())))
+                if msg.get("parent_header", {}).get("msg_id") != message["header"]["msg_id"]:
+                    continue
+                if msg.get("msg_type") == "stream":
+                    output.append(msg["content"].get("text", ""))
+                elif msg.get("msg_type") == "error":
+                    raise RuntimeError("remote SLAM reset error: " + json.dumps(msg["content"]))
+                elif msg.get("msg_type") == "execute_reply":
+                    print("".join(output), end="")
+                    if msg.get("content", {}).get("status") != "ok":
+                        raise RuntimeError("remote SLAM reset failed: " + json.dumps(msg["content"]))
+                    return
+            raise TimeoutError("SLAM reset timed out")
+    finally:
+        original_error = sys.exc_info()[0]
+        try:
+            session.delete(f"{BASE}/api/kernels/{kernel_id}",
+                           headers=headers, timeout=8).raise_for_status()
+        except Exception:
+            if original_error is None:
+                raise
+            print("warning: SLAM reset kernel cleanup failed", file=sys.stderr)
 
 
 def main() -> int:
     session, xsrf = login()
+    preflight = session.get(f"http://{HOST}:8766/mission", timeout=5)
+    preflight.raise_for_status()
+    status = preflight.json()
+    mission = status.get("mission")
+    if ((mission is not None and mission.get("state") not in ("completed", "failed", "cancelled"))
+            or status.get("status", {}).get("moving") is not False
+            or status.get("status", {}).get("motion_lease_id") is not None):
+        raise RuntimeError("refusing SLAM reset during active motion or lease")
     asyncio.run(reset_slam(session, xsrf))
     return 0
 

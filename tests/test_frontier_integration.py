@@ -86,7 +86,10 @@ class FrontierIntegrationTests(unittest.TestCase):
              patch.object(bridge, "_map_epoch", 0), \
              patch.object(bridge, "_trajectory_ids", frozenset()), \
              patch.object(bridge, "_map_snapshot_sequence", 0):
+            self.assertFalse(bridge.submap_callback(SimpleNamespace(submap=[])))
+            self.assertIn("empty submap list", bridge.snapshot()["slam"]["submap_error"])
             self.assertTrue(bridge.submap_callback(SimpleNamespace(submap=[item(0)])))
+            self.assertIsNone(bridge.snapshot()["slam"].get("submap_error"))
             self.assertTrue(bridge.occupancy_callback(grid))
             first = bridge.slam_map_snapshot()
             self.assertEqual(first["boot_id"], bridge.BOOT_ID)

@@ -1014,7 +1014,7 @@ def submap_callback(msg):
                                                       map_epoch=_map_epoch, healthy=True)
             slam = dict(state.get("slam") or {})
             slam.update(map_epoch=_map_epoch, map_revision=revision,
-                        map_revision_status=status)
+                        map_revision_status=status, submap_error=None)
             state["slam"] = slam
         return True
     except Exception as exc:
