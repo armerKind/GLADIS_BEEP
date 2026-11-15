@@ -124,7 +124,7 @@ class LiveBridgeObserver:
                 mission: dict, slam_map: dict, perception: dict) -> dict:
         context = _context(current, mission, slam_map)
         previous = _identity(before)
-        if (previous != _identity(after) or previous[:4] != _identity(current)[:4]
+        if (previous[:4] != _identity(after)[:4] or previous[:4] != _identity(current)[:4]
                 or before.get('motion_lease_id') != context.lease_id
                 or after.get('motion_lease_id') != context.lease_id
                 or before.get('boot_id') != context.boot_id

@@ -27,6 +27,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
     def test_mock_moving_mission_builds_panel_and_semantic_plan_without_dispatch(self):
         frame = jpeg()
         seen_posts = []
+        map_counter = [0]
         started_at = time.time()
 
         class Handler(BaseHTTPRequestHandler):
@@ -35,10 +36,12 @@ class MovingEyesRunnerTests(unittest.TestCase):
                     body = frame
                     content_type = "image/jpeg"
                 elif self.path == "/slam_map":
+                    map_counter[0] += 1
+                    map_snapshot_id = f"grid-{map_counter[0]}"
                     body = json.dumps({
                         "ok": True, "boot_id": "boot-live", "map_epoch": 0,
                         "map_revision": 0, "map_revision_status": "verified",
-                        "map_snapshot_id": "grid-1", "frame_id": "map", "width": 4, "height": 4,
+                        "map_snapshot_id": map_snapshot_id, "frame_id": "map", "width": 4, "height": 4,
                         "resolution_m": 0.1, "origin_x": -0.2, "origin_y": -0.2,
                         "origin_yaw": 0.0, "map_age_s": 0.1, "known_cells": 12,
                         "occupied_cells": 4,
@@ -58,7 +61,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
                         "sectors": {"front": 1.2},
                         "slam": {"usable": True, "pose_valid": True, "pose_age_s": 0.03,
                                  "map_epoch": 0, "map_revision": 0,
-                                 "map_revision_status": "verified", "map_snapshot_id": "grid-1",
+                                 "map_revision_status": "verified", "map_snapshot_id": f"grid-{max(1, map_counter[0])}",
                                  "map_age_s": 0.1, "pose_guard_reason": "moving_update"},
                     }).encode()
                     content_type = "application/json"
@@ -86,6 +89,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 pass
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -140,9 +144,14 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 self.assertTrue((run / "stack2_checkpoint.json").exists())
                 records = [json.loads(row) for row in (run / "event_journal.jsonl").read_text().splitlines()]
                 self.assertEqual(len(records), 2)
+                self.assertGreaterEqual(map_counter[0], 3)
+                self.assertEqual([row["map_revision"] for row in records], [0, 0])
+                self.assertNotEqual(records[0]["map_snapshot_id"], records[1]["map_snapshot_id"])
                 self.assertTrue(all(row["timestamp_quality"] == "ingest_approximate"
                                     and row["capture_local_transform"] is None for row in records))
                 self.assertTrue(all(not item["stack2"]["motor_authority"] for item in semantics))
+                self.assertTrue(all(item["stack2"]["coordinator_action"] == "continue_local"
+                                    for item in semantics))
                 self.assertEqual(seen_posts, [])
         finally:
             server.shutdown()

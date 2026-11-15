@@ -1107,7 +1107,6 @@ def ros_thread():
         from rclpy.node import Node
         from sensor_msgs.msg import LaserScan
         from nav_msgs.msg import OccupancyGrid
-        from cartographer_ros_msgs.msg import SubmapList
         from rclpy.time import Time
         from tf2_ros import Buffer, TransformListener
     except Exception as e:
@@ -1115,13 +1114,23 @@ def ros_thread():
             state["last_error"] = "rclpy import failed: " + repr(e)
         return
 
+    try:
+        from cartographer_ros_msgs.msg import SubmapList
+    except Exception as exc:
+        SubmapList = None
+        with state_lock:
+            slam = dict(state.get("slam") or {})
+            slam["submap_error"] = repr(exc)
+            state["slam"] = slam
+
     class ScanNode(Node):
         def __init__(self):
             super().__init__("beep_bridge_scan")
             self.create_subscription(LaserScan, "/scan", scan_callback, 10)
             self.map_feed_shed = False
             self.map_subscription = self.create_subscription(OccupancyGrid, "/map", self.receive_map, 1)
-            self.create_subscription(SubmapList, "/submap_list", submap_callback, 10)
+            if SubmapList is not None:
+                self.create_subscription(SubmapList, "/submap_list", submap_callback, 10)
             self.tf_buffer = Buffer()
             self.tf_listener = TransformListener(self.tf_buffer, self)
             self.accepted_slam_pose = None
@@ -2295,7 +2304,9 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     last_escape_action = None
                     consecutive_escape_actions = 0
                     total_escape_actions = 0
-                    desired_action = choose_fluent_steering(sec, current_action=current_action)
+                    desired_action = choose_fluent_steering(
+                        sec, current_action=current_action, bias=active_mission_bias(),
+                        yaw=(st.get("pose") or {}).get("yaw"))
                     current_action, gait_started = apply_navigation_course(current_action, desired_action)
                     segment_s = min(0.50, remaining)
                     supervised = (supervise_lidar_motion(current_action, segment_s)
@@ -2433,9 +2444,11 @@ def mission_snapshot():
         mission = _active_mission or _latest_mission
         if mission is None:
             return None
-        value = {key: item for key, item in mission.items() if key not in ("thread", "lease")}
+        value = {key: item for key, item in mission.items() if key not in ("thread", "lease", "bias")}
         # Backwards-compatible readback: no semantic execution path exists.
         value["semantic_execution_enabled"] = False
+        value["motor_authority"] = False
+        value["bias"] = _unexpired_mission_bias(mission) if mission is _active_mission else None
     now = time.time()
     started_at = value.get("started_at")
     finished_at = value.get("finished_at")
@@ -2450,6 +2463,57 @@ def mission_snapshot():
     return value
 
 
+def live_mission_owner(mission, lease, body):
+    """Require the exact active mission, lease and boot for advisory writes."""
+    return (isinstance(body, dict) and mission is not None and lease is not None
+            and mission is _active_mission and mission.get("lease") is lease
+            and lease is _active_motion_lease and not lease.cancel_event.is_set()
+            and not lease.ended_event.is_set() and time.monotonic() < lease.deadline
+            and mission.get("state") in ("starting", "running")
+            and body.get("boot_id") == BOOT_ID
+            and body.get("mission_id") == mission.get("id")
+            and body.get("lease_id") == lease.lease_id)
+
+def _unexpired_mission_bias(mission):
+    bias = mission.get("bias")
+    if bias is None or time.monotonic() >= bias["expires_at_monotonic"]:
+        return None
+    return {key: bias[key] for key in ("preferred_direction", "preferred_bearing_rad")}
+
+def active_mission_bias():
+    """Return only the live fenced mission's current, unexpired advice."""
+    with mission_lock, motion_owner_lock:
+        mission = _active_mission
+        lease = None if mission is None else mission.get("lease")
+        if (mission is None or lease is None or lease is not _active_motion_lease
+                or lease.cancel_event.is_set() or lease.ended_event.is_set()
+                or time.monotonic() >= lease.deadline):
+            return None
+        return _unexpired_mission_bias(mission)
+
+def set_mission_bias(body):
+    """Store a bounded hint; never acquire motion or send a motor packet."""
+    with mission_lock, motion_owner_lock:
+        mission = _active_mission
+        lease = None if mission is None else mission.get("lease")
+        if mission is None or lease is None or not live_mission_owner(mission, lease, body):
+            return {"ok": False, "reason": "mission_or_lease_mismatch", "motor_authority": False}
+        ttl = body.get("ttl_s")
+        direction = body.get("preferred_direction")
+        bearing = body.get("preferred_bearing_rad")
+        if (type(ttl) not in (float, int) or not math.isfinite(ttl) or not 0 < ttl <= 8.0
+                or direction not in (None, "left", "straight", "right")
+                or (bearing is not None and (type(bearing) not in (float, int)
+                                            or not math.isfinite(bearing)
+                                            or abs(bearing) > math.pi))):
+            return {"ok": False, "reason": "invalid_or_unbounded_bias", "motor_authority": False}
+        mission["bias"] = (None if direction is None and bearing is None else
+                           {"preferred_direction": direction, "preferred_bearing_rad": bearing,
+                            "expires_at_monotonic": time.monotonic() + ttl})
+        return {"ok": True, "accepted": True, "motor_authority": False,
+                "semantic_execution_enabled": False, "ttl_s": ttl,
+                "mission_id": mission["id"], "lease_id": lease.lease_id}
+
 def _autonomous_mission_worker(mission, lease, options):
     global _active_mission, _latest_mission
     motion_context.lease = lease
@@ -2460,14 +2524,19 @@ def _autonomous_mission_worker(mission, lease, options):
     result = None
     error = None
     try:
-        result = lidar_walk(
-            max_duration=mission["duration_s"],
-            save=bool(options.get("save", False)),
-            coverage_goal=mission["mode"] == "coverage",
-            min_duration=float(options.get("min_duration", mission["duration_s"])),
-            coverage_window=float(options.get("coverage_window", 45.0)),
-            min_growth_cells=int(options.get("min_growth_cells", 150)),
-        )
+        if mission["mode"] == "frontier":
+            result = frontier_explore(max_duration=mission["duration_s"],
+                                      save=bool(options.get("save", False)),
+                                      chaos=float(options.get("chaos", 0.45)))
+        else:
+            result = lidar_walk(
+                max_duration=mission["duration_s"],
+                save=bool(options.get("save", False)),
+                coverage_goal=mission["mode"] == "coverage",
+                min_duration=float(options.get("min_duration", mission["duration_s"])),
+                coverage_window=float(options.get("coverage_window", 45.0)),
+                min_growth_cells=int(options.get("min_growth_cells", 150)),
+            )
     except Exception as exc:
         error = repr(exc)
         remember("autonomous_mission_exception", mission_id=mission["id"], error=error)
@@ -2500,13 +2569,13 @@ def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
     """Start one fluent navigation mission and return without blocking HTTP."""
     global _active_mission, _mission_sequence
     mode = str(mode).strip().lower()
-    if mode not in ("coverage", "local"):
-        raise ValueError("mission mode must be coverage or local")
+    if mode not in ("coverage", "local", "frontier"):
+        raise ValueError("mission mode must be coverage, local, or frontier")
     duration_s = min(max(float(duration_s), 5.0), 600.0 if mode == "coverage" else 180.0)
     initial = snapshot()
     if not scan_ok(initial):
         return {"ok": False, "reason": "scan_stale_or_missing_before_start", "status": initial}
-    if mode == "coverage" and not slam_ok(initial):
+    if mode in ("coverage", "frontier") and not slam_ok(initial):
         return {"ok": False, "reason": "slam_unusable_before_start", "status": initial}
     initial_action, _, initial_reason = choose_explore_action(initial.get("sectors") or {})
     if initial_action == "stop":
@@ -2564,7 +2633,7 @@ def start_or_continue_fluent_forward(current_action, step):
     return "forward", True
 
 
-def choose_fluent_steering(sectors, current_action=None):
+def choose_fluent_steering(sectors, current_action=None, bias=None, yaw=None):
     """Choose a gentle in-gait heading correction from the current local envelope."""
     values = validated_sector_values(sectors)
     if values is None:
@@ -2572,6 +2641,22 @@ def choose_fluent_steering(sectors, current_action=None):
     left_open = min(values["front_left"], values["left"])
     right_open = min(values["front_right"], values["right"])
     imbalance = left_open - right_open
+    # Advice cannot relax the forward envelope or six-sector turning sweep.
+    # The reactive stop/backoff check already ran before this function.
+    if (bias and min(values.values()) >= TURN_SWEEP_M
+            and values["front"] >= FORWARD_CORRIDOR_M
+            and min(values["front_left"], values["front_right"]) >= FOOTPRINT_DIAGONAL_M
+            and min(values["left"], values["right"]) >= FOOTPRINT_SIDE_M
+            and values["rear"] >= FOOTPRINT_REAR_M):
+        direction = bias.get("preferred_direction")
+        bearing = bias.get("preferred_bearing_rad")
+        if bearing is not None and yaw is not None and math.isfinite(float(yaw)):
+            delta = (float(bearing) - float(yaw) + math.pi) % (2 * math.pi) - math.pi
+            direction = "left" if delta > 0.25 else "right" if delta < -0.25 else "straight"
+        if direction in ("left", "right"):
+            return "curveleft" if direction == "left" else "curveright"
+        if direction == "straight":
+            return "forward"
     # A clear forward corridor does not need a turn just because one side is
     # more open. A curve also needs a viable full sweep, including the rear.
     if (values["front"] >= 1.25 or min(values.values()) < TURN_SWEEP_M or
@@ -2714,7 +2799,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                     excluded_cells = [grid.world_to_cell(x, y) for x, y in excluded_world]
                     plan = find_frontier_plan(grid, pose_tuple, rng, chaos=chaos,
                                               robot_radius_m=ROBOT_FOOTPRINT_RADIUS_M,
-                                              excluded=excluded_cells)
+                                              excluded=excluded_cells, bias=active_mission_bias())
                     if plan is None:
                         reason = "coverage_complete_or_no_reachable_frontiers"
                         break
@@ -3225,7 +3310,7 @@ def handler_failure_requires_stop(path: str, error: BaseException) -> bool:
     """Keep observation and response-transport failures out of motor control."""
     if isinstance(error, (BrokenPipeError, ConnectionResetError)):
         return False
-    return path not in {"/frame.jpg", "/camera.jpg"}
+    return path not in {"/frame.jpg", "/camera.jpg", "/mission/bias"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3298,7 +3383,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "maps": {"authoritative_slam_grid": "/slam_map", "bridge_trace": "/map?full=1", "robot_frame_scan": "/local_map"},
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
-                                "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "modes": ["coverage", "local"]},
+                                "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "bias": "POST /mission/bias", "modes": ["coverage", "local", "frontier"]},
                                 "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
             elif p.path == "/motion/profile":
                 self.send_json({"ok": True, "profile": motion_profile_snapshot(),
@@ -3449,8 +3534,13 @@ class Handler(BaseHTTPRequestHandler):
                     min_duration=body.get("min_duration", body.get("duration_s", body.get("duration", 180.0))),
                     coverage_window=body.get("coverage_window", 45.0),
                     min_growth_cells=body.get("min_growth_cells", 150),
+                    chaos=body.get("chaos", 0.45),
                 )
                 self.send_json(result, 202 if result.get("accepted") else (409 if result.get("busy") else 412))
+            elif p.path == "/mission/bias":
+                result = set_mission_bias(body)
+                self.send_json(result, 202 if result.get("accepted") else
+                               (400 if result.get("reason") == "invalid_or_unbounded_bias" else 409))
             elif p.path == "/mission/cancel":
                 result = cancel_autonomous_mission(body.get("mission_id"), source="http_mission_cancel", lease_id=body.get("lease_id"))
                 self.send_json(result, 200 if result.get("ok") else 409)

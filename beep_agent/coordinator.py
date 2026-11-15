@@ -159,8 +159,14 @@ class GoalCoordinator:
                 if not context.local_motion_active:
                     return self._decision("await_owner_release", "local lease not yet acknowledged released")
                 if (not context.map_verified or not context.sensors_fresh
-                        or context.map_identity != self._bound_map):
+                        or self._bound_map is None
+                        or context.map_identity[:3] != self._bound_map[:3]):
                     return self._decision("local_revalidate", "map or sensors changed during local lease")
+                # Shadow-attached owners may admit their first strategic goal
+                # while the same externally owned lease keeps moving.
+                if (self._bound_revision == 0 and self.session.strategy["goal_revision"] == 1
+                        and self._bound_owner == expected):
+                    self._bound_revision = 1
                 if self._bound_revision != self.session.strategy["goal_revision"]:
                     return self._decision("goal_revision_changed", "local owner must assess revised goal")
                 return self._decision("continue_local", "onboard controller owns ongoing segment")

@@ -36,6 +36,17 @@ class FrontierPlannerTests(unittest.TestCase):
         self.assertIn(plan["target_cell"][1], range(4, 11))
         self.assertTrue(all(grid.value(x, y) == 0 for x, y in plan["path"]))
 
+    def test_bias_only_scores_reachable_frontier_candidates(self):
+        grid = self.room_grid()
+        base = find_frontier_plan(grid, (0.7, 0.7, 0.0), random.Random(4), chaos=0)
+        biased = find_frontier_plan(grid, (0.7, 0.7, 0.0), random.Random(4), chaos=0,
+                                    bias={"preferred_direction": "left", "preferred_bearing_rad": None})
+        self.assertIsNotNone(base)
+        self.assertIsNotNone(biased)
+        assert base is not None and biased is not None
+        self.assertNotEqual(base["score"], biased["score"])
+        self.assertTrue(all(grid.value(x, y) == 0 for x, y in biased["path"]))
+
     def test_obstacle_inflation_reserves_space_for_legs(self):
         grid = self.room_grid()
         blocked = inflate_obstacles(grid, radius_cells=4)

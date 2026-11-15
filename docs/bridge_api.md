@@ -6,7 +6,7 @@ Current bridge line:
 0.22.1-stack2-live-observe (repository source, not yet deployed)
 ```
 
-The last stationary-verified Pi bridge is `0.21.1-phase-c-audit` (November 11, 2026). The new camera/provenance source has host integration tests only; do not treat those as physical commissioning.
+The last stationary-verified Pi bridge is `0.21.1-phase-c-audit` (November 11, 2026). The new camera/provenance and mission-bias source has host integration tests only; do not treat those as physical commissioning.
 
 Base URLs:
 
@@ -43,6 +43,12 @@ Important status fields:
   `map_revision_status` (`verified` or `unknown`), and `map_snapshot_id`.
   `/slam_map` carries the same provenance, including on a stale-grid error.
   Snapshot IDs advance on validated `/map` callbacks, not on camera requests.
+  A grid refresh can change only `map_snapshot_id`, leaving boot/epoch/revision
+  stable for an attached Stack 2 lease. Missing `cartographer_ros_msgs` sets
+  `slam.submap_error` without disabling `/scan`, `/map`, or TF subscriptions;
+  the systemd unit sources `/home/pi/cartographer_ws2/install/setup.bash`
+  before starting the bridge when present; a failed setup aborts startup,
+  while a missing optional workspace still permits the ROS LiDAR loop.
 
 Cartographer's five-second stationary motion filter can make the generic `slam.active` flag briefly false between stationary pose updates. Controllers apply mode-specific freshness rules. Fresh LiDAR is mandatory for LiDAR-aware approach/navigation routines; generic `/move` and vendor `/action` do not perform scan checks.
 
@@ -246,6 +252,7 @@ for live gait improvisation.
 POST /mission/start
 GET  /mission
 POST /mission/cancel
+POST /mission/bias
 ```
 
 `POST /mission/start` accepts JSON such as:
@@ -261,7 +268,7 @@ POST /mission/cancel
 }
 ```
 
-The bridge validates fresh LiDAR, all six sectors, full-body startup clearance and, for `coverage`, usable guarded SLAM before acquiring an immutable exclusive lease. Unsafe startup geometry returns HTTP `412` without moving. It then returns HTTP `202` with a mission ID while a dedicated onboard worker runs the fluent controller. `GET /mission` and ordinary `/status` requests remain responsive during locomotion, allowing the middle layer to reason, inspect SLAM/LiDAR progress, or cancel without waiting for a long navigation response.
+The bridge validates fresh LiDAR, all six sectors, full-body startup clearance and, for `coverage` and `frontier`, usable guarded SLAM before acquiring an immutable exclusive lease. Unsafe startup geometry returns HTTP `412` without moving. It then returns HTTP `202` with a mission ID while a dedicated onboard worker runs the fluent controller. `GET /mission` and ordinary `/status` requests remain responsive during locomotion, allowing the middle layer to reason, inspect SLAM/LiDAR progress, or cancel without waiting for a long navigation response.
 
 Only one asynchronous or synchronous motion owner may exist. Conflicts return HTTP `409`; they never queue. Cancellation may include the current `mission_id`, preventing a stale planner decision from cancelling a newer mission. Each lease also has an independent deadline watchdog that latches cancellation and attempts repeated SDK stops even if the movement worker stalls.
 
@@ -269,6 +276,26 @@ Modes:
 
 - `coverage`: fluent local LiDAR motion plus guarded-SLAM map/pose and coverage checks, maximum 600 seconds;
 - `local`: fluent local LiDAR motion without a global-map claim, maximum 180 seconds.
+- `frontier`: occupancy-grid frontier planner under the same asynchronous lease,
+  maximum 180 seconds; only this mode consumes frontier-scoring bias.
+
+`POST /mission/bias` accepts JSON including the exact `boot_id`, `mission_id`,
+`lease_id` read from `/status` and `/mission`, plus `ttl_s` in `(0, 8]` and at
+least one of `preferred_direction` (`left`, `straight`, `right`) or
+`preferred_bearing_rad` (finite map-frame radians in `[-π, π]`). Example:
+
+```json
+{"boot_id":"<current-boot>","mission_id":"<current-mission>","lease_id":"<current-lease>","ttl_s":4.0,"preferred_direction":"left"}
+```
+
+Owner mismatch returns 409; invalid hints return 400. Hints expire on the
+robot's monotonic clock and cannot survive lease replacement or cancellation.
+Both preference fields `null` explicitly clear the current hint.
+Bearing takes precedence over direction when both are supplied. Frontier hints
+add only a small heading score to already reachable candidates. Local/coverage
+steering hints apply only with fresh six-sector LiDAR and a forward/turn-sweep
+clearance pass; they neither command motors directly nor enable semantic
+execution (`motor_authority=false`, `semantic_execution_enabled=false`).
 
 The synchronous `/demo_walk`, `/lidar_walk`, `/coverage_explore`, and Friday presentation coordinator remain available unchanged for rehearsal and compatibility.
 

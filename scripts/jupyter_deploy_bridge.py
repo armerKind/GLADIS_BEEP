@@ -267,7 +267,7 @@ else:
             time.sleep(.5)
         except Exception as e:
             print('kill old skipped', repr(e))
-    cmd = ['bash','-lc','source /opt/ros/foxy/setup.bash; source /home/pi/cartographer_ws2/install/setup.bash 2>/dev/null || true; exec python3 /home/pi/beep_bridge/beep_bridge.py']
+    cmd = ['bash','-lc','source /opt/ros/foxy/setup.bash && { if test -f /home/pi/cartographer_ws2/install/setup.bash; then source /home/pi/cartographer_ws2/install/setup.bash || exit 1; fi; } && exec python3 /home/pi/beep_bridge/beep_bridge.py']
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
     pidfile.write_text(str(proc.pid))
     print('started pid', proc.pid)

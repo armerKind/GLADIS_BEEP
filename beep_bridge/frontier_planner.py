@@ -172,7 +172,7 @@ def _cluster_representative(cluster):
     return min(cluster, key=lambda cell: (cell[0] - cx) ** 2 + (cell[1] - cy) ** 2)
 
 
-def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.35, excluded=None):
+def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.35, excluded=None, bias=None):
     chaos = min(max(float(chaos), 0.0), 1.0)
     excluded = list(excluded or ())
     radius_cells = max(1, int(math.ceil(float(robot_radius_m) / grid.resolution)))
@@ -199,6 +199,15 @@ def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.35, exclude
         distance_cost = len(path) * grid.resolution
         noise = rng.uniform(-1.0, 1.0) * chaos * 1.2
         score = 2.2 * information_gain - 0.65 * distance_cost + 0.45 * heading_bonus + noise
+        # Only score candidates already reachable through inflated free space.
+        if bias:
+            bearing = bias.get("preferred_bearing_rad")
+            direction = bias.get("preferred_direction")
+            preferred = (bearing if bearing is not None else
+                         pose[2] + {"left": math.pi / 2, "straight": 0.0,
+                                    "right": -math.pi / 2}.get(direction, 0.0))
+            if bearing is not None or direction is not None:
+                score += 0.6 * math.cos(norm_angle(heading - preferred))
         candidates.append({
             "target_cell": target,
             "target_world": (round(wx, 4), round(wy, 4)),

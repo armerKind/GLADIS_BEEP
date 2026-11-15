@@ -1,10 +1,13 @@
 import importlib.util
 import json
+import math
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from unittest.mock import MagicMock, call, patch
 
@@ -99,6 +102,104 @@ class FrontierIntegrationTests(unittest.TestCase):
             self.assertEqual((status["slam"]["map_revision"],
                               status["slam"]["map_snapshot_id"]), (1, "grid-2"))
             self.assertEqual(bridge.slam_map_snapshot()["map_snapshot_id"], "grid-2")
+
+    def test_missing_submap_message_keeps_scan_map_and_tf_subscriptions(self):
+        subscriptions = []
+        def module(name, **items):
+            result = ModuleType(name)
+            result.__dict__.update(items)
+            return result
+        class Node:
+            def __init__(self, *_): pass
+            def create_subscription(self, _type, name, _callback, _qos):
+                subscriptions.append(name)
+                return object()
+            def create_timer(self, *_): pass
+            def destroy_node(self): pass
+        class Buffer: pass
+        class TransformListener:
+            def __init__(self, buffer, node):
+                subscriptions.append("tf")
+        fake = {
+            "rclpy": module("rclpy", init=lambda **kw: None,
+                            spin=lambda node: None, shutdown=lambda: None),
+            "rclpy.node": module("rclpy.node", Node=Node),
+            "rclpy.time": module("rclpy.time", Time=object),
+            "sensor_msgs": module("sensor_msgs"),
+            "sensor_msgs.msg": module("sensor_msgs.msg", LaserScan=object),
+            "nav_msgs": module("nav_msgs"),
+            "nav_msgs.msg": module("nav_msgs.msg", OccupancyGrid=object),
+            "tf2_ros": module("tf2_ros", Buffer=Buffer, TransformListener=TransformListener),
+            "cartographer_ros_msgs": None,
+            "cartographer_ros_msgs.msg": None,
+        }
+        with patch.dict(sys.modules, fake), patch.dict(bridge.state, {"slam": {}}):
+            bridge.ros_thread()
+            self.assertIn("cartographer_ros_msgs", bridge.state["slam"]["submap_error"])
+        self.assertEqual(subscriptions, ["/scan", "/map", "tf"])
+
+    def test_mission_bias_http_fences_owner_ttl_and_never_dispatches_motor(self):
+        lease = bridge.begin_motion("autonomous_mission", max_duration=15)
+        mission = {"id": "mission-test", "lease_id": lease.lease_id, "lease": lease,
+                   "state": "running", "mode": "local", "duration_s": 15,
+                   "started_at": time.time()}
+        with bridge.mission_lock:
+            setattr(bridge, "_active_mission", mission)
+        server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        def send(**changes):
+            payload = dict(boot_id=bridge.BOOT_ID, mission_id=mission["id"],
+                           lease_id=lease.lease_id, ttl_s=0.05, preferred_direction="left")
+            payload.update(changes)
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/mission/bias",
+                data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as error:
+                with error:
+                    return error.code, json.load(error)
+        try:
+            with patch.object(bridge, "motor_send") as motor, patch.object(bridge, "stop_burst") as stop:
+                self.assertEqual(send(lease_id="obsolete")[0], 409)
+                self.assertEqual(send(boot_id="obsolete")[0], 409)
+                self.assertEqual(send(ttl_s=8.01)[0], 400)
+                self.assertEqual(send(ttl_s=float("nan"))[0], 400)
+                self.assertEqual(send(preferred_bearing_rad=float("inf"))[0], 400)
+                self.assertEqual(send(preferred_direction="back")[0], 400)
+                status, result = send()
+                self.assertEqual(status, 202)
+                self.assertFalse(result["motor_authority"])
+                self.assertFalse(result["semantic_execution_enabled"])
+                self.assertEqual(bridge.active_mission_bias()["preferred_direction"], "left")
+                self.assertEqual(send(preferred_direction=None, preferred_bearing_rad=None)[0], 202)
+                self.assertIsNone(bridge.active_mission_bias())
+                self.assertEqual(send()[0], 202)
+                time.sleep(.07)
+                self.assertIsNone(bridge.active_mission_bias())
+                lease.cancel_event.set()
+                self.assertEqual(send()[0], 409)
+                motor.assert_not_called()
+                stop.assert_not_called()
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(1)
+            bridge.end_motion(lease)
+
+    def test_bias_steering_requires_six_sector_sweep_and_forward_envelope(self):
+        sectors = {key: 1.0 for key in
+                   ("front", "front_left", "front_right", "left", "right", "rear")}
+        bias = {"preferred_direction": "left", "preferred_bearing_rad": None}
+        self.assertEqual(bridge.choose_fluent_steering(sectors, bias=bias), "curveleft")
+        self.assertEqual(bridge.choose_fluent_steering(sectors, bias={
+            "preferred_direction": "left", "preferred_bearing_rad": -math.pi / 2}, yaw=0), "curveright")
+        for sector in sectors:
+            unsafe = dict(sectors, **{sector: bridge.TURN_SWEEP_M - .01})
+            self.assertNotEqual(bridge.choose_fluent_steering(unsafe, bias=bias), "curveleft")
+        self.assertEqual(bridge.choose_fluent_steering({"front": 1.0}, bias=bias), "forward")
 
     def test_app_step_is_sdk_velocity_not_joystick_percentage(self):
         # Installed app server: int(percent / 100 * 0.2 * width[50]).
@@ -251,6 +352,7 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertFalse(bridge.handler_failure_requires_stop("/frame.jpg", TimeoutError("camera timeout")))
         self.assertFalse(bridge.handler_failure_requires_stop("/camera.jpg", RuntimeError("bad frame")))
         self.assertFalse(bridge.handler_failure_requires_stop("/status", BrokenPipeError("client left")))
+        self.assertFalse(bridge.handler_failure_requires_stop("/mission/bias", ValueError("bad advisory")))
         self.assertFalse(bridge.handler_failure_requires_stop("/mission", ConnectionResetError("client left")))
         self.assertTrue(bridge.handler_failure_requires_stop("/move", RuntimeError("motor handler failed")))
         self.assertTrue(bridge.handler_failure_requires_stop("/coverage_explore", TimeoutError("controller failed")))
@@ -296,6 +398,41 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(bridge.mission_snapshot()["state"], "cancelled")
         self.assertIsNone(bridge.active_motion_lease())
 
+    def test_frontier_mission_runs_planner_under_its_own_fenced_lease(self):
+        entered = threading.Event()
+        release = threading.Event()
+        observed = []
+        def fake_frontier(**kwargs):
+            entered.set()
+            release.wait(2)
+            observed.append((kwargs, bridge.active_mission_bias()))
+            return {"ok": True, "reason": "coverage_complete_or_no_reachable_frontiers"}
+        with patch.object(bridge, "snapshot", return_value={
+                 "scan_seen": True, "scan_age_s": 0.01, "slam": {"usable": True},
+                 "sectors": dict.fromkeys(("front", "front_left", "front_right",
+                                           "left", "right", "rear"), 1.2)}), \
+             patch.object(bridge, "scan_ok", return_value=True), \
+             patch.object(bridge, "slam_ok", return_value=True), \
+             patch.object(bridge, "frontier_explore", side_effect=fake_frontier), \
+             patch.object(bridge, "stop_burst", return_value=None):
+            accepted = bridge.start_autonomous_mission("frontier", 20, chaos=.3)
+            self.assertTrue(accepted["accepted"])
+            self.assertTrue(entered.wait(.5))
+            mission = bridge.mission_snapshot()
+            self.assertTrue(bridge.set_mission_bias({
+                "boot_id": bridge.BOOT_ID, "mission_id": mission["id"],
+                "lease_id": mission["lease_id"], "ttl_s": 5,
+                "preferred_bearing_rad": 1.2})["accepted"])
+            with bridge.mission_lock:
+                worker = bridge._active_mission["thread"]
+            release.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(observed[0][0]["chaos"], .3)
+        self.assertEqual(observed[0][1]["preferred_bearing_rad"], 1.2)
+        self.assertEqual(bridge.mission_snapshot()["state"], "completed")
+        self.assertIsNone(bridge.active_mission_bias())
+
     def test_friday_demo_endpoint_remains_available(self):
         self.assertIn('p.path in ("/lidar_walk", "/demo_walk")', BRIDGE_PATH.read_text())
 
@@ -339,9 +476,17 @@ class FrontierIntegrationTests(unittest.TestCase):
                 code, status = request("/mission")
                 self.assertEqual(code, 200)
                 self.assertEqual(status["mission"]["state"], "running")
+                code, advisory = request("/mission/bias", {
+                    "boot_id": bridge.BOOT_ID, "mission_id": status["mission"]["id"],
+                    "lease_id": status["mission"]["lease_id"],
+                    "ttl_s": 8.0, "preferred_direction": "right"})
+                self.assertEqual(code, 202)
+                self.assertFalse(advisory["motor_authority"])
+                self.assertEqual(bridge.active_mission_bias()["preferred_direction"], "right")
                 code, cancelled = request("/mission/cancel", {"mission_id": status["mission"]["id"]})
                 self.assertEqual(code, 200)
                 self.assertTrue(cancelled["cancelled"])
+                self.assertIsNone(bridge.active_mission_bias())
                 release.set()
                 with bridge.mission_lock:
                     worker = bridge._active_mission["thread"]
