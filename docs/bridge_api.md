@@ -3,10 +3,10 @@
 Current bridge line:
 
 ```text
-0.22.2-stack2-greeting-optional (repository source, not yet deployed)
+0.22.2-stack2-greeting-optional (repository source and Pi deployment)
 ```
 
-The last stationary-verified Pi bridge is `0.22.1-stack2-live-observe` (November 15, 2026). The optional-greeting fix is host-tested only; do not treat that as physical motion commissioning.
+Stationary Stage 1 passed on `0.22.1-stack2-live-observe` (November 15, 2026). The `0.22.2` optional-greeting build was deployed/read back on the Pi and given one guarded reverse trial, which aborted early on front-triplet LiDAR loss; this is not successful motion commissioning.
 
 Base URLs:
 
@@ -321,7 +321,7 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - fails closed on missing sectors, boxed-in geometry, failed progress, or repeated identical escapes; people in view trigger yielding and route replanning, not terminal semantic-goal failure,
 - retains the firmware gait/normal pace and does not add per-command posture writes.
 
-The continuous reverse/turn rewrite is currently local-source code and unit-tested; it is not deployed or physically commissioned. A successful unit test is not a locomotion result. Live reverse and 10-degree pivot trials remain required before promoting the new control path to autonomous semantic navigation.
+The continuous reverse/turn rewrite is deployed, but not physically commissioned. On one supervised reverse trial the packet reached the vendor app; the front-clearance guard stopped it after ~0.08 s of supervision, before useful displacement could be demonstrated. No turn trial was performed. Neither this abort nor a successful unit test validates autonomous recovery.
 
 ### Coverage-driven exploration
 

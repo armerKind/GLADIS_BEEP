@@ -11,8 +11,8 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 `main` holds the **Stack 2** continuous autonomous embodiment architecture plus the hardware, ROS, vision and audio infrastructure. The earlier Stack 1 prototype (cap-search stop-think-act policy, `ClosedLoopExecutor`, bridge `IntentMailbox`, external room-camera observer, fair/presentation scripts and per-phase gate docs) is archived on branch `archive/stack1-cap-prototype`.
 
 ```text
-bridge source    0.22.2-stack2-greeting-optional (host-tested, not deployed)
-bridge deployed  0.22.1-stack2-live-observe      (stationary Stage 1 readback 2026-11-15)
+bridge source    0.22.2-stack2-greeting-optional (host-tested)
+bridge deployed  0.22.2-stack2-greeting-optional (read back on Pi 2026-11-15)
 ```
 
 Verified on hardware (stationary, November 11, 2026):
@@ -25,6 +25,8 @@ Implemented and host-tested; the Stack 2 runner join is not yet physically verif
 
 - Stack 2 spatial memory and attention in `beep_agent/`: event envelope and journal, map revision, pose history, place graph, episodes, tactical gate, strategic owner, visual grounding, viewpoint scoring, goal coordinator, atomic checkpoint, model session and observe-only supervisor; the live runner currently uses only the qualitative camera/attention/strategy subset
 - audio contracts in `beep_audio/`: PCM capture, VAD, echo reference and barge-in, clock alignment, social interruption
+
+The prior `0.22.1` deployment passed stationary Stage 1. A single guarded reverse request on `0.22.2` sent a motor packet but stopped on a front-triplet LiDAR loss after ~0.08 s of supervision. It does not validate reverse displacement or authorize autonomous recovery.
 
 Semantic perception never drives motors. `scripts/run_moving_eyes.py` journals live bridge-provenance camera acquisitions into Stack 2 in shadow mode while the onboard bridge owns gait, collision safety, leases and stop. Approximate camera timing is qualitative only; no metric viewpoint is claimed. Older bridge releases and physical motion trials are recorded in git history.
 
