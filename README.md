@@ -158,7 +158,7 @@ Tailscale can use a high-latency DERP relay or disappear with the external Wi-Fi
 
 - Autonomous navigation and approach routines require a fresh LiDAR scan; generic `/move` and vendor `/action` are lower-level interfaces and are not scan-gated.
 - Autonomous controllers require all six local LiDAR sectors and apply conservative full-body thresholds: 0.55 m front, 0.42 m front diagonals/turn sweep, 0.35 m sides, and 0.45 m rear. These are provisional safety floors pending measured-footprint calibration.
-- A blocked front may trigger a short, continuously supervised reverse escape only when the full side envelope and rear clearance remain available. Reverse also aborts if average frontal clearance worsens by more than 0.02 m or heading drifts by more than 5 degrees. Lateral escape is disabled.
+- A blocked front may trigger a short, continuously supervised reverse escape only when the full side envelope and rear clearance remain available. Reverse also aborts if average frontal clearance worsens by more than 0.06 m or heading drifts by more than 5 degrees. Lateral escape is disabled.
 - Reverse/turn escapes must produce measured clearance or heading progress; ineffective escapes and more than two repeated identical escapes fail closed.
 - Guarded SLAM is required for map-directed frontier/coverage claims.
 - Occupancy-grid planning inflates obstacles by a conservative 0.35 m robot radius and rejects stale map/pose, impossible relocation, turn non-progress, and unsafe sweep clearance.

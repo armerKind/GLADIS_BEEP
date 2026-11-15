@@ -265,7 +265,7 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_backward_supervisor_stops_when_front_clearance_worsens(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
-        worsened = dict(baseline, front=0.81, front_left=0.39, front_right=0.711)
+        worsened = dict(baseline, front=0.67, front_left=0.37, front_right=0.69)
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
@@ -278,6 +278,31 @@ class CollisionSafetyTests(unittest.TestCase):
                 "back", 0.30, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
+
+    def test_backward_supervisor_tolerates_three_cm_triplet_jitter(self):
+        baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
+        worsened = dict(baseline, front=0.81, front_left=0.39, front_right=0.711)
+        state = {"scan_seen": True, "scan_age_s": 0.01,
+                 "slam": {"usable": True}, "sectors": worsened,
+                 "pose": {"yaw": 0.0}}
+        with patch.object(bridge, "snapshot", return_value=state):
+            result = bridge.supervise_lidar_motion(
+                "back", 0.01, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "window_complete")
+
+    def test_supervised_reverse_and_exploration_use_bounded_lower_speed(self):
+        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.06)
+        self.assertEqual(bridge.REVERSE_ESCAPE_STEP, 6)
+        self.assertEqual(bridge.app_joystick_percent(bridge.REVERSE_ESCAPE_STEP), 60)
+        self.assertEqual(bridge.explore_step_for("backward"), bridge.REVERSE_ESCAPE_STEP)
+        state = {"sectors": FRONT_BLOCKED_REAR_CLEAR, "pose": {"yaw": 0.0}}
+        with patch.object(bridge, "snapshot", return_value=state), \
+                patch.object(bridge, "motor_send") as send, \
+                patch.object(bridge, "supervise_lidar_motion", return_value={"ok": True, "reason": "window_complete"}), \
+                patch.object(bridge, "stop_burst"):
+            bridge.run_supervised_calibration("backward", 0.3)
+        send.assert_called_once_with("backward", step=bridge.REVERSE_ESCAPE_STEP)
 
     def test_backward_supervisor_stops_on_unexpected_yaw(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)

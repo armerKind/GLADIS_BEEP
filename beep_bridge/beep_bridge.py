@@ -59,7 +59,7 @@ if CLEARANCE_PROFILE not in ("conservative", "commissioning_030"):
     raise ValueError("unknown BEEP_CLEARANCE_PROFILE")
 # A recovery reverse is one sustained, low-speed SDK/app gait command, not repeated
 # stop/start pulses. The range stays inside the vendor SDK's documented move-Y span.
-REVERSE_ESCAPE_STEP = min(18, max(5, int(os.environ.get("BEEP_REVERSE_STEP", "12"))))
+REVERSE_ESCAPE_STEP = min(8, max(5, int(os.environ.get("BEEP_REVERSE_STEP", "6"))))
 def clearance_setting(name, conservative):
     floor = 0.30 if CLEARANCE_PROFILE == "commissioning_030" else conservative
     value = float(os.environ.get(name, str(floor)))
@@ -79,7 +79,7 @@ TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.42)
 TURN_START_CLEARANCE_M = max(TURN_SWEEP_M + 0.03,
                              float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.45")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
-BACKOFF_MAX_FRONT_LOSS_M = min(0.02, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.02"))))
+BACKOFF_MAX_FRONT_LOSS_M = min(0.06, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.06"))))
 BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
     min(5.0, max(1.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "5.0"))))
 )
@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.2-stack2-greeting-optional",
+    "version": "0.22.3-reverse-tolerance",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1338,7 +1338,7 @@ def run_supervised_calibration(action: str, duration: float):
             min(sectors["left"], sectors["right"]) < FOOTPRINT_SIDE_M):
         return {"ok": False, "reason": "reverse_arc_envelope_blocked", "action": action, "status": before}
     start_pose = dict(before.get("pose") or {})
-    motor_send(action)
+    motor_send(action, step=REVERSE_ESCAPE_STEP if action == "backward" else None)
     try:
         supervised = supervise_lidar_motion(action, duration, baseline_sectors=sectors, baseline_pose=start_pose)
     finally:
@@ -1844,7 +1844,7 @@ def explore_step_for(action):
     if action == "forward":
         return 20
     if action in ("back", "backward"):
-        return 15
+        return REVERSE_ESCAPE_STEP
     if action in ("left", "right"):
         return 5
     if action in ("turnleft", "turnright"):
