@@ -12,6 +12,8 @@ The first supervised reverse request on `0.22.1` returned HTTP 500 after a rough
 
 Run the offline suite before any deployment (see the README's Development section). Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
 
+At the operator's explicit request, **one** further supervised trial used `duration=1.0` on the same `0.22.2` build and unchanged guards. A five-second stopped 20 Hz baseline beforehand showed the front-triplet mean varied by up to 0.034 m (17/100 samples more than 0.02 m below its first sample), principally from front-right. The second request again sent one `backward` packet and returned HTTP 200 with `ok=false`, `reason=front_clearance_worsening_during_backoff`, after 0.405 s of supervision; first stop packet was ~0.444 s after `app_send backward`. The 20 Hz recorder had nine `moving=true` samples (a bridge command flag, **not** proof of translation). At the guard, front-right dipped to ~1.161 m from ~1.278 m while front-center remained ~1.107 m; the mean fell from ~1.108 m to ~1.069 m. The operator observed **body movement but no travel**. Final state remained stopped, no lease or mission, SLAM usable. Trace: session scratch `beep-stage2-reverse-baseline-v3.json`. The requested longer ceiling did not prolong motion because the guard correctly ended it first. Do not automatically repeat, remove the front-loss guard, or attribute this bridge result to the vendor-app primitive.
+
 ## Pi paths
 
 ```text

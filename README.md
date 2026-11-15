@@ -26,7 +26,7 @@ Implemented and host-tested; the Stack 2 runner join is not yet physically verif
 - Stack 2 spatial memory and attention in `beep_agent/`: event envelope and journal, map revision, pose history, place graph, episodes, tactical gate, strategic owner, visual grounding, viewpoint scoring, goal coordinator, atomic checkpoint, model session and observe-only supervisor; the live runner currently uses only the qualitative camera/attention/strategy subset
 - audio contracts in `beep_audio/`: PCM capture, VAD, echo reference and barge-in, clock alignment, social interruption
 
-The prior `0.22.1` deployment passed stationary Stage 1. A single guarded reverse request on `0.22.2` sent a motor packet but stopped on a front-triplet LiDAR loss after ~0.08 s of supervision. It does not validate reverse displacement or authorize autonomous recovery.
+The prior `0.22.1` deployment passed stationary Stage 1. Two explicitly supervised reverse requests on `0.22.2` sent motor packets but stopped on the front-triplet LiDAR loss guard after ~0.08 s and ~0.40 s. The operator saw no movement on the first, and body movement without travel on the second. This does not validate reverse displacement or authorize autonomous recovery.
 
 Semantic perception never drives motors. `scripts/run_moving_eyes.py` journals live bridge-provenance camera acquisitions into Stack 2 in shadow mode while the onboard bridge owns gait, collision safety, leases and stop. Approximate camera timing is qualitative only; no metric viewpoint is claimed. Older bridge releases and physical motion trials are recorded in git history.
 
