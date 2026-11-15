@@ -76,6 +76,9 @@ class GoalCoordinator:
         self._bound_map: tuple[str, int, int, str] | None = None
         self._bound_owner: tuple[str, str] | None = None
         self._bound_revision: int | None = None
+        # Read-only attachment to a pre-existing bridge mission differs from
+        # a goal-specific segment admitted by this coordinator.
+        self._shadow_attached = False
         # Failed segment identity: epoch, revision, occupancy snapshot, goal revision.
         self._blocked_on: tuple[int, int, str, int] | None = None
         self._release_ids: OrderedDict[str, None] = OrderedDict()
@@ -83,20 +86,24 @@ class GoalCoordinator:
     def to_dict(self) -> dict:
         """Checkpoint alongside AgentSession; caller owns atomic persistence."""
         with self._lock, self.session._strategy_lock:
-            return {"schema_version": 2, "session_id": self.session.session_id,
+            return {"schema_version": 3, "session_id": self.session.session_id,
                     "boot_id": self.session.boot_id,
                     "bound_map": None if self._bound_map is None else list(self._bound_map),
                     "bound_owner": None if self._bound_owner is None else list(self._bound_owner),
                     "bound_revision": self._bound_revision,
+                    "shadow_attached": self._shadow_attached,
                     "blocked_on": None if self._blocked_on is None else list(self._blocked_on),
                     "release_ids": list(self._release_ids)}
 
     @classmethod
     def from_dict(cls, session: AgentSession, raw: dict) -> GoalCoordinator:
-        if not isinstance(raw, dict) or set(raw) != {
-            "schema_version", "session_id", "boot_id", "bound_map", "bound_owner",
-            "bound_revision", "blocked_on", "release_ids"
-        } or type(raw["schema_version"]) is not int or raw["schema_version"] != 2:
+        base_keys = {"schema_version", "session_id", "boot_id", "bound_map",
+                     "bound_owner", "bound_revision", "blocked_on", "release_ids"}
+        if (not isinstance(raw, dict) or type(raw.get("schema_version")) is not int
+                or raw["schema_version"] not in (2, 3)
+                or set(raw) != (base_keys | {"shadow_attached"}
+                                   if raw["schema_version"] == 3 else base_keys)
+                or (raw["schema_version"] == 3 and type(raw["shadow_attached"]) is not bool)):
             raise CoordinatorError("invalid coordinator checkpoint schema")
         owner = cls(session, _restoring=True)
         bound, blocked, receipts = raw["bound_map"], raw["blocked_on"], raw["release_ids"]
@@ -112,6 +119,8 @@ class GoalCoordinator:
                  or any(not isinstance(v, str) or not v for v in bound_owner)
                  or tuple(bound_owner) != (session.mission_id, session.execution["lease_id"]))):
             raise CoordinatorError("checkpoint does not match exact session owner")
+        if raw.get("shadow_attached", False) and bound_owner is None:
+            raise CoordinatorError("shadow attachment requires an exact bound owner")
         if (blocked is not None and (not isinstance(blocked, list) or len(blocked) != 4
                 or any(type(v) is not int or v < 0 for v in
                        (blocked[0], blocked[1], blocked[3]))
@@ -130,6 +139,8 @@ class GoalCoordinator:
         owner._bound_map = None if bound is None else tuple(bound)
         owner._bound_owner = None if bound_owner is None else tuple(bound_owner)
         owner._bound_revision = revision
+        # v2 lacks attachment provenance; restore it conservatively.
+        owner._shadow_attached = raw.get("shadow_attached", False)
         owner._blocked_on = None if blocked is None else tuple(blocked)
         owner._release_ids = OrderedDict.fromkeys(receipts)
         return owner
@@ -162,9 +173,17 @@ class GoalCoordinator:
                         or self._bound_map is None
                         or context.map_identity[:3] != self._bound_map[:3]):
                     return self._decision("local_revalidate", "map or sensors changed during local lease")
-                # Shadow-attached owners may admit their first strategic goal
-                # while the same externally owned lease keeps moving.
-                if (self._bound_revision == 0 and self.session.strategy["goal_revision"] == 1
+                goal = None if self.session.selection is None else self.session.selection.goal.name
+                if goal in {"rest", "observe", "acknowledge_person"}:
+                    return self._decision("goal_revision_changed", "stationary goal needs local reassessment")
+                # A shadow attachment did not admit the bridge's segment.
+                # Only the same verified owner can follow revised explore
+                # intent; a confirmed goal-specific segment still revalidates.
+                if (self._shadow_attached and goal == "explore"
+                        and self._bound_owner == expected
+                        and self.session.strategy["goal_revision"] > 0):
+                    self._bound_revision = self.session.strategy["goal_revision"]
+                elif (self._bound_revision == 0 and self.session.strategy["goal_revision"] == 1
                         and self._bound_owner == expected):
                     self._bound_revision = 1
                 if self._bound_revision != self.session.strategy["goal_revision"]:
@@ -206,6 +225,7 @@ class GoalCoordinator:
             self._bound_map = context.map_identity
             self._bound_owner = (context.mission_id, context.lease_id)
             self._bound_revision = goal_revision
+            self._shadow_attached = False
 
     def observe_existing_owner(self, context: CoordinatorContext) -> None:
         """Shadow-attach a pre-existing bridge lease; grants no route or motor authority."""
@@ -221,6 +241,7 @@ class GoalCoordinator:
             self._bound_map = context.map_identity
             self._bound_owner = (context.mission_id, context.lease_id)
             self._bound_revision = self.session.strategy["goal_revision"]
+            self._shadow_attached = True
 
     def complete_segment(self, context: CoordinatorContext, *, result: str,
                          release_id: str) -> None:
@@ -250,3 +271,4 @@ class GoalCoordinator:
             self._bound_map = None
             self._bound_owner = None
             self._bound_revision = None
+            self._shadow_attached = False

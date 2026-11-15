@@ -7,6 +7,7 @@ lease ownership, and final motor stopping onboard BEEP.
 from __future__ import annotations
 
 import json
+import math
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -78,6 +79,33 @@ class BridgeBodyAdapter:
 
     def mission(self) -> dict[str, Any]:
         return self._json("/mission")
+
+    def bias_mission(self, *, boot_id: str, mission_id: str, lease_id: str,
+                     preferred_direction: str, ttl_s: float = 4.0) -> dict[str, Any]:
+        """Send only a short-lived direction hint to an already owned mission.
+
+        This does not dispatch a skill, start a lease, or acquire motor authority.
+        The bridge checks these exact identities again when it receives the POST.
+        """
+        if any(type(value) is not str or not value.strip()
+               for value in (boot_id, mission_id, lease_id)):
+            raise BodyDispatchError("mission bias requires exact boot, mission and lease IDs")
+        if preferred_direction not in ("left", "straight", "right"):
+            raise BodyDispatchError("mission bias requires a validated direction")
+        if type(ttl_s) not in (int, float) or not 0 < ttl_s <= 8 or not math.isfinite(ttl_s):
+            raise BodyDispatchError("mission bias TTL must be finite and within (0, 8] seconds")
+        response = self._json("/mission/bias", {
+            "boot_id": boot_id, "mission_id": mission_id, "lease_id": lease_id,
+            "ttl_s": float(ttl_s), "preferred_direction": preferred_direction,
+            "preferred_bearing_rad": None,
+        })
+        if (response.get("ok") is not True or response.get("accepted") is not True
+                or response.get("motor_authority") is not False
+                or response.get("semantic_execution_enabled") is not False
+                or response.get("mission_id") != mission_id
+                or response.get("lease_id") != lease_id):
+            raise BodyDispatchError("mission bias rejected or bridge acknowledgement invalid")
+        return response
 
     def dispatch(self, call: SkillCall, *, rollout_mode: str = "shadow",
                  mission_id: str | None = None, lease_id: str | None = None) -> DispatchResult:

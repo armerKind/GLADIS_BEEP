@@ -104,8 +104,10 @@ class LiveBridgeObserver:
             return None
         scene = response.get('scene') or {}
         # A scene hazard is attention, not an authority to physically stop.
+        # A person entering view is attention, not a stationary-goal mandate.
+        # Explicit escalation, hazards and weak evidence still withhold advice.
         goal = 'observe' if (response.get('escalate') or scene.get('hazards')
-                             or scene.get('people') or response.get('confidence', 0) < .65) else 'explore'
+                             or response.get('confidence', 0) < .65) else 'explore'
         if (self.session.strategy['goal_revision'] and self.session.selection is not None
                 and self.session.selection.goal.name == goal):
             return None

@@ -37,6 +37,49 @@ def ready():
 
 
 class CoordinatorTests(unittest.TestCase):
+    def test_shadow_owner_acknowledges_only_explore_revisions_under_same_verified_lease(self):
+        session = AgentSession(robot_id="beep", mission_id=None, boot_id="b", session_id="s")
+        owner = GoalCoordinator(session)
+        live = context(mission_id="m1", lease_id="l1", local_motion_active=True)
+        owner.observe_existing_owner(live)
+
+        def propose(goal, revision):
+            sample = json.loads((FIXTURES / "box_far_response.json").read_text())
+            session.update(sample, observed_at=1 + revision * .1,
+                           packet_id=f"frame-{revision}", mission_id="m1", lease_id="l1")
+            proposal = GoalProposal.from_dict(dict(schema_version=1, proposal_id=f"goal-{revision}",
+                session_id="s", boot_id="b", map_epoch=1, map_revision=2,
+                base_goal_revision=revision - 1, observed_world_sequence=session.world.sequence,
+                goal_name=goal, target_track_id=None, issued_at_robot=1 + revision * .1,
+                expires_at_robot=3., source_event_ids=[], reason="Advisory scene update."))
+            StrategicOwner(session).submit(proposal, now_robot=1.1 + revision * .1,
+                                           map_epoch=1, map_revision=2)
+
+        propose("observe", 1)
+        self.assertEqual(owner.tick(live).action, "goal_revision_changed")
+        propose("explore", 2)
+        self.assertEqual(owner.tick(live).action, "continue_local")
+        self.assertEqual(owner.to_dict()["bound_revision"], 2)
+        propose("observe", 3)
+        self.assertEqual(owner.tick(live).action, "goal_revision_changed")
+        propose("explore", 4)
+        self.assertEqual(owner.tick(live).action, "continue_local")
+        self.assertEqual(owner.to_dict()["bound_revision"], 4)
+
+    def test_confirmed_owner_must_reassess_even_an_explore_revision(self):
+        session, owner = ready()
+        live = context(mission_id="m1", lease_id="l1", local_motion_active=True)
+        owner.bind_confirmed(live, goal_revision=1)
+        session.update(json.loads((FIXTURES / "box_far_response.json").read_text()),
+                       observed_at=2.1, packet_id="second", mission_id="m1", lease_id="l1")
+        proposal = GoalProposal.from_dict(dict(schema_version=1, proposal_id="explore-2",
+            session_id="s", boot_id="b", map_epoch=1, map_revision=2,
+            base_goal_revision=1, observed_world_sequence=session.world.sequence,
+            goal_name="explore", target_track_id=None, issued_at_robot=2.1,
+            expires_at_robot=3., source_event_ids=[], reason="Reassess the region."))
+        StrategicOwner(session).submit(proposal, now_robot=2.2, map_epoch=1, map_revision=2)
+        self.assertEqual(owner.tick(live).action, "goal_revision_changed")
+
     def test_goal_survives_two_exact_lease_handoffs_without_motor_authority(self):
         session, owner = ready()
         suggestion = owner.tick(context())

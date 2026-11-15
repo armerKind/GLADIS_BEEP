@@ -292,6 +292,8 @@ python3 scripts/run_moving_eyes.py \
 
 Compare `--panel 4`, `6`, and `9` on real gait vibration before changing the default. Verify chronological timestamps, usable neighboring frames despite blur, continued capture during Gemini latency, no app-control stop events, responsive mission telemetry, and final stopped/no-lease state. The moving-eyes runner observes and plans but does not dispatch motors.
 
+`--bias-mission` is **off by default**. After stationary provenance and supervised motion commissioning, it may send a four-second advisory `POST /mission/bias` for a confidently tracked left/center/right attention entity (`center` maps to `straight`). It requires the Stack 2 coordinator's `continue_local`, a fresh qualitative view, and a re-read exact mission/lease; the bridge rechecks ownership and LiDAR independently. Person entry alone does not change an existing `explore` goal. A reported hazard, escalation, or weak confidence selects `observe` and withholds advice; when evidence becomes clear, a shadow-attached `explore` goal can resume on the same verified lease. This does **not** stop an already-running onboard mission for a visual hazard. It never starts a mission, sends a route, or enables motor authority. Inspect `semantic_decision.json` (`mission_bias`) and `summary.json` (`bias_accepted`) for accepted/rejected advice. The published `box_far_response.json` and `eyes_response.json` both report hazards; their hazard-free variants are used only to isolate the person-entry continuity test. Do not use this flag as a substitute for the pending reverse-trace diagnosis.
+
 ## Audio playback
 
 Generate or provide an audio file, then play it through the Pi analog output:

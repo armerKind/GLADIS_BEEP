@@ -4,8 +4,9 @@
 The capture thread keeps filling a bounded ring while the main thread performs one
 Gemini request at a time. There is no inference queue: after a result arrives, the
 next request uses the newest complete window and silently supersedes stale evidence.
-Shadow only: each window updates the persistent AgentSession and records its
-decision, but nothing here sends motion. The onboard bridge owns gait and safety.
+Shadow by default: each window updates the persistent AgentSession without
+motor dispatch. An explicit --bias-mission may send short-lived direction advice
+to the exact running bridge lease; onboard LiDAR still owns gait and safety.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import uuid
 # The companion launcher invokes this file directly, not with ``python -m``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from beep_agent import AgentSession, EmbodiedGoal
+from beep_agent import AgentSession, BodyDispatchError, BridgeBodyAdapter, EmbodiedGoal
 from beep_agent.live_bridge_observer import LiveBridgeObserver, LiveEvidenceUnavailable
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
@@ -47,11 +48,68 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal", help="Bind one semantic goal to the whole moving mission")
     parser.add_argument("--target", default="scene", help="Target query for --goal")
     parser.add_argument("--mark", action="store_true")
+    parser.add_argument("--bias-mission", action="store_true",
+                        help="Opt in to 4-second, lease-fenced target-position advice; no motor dispatch")
     parser.add_argument("--resume-session", type=Path,
                         help="Resume only when robot, mission identity and freshness match")
     parser.add_argument("--resume-checkpoint", type=Path,
                         help="Resume a Stack 2 checkpoint and adjacent journal under exact bridge identity")
     return parser.parse_args()
+
+
+def tracked_target_direction(session: AgentSession, response: dict) -> str | None:
+    """Use only the current packet's confidently tracked attention entity.
+
+    A qualitative image position is not a map bearing or a route. Untracked
+    direction labels, unknown positions and low-confidence entities abstain.
+    """
+    if response["attention"]["target_type"] not in ("person", "object"):
+        return None
+    if response["confidence"] < .65:
+        return None
+    track_id = session.world.attention_track_id
+    track = session.world.tracks.get(track_id) if track_id else None
+    if (track is None or track.missed_packets != 0 or track.confidence < .65
+            or track.position not in ("left", "center", "right")):
+        return None
+    return {"left": "left", "center": "straight", "right": "right"}[track.position]
+
+
+def advise_live_mission(adapter: BridgeBodyAdapter, *, session: AgentSession,
+                        stack2: dict, response: dict, current: dict, before: dict,
+                        expected_mission_id: str | None) -> dict:
+    """Refresh ownership after inference; never let advice initiate locomotion."""
+    result = {"attempted": False, "accepted": False, "reason": "not_eligible"}
+    if (stack2.get("coordinator_action") != "continue_local"
+            or stack2.get("motor_authority") is not False
+            or session.selection is None or session.selection.goal.name != "explore"):
+        return result
+    direction = tracked_target_direction(session, response)
+    if direction is None:
+        return {**result, "reason": "no_confident_tracked_target"}
+    # The bridge's request-start clock is approximate, not an exposure stamp.
+    # Refuse a hint from a window already older than its own short TTL.
+    acquired, now = before.get("robot_monotonic_s"), current.get("robot_monotonic_s")
+    if (not isinstance(acquired, (int, float)) or not isinstance(now, (int, float))
+            or not 0 <= now - acquired <= 4.0):
+        return {**result, "reason": "qualitative_view_too_old"}
+    if (not isinstance(session.boot_id, str) or current.get("boot_id") != session.boot_id
+            or current.get("motion_lease_id") != session.execution.get("lease_id")
+            or not expected_mission_id or session.mission_id != expected_mission_id):
+        return {**result, "reason": "owner_changed_before_advice"}
+    try:
+        fresh = adapter.mission().get("mission")
+        if (not isinstance(fresh, dict) or fresh.get("state") not in ("starting", "running")
+                or fresh.get("id") != expected_mission_id
+                or fresh.get("lease_id") != session.execution.get("lease_id")):
+            return {**result, "reason": "owner_changed_before_advice"}
+        result = {"attempted": True, "accepted": False, "direction": direction,
+                  "reason": "bridge_rejected"}
+        adapter.bias_mission(boot_id=session.boot_id, mission_id=expected_mission_id,
+                             lease_id=fresh["lease_id"], preferred_direction=direction, ttl_s=4.0)
+        return {**result, "accepted": True, "reason": "advisory_accepted"}
+    except BodyDispatchError as exc:
+        return {**result, "reason": f"advisory_unavailable:{type(exc).__name__}"}
 
 
 def gemini_client(args: argparse.Namespace) -> GeminiVisionClient:
@@ -89,6 +147,7 @@ def write_window(directory: Path, frames, contact_sheet: bytes, packet: dict, re
 
 def main() -> int:
     args = parse_args()
+    bias_mission_enabled = bool(getattr(args, "bias_mission", False))
     if args.duration < 5 or args.duration > 600:
         raise SystemExit("--duration must be within [5, 600]")
     if args.max_inferences < 0 or args.max_inferences > 1000:
@@ -97,6 +156,8 @@ def main() -> int:
         raise SystemExit("--inference-interval must be within [0, 600]")
     if args.resume_session:
         raise SystemExit("legacy session-only resume lacks journal/lease identity; use --resume-checkpoint")
+    if bias_mission_enabled and args.allow_no_mission:
+        raise SystemExit("--bias-mission requires a live autonomous mission")
 
     initial_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
     if not args.allow_no_mission and (
@@ -104,8 +165,16 @@ def main() -> int:
     ):
         raise SystemExit("no active autonomous mission; moving eyes did not start")
 
-    mock = validate_perception_response(json.loads(args.mock_response.read_text())) if args.mock_response else None
-    client = None if mock is not None else gemini_client(args)
+    raw_mock = json.loads(args.mock_response.read_text()) if args.mock_response else None
+    # A JSON array of validated packets exercises changing scenes through the
+    # real runner without manufacturing repeated temporal observations.
+    mock_sequence = ([validate_perception_response(item) for item in raw_mock]
+                     if isinstance(raw_mock, list) else None)
+    if mock_sequence is not None and not mock_sequence:
+        raise SystemExit("--mock-response sequence must not be empty")
+    mock = (validate_perception_response(raw_mock)
+            if raw_mock is not None and mock_sequence is None else None)
+    client = None if mock is not None or mock_sequence is not None else gemini_client(args)
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-moving-" + uuid.uuid4().hex[:8]
     output_dir = args.output_root / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -119,6 +188,8 @@ def main() -> int:
     fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
     session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
     observer = None
+    advisor = BridgeBodyAdapter(args.base_url, args.timeout) if bias_mission_enabled else None
+    bias_accepted = 0
     session_path = output_dir / "agent_session.json"
     deadline = time.monotonic() + args.duration
     inference_count = 0
@@ -129,6 +200,8 @@ def main() -> int:
         if not capture.ring.wait_for(1, min(args.duration, args.timeout)):
             raise RuntimeError(f"moving camera did not produce a frame: {capture.stats()}")
         while time.monotonic() < deadline:
+            if mock_sequence is not None and inference_count >= len(mock_sequence):
+                break
             wait_s = last_inference_finished + args.inference_interval - time.monotonic()
             if inference_count and wait_s > 0:
                 time.sleep(min(0.25, wait_s))
@@ -161,7 +234,9 @@ def main() -> int:
             requested_latest = frames[-1].frame_id
             started_at = time.time()
             try:
-                if mock is not None:
+                if mock_sequence is not None:
+                    response = mock_sequence[inference_count]
+                elif mock is not None:
                     response = mock
                 else:
                     assert client is not None
@@ -194,6 +269,8 @@ def main() -> int:
             }
             # Use the real bridge acquisition clock and exact lease/map identity.
             # Host capture time remains qualitative; there is no metric camera TF.
+            current_status_for_bias = None
+            before_status_for_bias = None
             if not args.allow_no_mission:
                 # Inference can outlive several occupancy publications. Pair
                 # a fresh map with a fresh status, preserving the older frame's
@@ -213,6 +290,8 @@ def main() -> int:
                     stack2 = observer.observe(frame_id=f"{run_id}-{requested_latest}",
                         before=before, after=after, current=current,
                         mission=mission, slam_map=current_map, perception=response)
+                    current_status_for_bias = current
+                    before_status_for_bias = before
                 except LiveEvidenceUnavailable as exc:
                     event = {"window": inference_count, "provenance_withheld": str(exc),
                              "latest_frame_id": requested_latest, "dispatch_performed": False}
@@ -230,6 +309,14 @@ def main() -> int:
                                packet_id=f"{run_id}-{inference_count:04d}")
             decision = session.decide(rollout_mode="shadow").to_dict()
             assert session.selection is not None
+            bias = {"attempted": False, "accepted": False, "reason": "disabled"}
+            if (advisor is not None and observer is not None
+                    and current_status_for_bias is not None and before_status_for_bias is not None):
+                bias = advise_live_mission(advisor, session=session, stack2=stack2,
+                    response=response, current=current_status_for_bias,
+                    before=before_status_for_bias,
+                    expected_mission_id=mission_id)
+                bias_accepted += int(bias["accepted"])
             semantic = {
                 "session_id": session.session_id,
                 "mission_id": session.mission_id,
@@ -237,6 +324,7 @@ def main() -> int:
                 "next_decision": decision,
                 "rollout_mode": "shadow",
                 "dispatch_performed": False,
+                "mission_bias": bias,
                 "stack2": stack2,
             }
             session.save(session_path)
@@ -253,6 +341,7 @@ def main() -> int:
                 "confidence": response["confidence"],
                 "next_skill": decision["skill_call"]["name"],
                 "dispatch_performed": False,
+                "mission_bias": bias,
             }
             with trace_path.open("a") as trace:
                 trace.write(json.dumps(event, sort_keys=True) + "\n")
@@ -274,6 +363,8 @@ def main() -> int:
         "inference_errors": inference_errors,
         "capture": capture.stats(),
         "dispatch_performed": False,
+        "bias_mission_enabled": bias_mission_enabled,
+        "bias_accepted": bias_accepted,
         "agent_session": str(session_path),
         "agent_session_id": session.session_id,
         "stack2_checkpoint": None if observer is None else str(observer.checkpoint.path),
