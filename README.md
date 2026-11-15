@@ -11,8 +11,8 @@ BEEP combines the vendor motor SDK, 2D LiDAR, ROS 2, Cartographer, camera, and a
 `main` holds the **Stack 2** continuous autonomous embodiment architecture plus the hardware, ROS, vision and audio infrastructure. The earlier Stack 1 prototype (cap-search stop-think-act policy, `ClosedLoopExecutor`, bridge `IntentMailbox`, external room-camera observer, fair/presentation scripts and per-phase gate docs) is archived on branch `archive/stack1-cap-prototype`.
 
 ```text
-bridge source    0.22.1-stack2-live-observe (not yet deployed)
-bridge deployed  0.21.1-phase-c-audit    (stationary readback verified 2026-11-11)
+bridge source    0.22.2-stack2-greeting-optional (host-tested, not deployed)
+bridge deployed  0.22.1-stack2-live-observe      (stationary Stage 1 readback 2026-11-15)
 ```
 
 Verified on hardware (stationary, November 11, 2026):
@@ -21,7 +21,7 @@ Verified on hardware (stationary, November 11, 2026):
 - direct MJPEG camera (port 6500, 640x480), moving-frame diversity ring, contact sheets, and live `gemini-3.5-flash-lite` structured scene perception
 - USB microphone and analog speaker streams through PortAudio/ALSA (bind by card name; card numbers swap across boots)
 
-Implemented and host-tested; the new bridge/runner join is not yet deployed or physically verified:
+Implemented and host-tested; the Stack 2 runner join is not yet physically verified in motion:
 
 - Stack 2 spatial memory and attention in `beep_agent/`: event envelope and journal, map revision, pose history, place graph, episodes, tactical gate, strategic owner, visual grounding, viewpoint scoring, goal coordinator, atomic checkpoint, model session and observe-only supervisor; the live runner currently uses only the qualitative camera/attention/strategy subset
 - audio contracts in `beep_audio/`: PCM capture, VAD, echo reference and barge-in, clock alignment, social interruption

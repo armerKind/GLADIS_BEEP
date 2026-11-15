@@ -4,9 +4,11 @@
 
 See [HANDOFF.md](HANDOFF.md) for the fresh-agent checkpoint and next engineering tasks.
 
-Repository bridge source: `0.22.1-stack2-live-observe`. It removes the Stack 1 intent mailbox, `/mission/intent`, `/mission/executor/claim` and `/observer/stop`.
+Repository bridge source: `0.22.2-stack2-greeting-optional` (not deployed). It tolerates an optional vendor control greeting timeout while retaining lease/deadline/sensor/stop-sequence packet guards. The Stack 2 bridge removes the Stack 1 intent mailbox, `/mission/intent`, `/mission/executor/claim` and `/observer/stop`.
 
 Last confirmed deployed/read-back bridge: `0.22.1-stack2-live-observe` (November 15, 2026). **Stationary Stage 1 passed** after a stopped-only downstream SLAM reset and guarded vendor camera patch. Across eleven seconds, `robot_monotonic_s` advanced `1747.49 → 1758.50`, scans `534 → 644`, verified map revision stayed `0`, `/slam_map` was usable on all twelve polls, and occupancy snapshots advanced `grid-52 → grid-63`. Ten successive `/frame.jpg` responses were decodable 640×480 JPEGs. `last_command=app:stop` and `last_command_at=1794750002.9193337` stayed unchanged; no new `app_send` or stop events appeared. Final readback: no mission, `moving=false`, lease null, `slam.usable=true`. Earlier failed gate and root-cause details are in `HANDOFF.md`. This is **not** moving-hardware validation.
+
+The first supervised reverse request on the deployed build returned HTTP 500 after a roughly 0.25-second control-greeting timeout; no reverse packet or moving state was observed. Source `0.22.2` treats only the greeting timeout as optional. It has not been deployed or given a supervised reverse trial; do not interpret the failed request as a motion/heading result.
 
 Run the offline suite before any deployment (see the README's Development section). Restart the Cartographer/occupancy/bridge services only when stopped and unowned and after diagnosing a corrupt map; a mapping restart changes the pose origin, so restart the bridge last to clear its old guarded anchor.
 

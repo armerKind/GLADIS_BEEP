@@ -3,10 +3,10 @@
 Current bridge line:
 
 ```text
-0.22.1-stack2-live-observe (repository source, not yet deployed)
+0.22.2-stack2-greeting-optional (repository source, not yet deployed)
 ```
 
-The last stationary-verified Pi bridge is `0.21.1-phase-c-audit` (November 11, 2026). The new camera/provenance and mission-bias source has host integration tests only; do not treat those as physical commissioning.
+The last stationary-verified Pi bridge is `0.22.1-stack2-live-observe` (November 15, 2026). The optional-greeting fix is host-tested only; do not treat that as physical motion commissioning.
 
 Base URLs:
 

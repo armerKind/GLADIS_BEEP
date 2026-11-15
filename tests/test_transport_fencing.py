@@ -178,11 +178,34 @@ class TransportFencingTests(unittest.TestCase):
         self.assertEqual(self.first_writes(), [])
         self.assertTrue(self.lease.cancel_event.is_set())
 
-    def test_greeting_timeout_aborts_without_writes(self):
+    def test_optional_greeting_timeout_allows_valid_owned_motion(self):
         worker = self.start("recv", "timeout")
         self.finish(worker)
+        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]),
+                                               bridge.pkt(0x11, [0, 100])])
+
+    def test_optional_greeting_timeout_allows_owned_reverse_packet(self):
+        self.rig = SocketRig("recv", "timeout")
+        self.rig.release.set()
+        bridge.motion_context.lease = self.lease
+        try:
+            bridge.app_send("backward")
+        finally:
+            del bridge.motion_context.lease
+        self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]),
+                                               bridge.pkt(0x11, [0, 0x9C])])
+
+    def test_cancel_during_greeting_timeout_still_fences_motion(self):
+        worker = self.start("recv", "timeout")
+        self.lease.cancel_event.set()
+        self.finish(worker)
         self.assertEqual(self.first_writes(), [])
-        self.assertTrue(self.lease.cancel_event.is_set())
+
+    def test_stale_sensors_after_greeting_timeout_still_fence_motion(self):
+        worker = self.start("recv", "timeout")
+        self.status["scan_age_s"] = 30
+        self.finish(worker)
+        self.assertEqual(self.first_writes(), [])
 
     def test_cancel_during_mode_backpressure_does_not_retry(self):
         worker = self.start("mode")

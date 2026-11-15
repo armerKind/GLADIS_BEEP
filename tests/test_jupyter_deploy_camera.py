@@ -39,7 +39,7 @@ class CameraDeployTests(unittest.TestCase):
         code = remote_code()
         for flag in ('True', 'False'):
             with self.subTest(flag=flag):
-                rendered = code.replace('__EXPECTED_VERSION__', '"0.22.1-stack2-live-observe"')
+                rendered = code.replace('__EXPECTED_VERSION__', '"0.22.2-stack2-greeting-optional"')
                 rendered = rendered.replace('__APPLY_VENDOR_CAMERA_PATCH__', flag)
                 compile(rendered, '<remote-jupyter-deploy>', 'exec')
 

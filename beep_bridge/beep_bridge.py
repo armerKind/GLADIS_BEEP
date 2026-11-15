@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.1-stack2-live-observe",
+    "version": "0.22.2-stack2-greeting-optional",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -452,11 +452,11 @@ def app_transaction(action, packets):
             if action != "stop":
                 try:
                     sock.recv(256)
-                except TimeoutError:
-                    # Preserve the legacy unowned optional greeting. Owned
-                    # motion aborts on timeout rather than continuing to write.
-                    if lease is not None:
-                        raise
+                except (TimeoutError, socket.timeout):
+                    # The vendor's initial battery greeting is optional and
+                    # may arrive later than this read. Packet guards below
+                    # still recheck lease, deadline, sensors and stop sequence.
+                    pass
             with app_io_lock:
                 app_packet_guard(action, lease, deadline, stop_seq)
                 for packet, delay in packets:
