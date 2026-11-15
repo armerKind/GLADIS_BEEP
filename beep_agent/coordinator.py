@@ -118,7 +118,7 @@ class GoalCoordinator:
                 or not isinstance(blocked[2], str) or not blocked[2])):
             raise CoordinatorError("invalid blocked revision checkpoint")
         revision = raw["bound_revision"]
-        if (revision is not None and (type(revision) is not int or revision < 1
+        if (revision is not None and (type(revision) is not int or revision < 0
                 or revision > session.strategy["goal_revision"])):
             raise CoordinatorError("invalid bound goal revision")
         if (bound is None) != (revision is None) or (bound is None) != (session.execution["lease_id"] is None):
@@ -200,6 +200,21 @@ class GoalCoordinator:
             self._bound_map = context.map_identity
             self._bound_owner = (context.mission_id, context.lease_id)
             self._bound_revision = goal_revision
+
+    def observe_existing_owner(self, context: CoordinatorContext) -> None:
+        """Shadow-attach a pre-existing bridge lease; grants no route or motor authority."""
+        with self._lock, self.session._strategy_lock:
+            if (self._bound_owner is not None or self.session.execution["lease_id"] is not None
+                    or self.session.mission_id is not None or context.boot_id != self.session.boot_id
+                    or not context.mission_id or not context.lease_id
+                    or not context.local_motion_active or not context.map_verified
+                    or not context.sensors_fresh):
+                raise CoordinatorError("cannot observe unverified or mismatched live owner")
+            self.session.bind_motion(mission_id=context.mission_id,
+                                     lease_id=context.lease_id, boot_id=context.boot_id)
+            self._bound_map = context.map_identity
+            self._bound_owner = (context.mission_id, context.lease_id)
+            self._bound_revision = self.session.strategy["goal_revision"]
 
     def complete_segment(self, context: CoordinatorContext, *, result: str,
                          release_id: str) -> None:

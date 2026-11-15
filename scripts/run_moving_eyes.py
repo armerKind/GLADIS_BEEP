@@ -21,6 +21,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from beep_agent import AgentSession, EmbodiedGoal
+from beep_agent.live_bridge_observer import LiveBridgeObserver, LiveEvidenceUnavailable
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
@@ -48,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mark", action="store_true")
     parser.add_argument("--resume-session", type=Path,
                         help="Resume only when robot, mission identity and freshness match")
+    parser.add_argument("--resume-checkpoint", type=Path,
+                        help="Resume a Stack 2 checkpoint and adjacent journal under exact bridge identity")
     return parser.parse_args()
 
 
@@ -92,6 +95,8 @@ def main() -> int:
         raise SystemExit("--max-inferences must be within [0, 1000]")
     if args.inference_interval < 0 or args.inference_interval > 600:
         raise SystemExit("--inference-interval must be within [0, 600]")
+    if args.resume_session:
+        raise SystemExit("legacy session-only resume lacks journal/lease identity; use --resume-checkpoint")
 
     initial_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
     if not args.allow_no_mission and (
@@ -112,14 +117,8 @@ def main() -> int:
                                       timeout_s=min(args.timeout, 8.0))
     mission_id = initial_mission.get("id") if isinstance(initial_mission, dict) else None
     fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
-    if args.resume_session:
-        session = AgentSession.load(args.resume_session, expected_robot_id="BEEP", max_age_s=600.0)
-        if session.mission_id != mission_id:
-            raise SystemExit("resume session belongs to a different mission")
-        if fixed_goal is not None and session.fixed_goal != fixed_goal:
-            raise SystemExit("resume session goal conflicts with command-line goal")
-    else:
-        session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
+    session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
+    observer = None
     session_path = output_dir / "agent_session.json"
     deadline = time.monotonic() + args.duration
     inference_count = 0
@@ -193,9 +192,42 @@ def main() -> int:
                 "newest_frame_id_at_completion": newest_latest,
                 "newer_window_available": newest_latest != requested_latest,
             }
-            # Shadow only: the session plans from this evidence, nothing is dispatched.
-            session.update(response, observed_at=frames[-1].captured_at,
-                           packet_id=f"{run_id}-{inference_count:04d}")
+            # Use the real bridge acquisition clock and exact lease/map identity.
+            # Host capture time remains qualitative; there is no metric camera TF.
+            if not args.allow_no_mission:
+                # Inference can outlive several occupancy publications. Pair
+                # a fresh map with a fresh status, preserving the older frame's
+                # capture-time snapshot solely as qualitative provenance.
+                current_map = fetch_slam_map(args.base_url, args.timeout)
+                current = fetch_json(args.base_url, "/status", args.timeout)
+                after = packet["bridge_status"]
+                before = after.get("capture_before") or {}
+                try:
+                    if not isinstance(mission, dict):
+                        raise LiveEvidenceUnavailable("mission disappeared during inference")
+                    if observer is None:
+                        observer = LiveBridgeObserver(output_dir, current, mission, current_map,
+                            resume_checkpoint=getattr(args, "resume_checkpoint", None),
+                            fixed_goal=fixed_goal)
+                        session = observer.session
+                    stack2 = observer.observe(frame_id=f"{run_id}-{requested_latest}",
+                        before=before, after=after, current=current,
+                        mission=mission, slam_map=current_map, perception=response)
+                except LiveEvidenceUnavailable as exc:
+                    event = {"window": inference_count, "provenance_withheld": str(exc),
+                             "latest_frame_id": requested_latest, "dispatch_performed": False}
+                    with trace_path.open("a") as trace:
+                        trace.write(json.dumps(event, sort_keys=True) + "\n")
+                    print(json.dumps(event, sort_keys=True), flush=True)
+                    inference_count += 1
+                    last_inference_finished = time.monotonic()
+                    if args.max_inferences and inference_count >= args.max_inferences:
+                        break
+                    continue
+            else:
+                stack2 = {"status": "bench_only", "motor_authority": False}
+                session.update(response, observed_at=frames[-1].captured_at,
+                               packet_id=f"{run_id}-{inference_count:04d}")
             decision = session.decide(rollout_mode="shadow").to_dict()
             assert session.selection is not None
             semantic = {
@@ -205,6 +237,7 @@ def main() -> int:
                 "next_decision": decision,
                 "rollout_mode": "shadow",
                 "dispatch_performed": False,
+                "stack2": stack2,
             }
             session.save(session_path)
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
@@ -243,6 +276,8 @@ def main() -> int:
         "dispatch_performed": False,
         "agent_session": str(session_path),
         "agent_session_id": session.session_id,
+        "stack2_checkpoint": None if observer is None else str(observer.checkpoint.path),
+        "event_journal": None if observer is None else str(observer.journal.path),
         "mission_id": session.mission_id,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))

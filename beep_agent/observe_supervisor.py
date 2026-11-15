@@ -76,22 +76,24 @@ class ObserveOnlySupervisor:
         last_journal_time = self._check_alignment()
         if (not isinstance(event, EventEnvelope) or not isinstance(attention, TacticalEvent)
                 or not isinstance(context, CoordinatorContext) or not isinstance(perception, dict)
-                or self.session.execution['lease_id'] is not None
-                or context.local_motion_active or context.mission_id is not None
-                or context.lease_id is not None
+                or (context.mission_id, context.lease_id) !=
+                   (self.session.mission_id, self.session.execution['lease_id'])
+                or context.local_motion_active != (context.lease_id is not None)
                 or context.boot_id != self.session.boot_id
                 or not context.map_verified or not context.sensors_fresh
                 or (event.robot_id, event.session_id, event.boot_id) !=
                    (self.session.robot_id, self.session.session_id, self.session.boot_id)
-                or (event.mission_id, event.lease_id) != (None, None)
+                or (event.mission_id, event.lease_id) != (context.mission_id, context.lease_id)
                 or (event.source, event.event_kind) != ('camera', 'frame_acquired')
-                or (event.map_epoch, event.map_revision, event.map_snapshot_id) !=
-                   (context.map_epoch, context.map_revision, context.map_snapshot_id)
+                or (event.map_epoch, event.map_revision) !=
+                   (context.map_epoch, context.map_revision)
+                or (event.map_snapshot_id != context.map_snapshot_id and
+                    (event.timestamp_quality != 'ingest_approximate' or event.spatial_ready))
                 or not event.acquired_at_robot <= context.now_robot
                 or (attention.session_id, attention.boot_id, attention.map_epoch,
                     attention.map_revision, attention.mission_id, attention.lease_id) !=
                    (event.session_id, event.boot_id, event.map_epoch,
-                    event.map_revision, None, None)
+                    event.map_revision, event.mission_id, event.lease_id)
                 or (attention.source, attention.suggestion) !=
                    ('visual_salience', 'attention_candidate')
                 or attention.evidence_ids != (event.event_id,)
@@ -114,7 +116,7 @@ class ObserveOnlySupervisor:
             observed_at=event.acquired_at_robot, packet_id=event.event_id)
         disposition = self.tactical.ingest(attention, now_robot=context.now_robot,
             map_epoch=context.map_epoch, map_revision=context.map_revision,
-            locomotion_active=False, mixer_allowed=False)
+            locomotion_active=context.local_motion_active, mixer_allowed=False)
         if not disposition.accepted or disposition.motor_authority:
             raise SupervisorError('tactical event was not admitted as advisory')
         # First make acquisition durable. If the later checkpoint fails, a
@@ -122,7 +124,8 @@ class ObserveOnlySupervisor:
         if not self.recorder.record_acquisition(event):
             raise SupervisorError('duplicate acquisition')
         self.session.update(perception, observed_at=event.acquired_at_robot,
-                            packet_id=event.event_id, mission_id=None, lease_id=None)
+                            packet_id=event.event_id, mission_id=event.mission_id,
+                            lease_id=event.lease_id)
         self.model.offer(ModelWindow(self.session.world.sequence,
             event.acquired_at_robot, event.map_epoch, event.map_revision,
             (event.event_id,)))

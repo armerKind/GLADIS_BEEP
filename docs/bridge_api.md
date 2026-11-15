@@ -3,10 +3,10 @@
 Current bridge line:
 
 ```text
-0.17.3-moving-camera-handshake
+0.22.1-stack2-live-observe (repository source, not yet deployed)
 ```
 
-This repository version is physically deployed and verified on BEEP. The powered gate covered asynchronous mission start/status/exact cancellation, camera-timeout isolation from motion, and four-frame temporal Gemini perception during gait.
+The last stationary-verified Pi bridge is `0.21.1-phase-c-audit` (November 11, 2026). The new camera/provenance source has host integration tests only; do not treat those as physical commissioning.
 
 Base URLs:
 
@@ -39,6 +39,10 @@ Important status fields:
 - `slam.raw_pose`
 - `slam.pose_valid`, `pose_guard_reason`, and `pose_guard_rejections`
 - `slam.pose_age_s`, `map_age_s`, dimensions, resolution, known cells, and occupied cells
+- `boot_id` and `robot_monotonic_s`; `slam.map_epoch`, `map_revision`,
+  `map_revision_status` (`verified` or `unknown`), and `map_snapshot_id`.
+  `/slam_map` carries the same provenance, including on a stale-grid error.
+  Snapshot IDs advance on validated `/map` callbacks, not on camera requests.
 
 Cartographer's five-second stationary motion filter can make the generic `slam.active` flag briefly false between stationary pose updates. Controllers apply mode-specific freshness rules. Fresh LiDAR is mandatory for LiDAR-aware approach/navigation routines; generic `/move` and vendor `/action` do not perform scan checks.
 
@@ -47,7 +51,7 @@ Cartographer's five-second stationary motion filter can make the generic `slam.a
 | Endpoint | Purpose |
 |---|---|
 | `GET /scan` | LiDAR sector minima, scan age, and scan count |
-| `GET /frame.jpg` | Single JPEG; active leases bypass app-control preparation so capture cannot inject a motor stop |
+| `GET /frame.jpg` | Single JPEG from port 6500; normal reads never connect to port 6000 or send motor-stop packets |
 | `GET /camera.jpg` | Camera alias |
 | `GET /observe` | Status plus legacy map and camera metadata |
 | `GET /slam_map` | Current authoritative Cartographer occupancy grid with origin pose, resolution, age, and cells |
@@ -55,6 +59,9 @@ Cartographer's five-second stationary motion filter can make the generic `slam.a
 | `GET /local_map.svg` | Robot-frame local map rendering |
 
 Camera success depends on `/dev/video0`, the Yahboom service on port `6500`, and lighting. Camera failure does not weaken movement safety, but it does reduce human supervision.
+The bridge sends the non-motor camera-mode handshake once at startup under
+`app_io_lock`; only an actual stream failure retries it. A retry never sends
+the app `0x12` stop packet. This needs stationary Pi validation before deployment.
 
 ## Stop semantics
 

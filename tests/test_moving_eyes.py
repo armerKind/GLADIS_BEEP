@@ -103,7 +103,8 @@ class ContinuousMovingCaptureTests(unittest.TestCase):
                 def one_frame(*_):
                     capture._stop.set()
                     return jpeg()
-                statuses = [{"motion_lease_id": before}, {"motion_lease_id": after}]
+                statuses = [{"boot_id": "boot-1", "motion_lease_id": before},
+                            {"boot_id": "boot-1", "motion_lease_id": after}]
                 with patch("beep_eyes.moving_window.fetch_jpeg", side_effect=one_frame), \
                      patch("beep_eyes.moving_window.fetch_json", side_effect=statuses):
                     capture._run()

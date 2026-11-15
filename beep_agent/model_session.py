@@ -61,7 +61,7 @@ class StrategicModelSession:
     """
 
     def __init__(self, session: AgentSession, journal: EventJournal,
-                 provider: Callable[[dict], dict], *,
+                 provider: Callable[[dict], dict | None], *,
                  episodes_source: Callable[[], list[dict]] | None = None,
                  places_source: Callable[[], list[dict]] | None = None):
         if (not isinstance(session, AgentSession) or session.boot_id is None
@@ -173,6 +173,8 @@ class StrategicModelSession:
                 raw = self.provider(context)
             except Exception:
                 return AdapterOutcome('model_error', self.session.strategy['goal_revision'])
+            if raw is None:
+                return AdapterOutcome('no_proposal', self.session.strategy['goal_revision'])
             with self._lock:
                 if self._pending is not None:
                     return AdapterOutcome('superseded', self.session.strategy['goal_revision'])

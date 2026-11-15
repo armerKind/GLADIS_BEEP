@@ -194,8 +194,18 @@ class ContinuousMovingCapture:
                 # A missing or changing owner makes this frame advisory only.
                 before_lease = before.get("motion_lease_id") if isinstance(before, dict) else None
                 after_lease = status.get("motion_lease_id")
-                if not before_lease or before_lease != after_lease:
+                if (not before_lease or before_lease != after_lease
+                        or not before.get("boot_id") or before.get("boot_id") != status.get("boot_id")):
                     status = dict(status, motion_lease_id=None, capture_ownership_unverified=True)
+                # Request-start robot clock, not sensor exposure; both sides
+                # retain their own provenance for the live journal adapter.
+                status = dict(status, capture_before={
+                    "boot_id": before.get("boot_id"),
+                    "robot_monotonic_s": before.get("robot_monotonic_s"),
+                    "motion_lease_id": before.get("motion_lease_id"),
+                    "slam": {key: (before.get("slam") or {}).get(key) for key in
+                             ("map_epoch", "map_revision", "map_revision_status", "map_snapshot_id")},
+                })
                 with self._lock:
                     frame_id = f"m{self._sequence:06d}"
                     self._sequence += 1

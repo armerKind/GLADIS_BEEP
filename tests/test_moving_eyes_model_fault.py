@@ -23,11 +23,17 @@ class InferenceFaultTests(unittest.TestCase):
         jpeg = buf.getvalue()
         lease = "lease-1"
         now = time.time()
+        robot_now = time.monotonic()
+        provenance = {"map_epoch": 0, "map_revision": 0,
+                      "map_revision_status": "verified", "map_snapshot_id": "grid-1"}
         status = {"moving": True, "motion_lease_id": lease, "scan_age_s": 0.02,
+                  "boot_id": "boot-live", "robot_monotonic_s": robot_now,
+                  "capture_before": {"boot_id": "boot-live", "robot_monotonic_s": robot_now,
+                                     "motion_lease_id": lease, "slam": provenance},
                   "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
                   "sectors": {"front": 2.0, "front_left": 1.0, "front_right": 1.0,
                               "left": 1.0, "right": 1.0, "rear": 1.0},
-                  "slam": {"usable": True, "pose_valid": True}}
+                  "slam": {"usable": True, "pose_valid": True, **provenance}}
         mission = {"id": "mission-1", "lease_id": lease, "state": "running"}
         sample = MovingFrameSample(CapturedFrame("f000", now, jpeg), status)
 
@@ -82,7 +88,8 @@ class InferenceFaultTests(unittest.TestCase):
                  patch.object(run_moving_eyes, "ContinuousMovingCapture", return_value=capture), \
                  patch.object(run_moving_eyes, "gemini_client", return_value=client), \
                  patch.object(run_moving_eyes, "fetch_json", side_effect=get_json), \
-                 patch.object(run_moving_eyes, "fetch_slam_map", return_value={"ok": False}):
+                 patch.object(run_moving_eyes, "fetch_slam_map", return_value={
+                     "ok": True, "boot_id": "boot-live", **provenance}):
                 self.assertEqual(run_moving_eyes.main(), 0)
             run_dir, = Path(directory).iterdir()
             summary = json.loads((run_dir / "summary.json").read_text())

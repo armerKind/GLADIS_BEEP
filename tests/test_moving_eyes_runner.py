@@ -36,7 +36,9 @@ class MovingEyesRunnerTests(unittest.TestCase):
                     content_type = "image/jpeg"
                 elif self.path == "/slam_map":
                     body = json.dumps({
-                        "ok": True, "frame_id": "map", "width": 4, "height": 4,
+                        "ok": True, "boot_id": "boot-live", "map_epoch": 0,
+                        "map_revision": 0, "map_revision_status": "verified",
+                        "map_snapshot_id": "grid-1", "frame_id": "map", "width": 4, "height": 4,
                         "resolution_m": 0.1, "origin_x": -0.2, "origin_y": -0.2,
                         "origin_yaw": 0.0, "map_age_s": 0.1, "known_cells": 12,
                         "occupied_cells": 4,
@@ -47,6 +49,7 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 elif self.path == "/status":
                     body = json.dumps({
                         "moving": True,
+                        "boot_id": "boot-live", "robot_monotonic_s": time.monotonic(),
                         "motion_lease_id": "lease-1",
                         "last_command": "forward",
                         "scan_age_s": 0.02,
@@ -54,12 +57,15 @@ class MovingEyesRunnerTests(unittest.TestCase):
                                  "source": "guarded_cartographer_slam"},
                         "sectors": {"front": 1.2},
                         "slam": {"usable": True, "pose_valid": True, "pose_age_s": 0.03,
+                                 "map_epoch": 0, "map_revision": 0,
+                                 "map_revision_status": "verified", "map_snapshot_id": "grid-1",
                                  "map_age_s": 0.1, "pose_guard_reason": "moving_update"},
                     }).encode()
                     content_type = "application/json"
                 elif self.path == "/mission":
                     body = json.dumps({"mission": {
-                        "id": "mission-1", "state": "running", "started_at": started_at,
+                        "id": "mission-1", "lease_id": "lease-1",
+                        "state": "running", "started_at": started_at,
                         "duration_s": 90, "elapsed_s": time.time() - started_at,
                     }}).encode()
                     content_type = "application/json"
@@ -131,6 +137,12 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 self.assertEqual(semantics[0]["session_id"], semantics[1]["session_id"])
                 self.assertEqual(semantics[0]["mission_id"], "mission-1")
                 self.assertTrue((run / "agent_session.json").exists())
+                self.assertTrue((run / "stack2_checkpoint.json").exists())
+                records = [json.loads(row) for row in (run / "event_journal.jsonl").read_text().splitlines()]
+                self.assertEqual(len(records), 2)
+                self.assertTrue(all(row["timestamp_quality"] == "ingest_approximate"
+                                    and row["capture_local_transform"] is None for row in records))
+                self.assertTrue(all(not item["stack2"]["motor_authority"] for item in semantics))
                 self.assertEqual(seen_posts, [])
         finally:
             server.shutdown()

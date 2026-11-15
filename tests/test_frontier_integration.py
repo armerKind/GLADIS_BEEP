@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import threading
 import time
 import unittest
@@ -8,6 +9,7 @@ import urllib.request
 from unittest.mock import MagicMock, call, patch
 
 from beep_bridge.frontier_planner import OccupancyGrid
+from beep_agent.map_revision import MapRevisionTracker
 
 
 BRIDGE_PATH = Path(__file__).resolve().parents[1] / "beep_bridge" / "beep_bridge.py"
@@ -68,6 +70,36 @@ class FrontierIntegrationTests(unittest.TestCase):
             server.server_close()
             server_thread.join(1.0)
 
+    def test_submap_callback_and_map_publish_live_provenance(self):
+        def item(x, version=0):
+            return SimpleNamespace(trajectory_id=0, submap_index=0, submap_version=version,
+                pose=SimpleNamespace(position=SimpleNamespace(x=x, y=0),
+                    orientation=SimpleNamespace(x=0, y=0, z=0, w=1)))
+        origin = SimpleNamespace(position=SimpleNamespace(x=0, y=0),
+            orientation=SimpleNamespace(x=0, y=0, z=0, w=1))
+        grid = SimpleNamespace(info=SimpleNamespace(width=2, height=2, resolution=0.1,
+            origin=origin), header=SimpleNamespace(frame_id="map"), data=[0, 0, -1, 100])
+        with patch.object(bridge, "map_revisions", MapRevisionTracker()), \
+             patch.object(bridge, "_map_epoch", 0), \
+             patch.object(bridge, "_trajectory_ids", frozenset()), \
+             patch.object(bridge, "_map_snapshot_sequence", 0):
+            self.assertTrue(bridge.submap_callback(SimpleNamespace(submap=[item(0)])))
+            self.assertTrue(bridge.occupancy_callback(grid))
+            first = bridge.slam_map_snapshot()
+            self.assertEqual(first["boot_id"], bridge.BOOT_ID)
+            self.assertEqual((first["map_epoch"], first["map_revision"],
+                              first["map_revision_status"], first["map_snapshot_id"]),
+                             (0, 0, "verified", "grid-1"))
+            self.assertTrue(bridge.submap_callback(SimpleNamespace(submap=[item(0, 1)])))
+            self.assertEqual(bridge.snapshot()["slam"]["map_revision"], 0)
+            self.assertTrue(bridge.submap_callback(SimpleNamespace(submap=[item(.1, 2)])))
+            self.assertTrue(bridge.occupancy_callback(grid))
+            status = bridge.snapshot()
+            self.assertEqual(status["boot_id"], bridge.BOOT_ID)
+            self.assertEqual((status["slam"]["map_revision"],
+                              status["slam"]["map_snapshot_id"]), (1, "grid-2"))
+            self.assertEqual(bridge.slam_map_snapshot()["map_snapshot_id"], "grid-2")
+
     def test_app_step_is_sdk_velocity_not_joystick_percentage(self):
         # Installed app server: int(percent / 100 * 0.2 * width[50]).
         # The prior encoding of step=10 as ten percent produced speed 1.
@@ -77,23 +109,71 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(int(bridge.app_joystick_percent(10) / 100 * 0.2 * 50), 10)
         self.assertEqual(int(10 / 100 * 0.2 * 50), 1)
 
-    def test_camera_capture_during_motion_never_sends_app_stop(self):
+    def test_repeated_camera_http_reads_never_touch_app_port_or_last_command(self):
         jpeg = b"\xff\xd8moving-frame\xff\xd9"
-        control_socket = MagicMock()
-
         class Response:
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def read(self, _size): return jpeg
+        server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        client_open = urllib.request.urlopen
+        real_connect = bridge.socket.create_connection
+        app_connections = []
+        def connect(address, *args, **kwargs):
+            if address[1] == bridge.APP_PORT:
+                app_connections.append(address)
+                raise AssertionError("camera read opened motor port")
+            return real_connect(address, *args, **kwargs)
+        previous_command = bridge.state["last_command"]
+        try:
+            with patch.object(bridge, "_camera_mode_ready", True), \
+                 patch.object(bridge.socket, "create_connection", side_effect=connect), \
+                 patch.object(bridge.urllib.request, "urlopen", return_value=Response()) as stream:
+                for moving in (False, True):
+                    with patch.object(bridge, "active_motion_lease", return_value=object() if moving else None):
+                        for _ in range(3):
+                            with client_open(f"http://127.0.0.1:{server.server_port}/frame.jpg", timeout=2) as response:
+                                self.assertEqual(response.read(), jpeg)
+                self.assertEqual(stream.call_count, 6)
+                self.assertEqual(app_connections, [])
+                self.assertEqual(bridge.state["last_command"], previous_command)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(1)
 
-        with patch.object(bridge, "active_motion_lease", return_value=object()), \
-             patch.object(bridge.socket, "create_connection", return_value=control_socket), \
-             patch.object(bridge.urllib.request, "urlopen", return_value=Response()):
-            frame = bridge.capture_frame(timeout=1)
-        self.assertEqual(frame, jpeg)
-        sent = [entry.args[0] for entry in control_socket.sendall.call_args_list]
-        self.assertEqual(sent, [bridge.pkt(0x0F, [0x01])])
-        self.assertNotIn(bridge.pkt(0x12, [bridge.CMD_PAYLOAD["stop"]]), sent)
+    def test_camera_mode_setup_once_and_failure_retry_never_sends_stop(self):
+        sock = MagicMock()
+        connection = MagicMock()
+        connection.__enter__.return_value = sock
+        with patch.object(bridge, "_camera_mode_ready", False), \
+             patch.object(bridge.socket, "create_connection", return_value=connection) as control:
+            self.assertTrue(bridge.setup_camera_mode())
+            self.assertTrue(bridge.setup_camera_mode())
+            self.assertEqual(control.call_count, 1)
+            self.assertEqual([x.args[0] for x in sock.sendall.call_args_list],
+                             [bridge.pkt(0x0F, [1])])
+
+    def test_failed_stream_reprepares_mode_once_without_motor_stop(self):
+        jpeg = b"\xff\xd8recovered\xff\xd9"
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _size): return jpeg
+        sock = MagicMock()
+        connection = MagicMock()
+        connection.__enter__.return_value = sock
+        with patch.object(bridge, "_camera_mode_ready", True), \
+             patch.object(bridge.socket, "create_connection", return_value=connection) as control, \
+             patch.object(bridge.urllib.request, "urlopen",
+                          side_effect=[TimeoutError("camera stalled"), Response()]) as stream:
+            self.assertEqual(bridge.capture_frame(timeout=1), jpeg)
+            self.assertEqual(control.call_count, 1)
+            self.assertEqual(stream.call_count, 2)
+            self.assertEqual([x.args[0] for x in sock.sendall.call_args_list],
+                             [bridge.pkt(0x0F, [1])])
 
     def test_app_backward_uses_normal_gait_negative_analog_packet(self):
         sock = MagicMock()

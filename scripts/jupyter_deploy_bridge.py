@@ -30,6 +30,7 @@ HOST = os.environ.get("BEEP_HOST", "192.168.8.88")
 PASSWORD = os.environ.get("BEEP_JUPYTER_PASSWORD", "yahboom")
 BRIDGE_SRC = Path(os.environ.get("BEEP_BRIDGE_SRC", "beep_bridge/beep_bridge.py"))
 PLANNER_SRC = Path(os.environ.get("BEEP_PLANNER_SRC", "beep_bridge/frontier_planner.py"))
+MAP_REVISION_SRC = Path("beep_agent/map_revision.py")
 SLAM_CONFIG_SRC = Path(os.environ.get("BEEP_SLAM_CONFIG_SRC", "config/beep_2d.lua"))
 SAVE_SLAM_SRC = Path(os.environ.get("BEEP_SAVE_SLAM_SRC", "scripts/save_slam_map.sh"))
 SERVICE_SRC = Path(os.environ.get("BEEP_SERVICE_SRC", "systemd/beep-bridge.service"))
@@ -66,6 +67,7 @@ def login() -> tuple[requests.Session, str]:
 
 def put_bridge(session: requests.Session, xsrf: str, content: str) -> None:
     planner_content = PLANNER_SRC.read_text()  # Fail before changing the remote if missing.
+    revision_content = MAP_REVISION_SRC.read_text()  # Required by bridge at startup.
     headers = {"X-XSRFToken": xsrf, "Content-Type": "application/json"}
     # Best-effort backup.
     old = session.get(f"{BASE}/api/contents/beep_bridge/beep_bridge.py?content=1", timeout=8)
@@ -94,6 +96,18 @@ def put_bridge(session: requests.Session, xsrf: str, content: str) -> None:
     )
     planner.raise_for_status()
     print("uploaded: /home/pi/beep_bridge/frontier_planner.py")
+    directory = session.get(f"{BASE}/api/contents/beep_bridge/beep_agent?content=0", timeout=8)
+    if directory.status_code == 404:
+        created = session.put(f"{BASE}/api/contents/beep_bridge/beep_agent", headers=headers,
+                              json={"type": "directory"}, timeout=10)
+        created.raise_for_status()
+    else:
+        directory.raise_for_status()
+    revision = session.put(f"{BASE}/api/contents/beep_bridge/beep_agent/map_revision.py",
+                           headers=headers,
+                           json={"type": "file", "format": "text", "content": revision_content}, timeout=10)
+    revision.raise_for_status()
+    print("uploaded: /home/pi/beep_bridge/beep_agent/map_revision.py")
     if SLAM_CONFIG_SRC.exists():
         slam_config = session.put(
             f"{BASE}/api/contents/cartographer_ws2/install/cartographer_ros/share/cartographer_ros/configuration_files/beep_2d.lua",

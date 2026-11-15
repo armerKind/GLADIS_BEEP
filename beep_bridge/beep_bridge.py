@@ -39,6 +39,7 @@ from frontier_planner import (  # noqa: E402
     inflate_obstacles,
     nearest_free_cell,
 )
+from beep_agent.map_revision import MapRevisionTracker  # noqa: E402
 
 HOST = os.environ.get("BEEP_APP_HOST", "192.168.8.88")
 APP_PORT = int(os.environ.get("BEEP_APP_PORT", "6000"))
@@ -143,6 +144,12 @@ for _trick_name, _trick_meta in TRICK_ACTIONS.items():
 sdk_dog = None
 sdk_error = None
 sdk_profile_key = None
+_camera_mode_ready = False
+map_revisions = MapRevisionTracker()
+_map_epoch = 0
+_trajectory_ids = frozenset()
+_submap_versions = {}
+_map_snapshot_sequence = 0
 
 state_lock = threading.RLock()
 motion_lock = threading.RLock()
@@ -160,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.0-stack2-cutover",
+    "version": "0.22.1-stack2-live-observe",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -177,7 +184,8 @@ state = {
     "last_frame_at": None,
     "last_frame_bytes": None,
     "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0, "source": "dead_reckoning", "confidence": 0.25, "scan_match_score": None},
-    "slam": {"active": False, "pose_at": None, "pose_age_s": None, "map_at": None, "map_age_s": None, "map_width": None, "map_height": None, "resolution_m": None},
+    "slam": {"active": False, "pose_at": None, "pose_age_s": None, "map_at": None, "map_age_s": None, "map_width": None, "map_height": None, "resolution_m": None,
+             "map_epoch": 0, "map_revision": None, "map_revision_status": "unknown", "map_snapshot_id": None},
     "map": {"active": False, "updated_at": None, "scan_updates": 0, "occupied_cells": 0, "free_cells": 0, "quality": "none"},
 }
 last_scan = None
@@ -972,6 +980,53 @@ def guard_slam_pose(accepted, stationary_anchor, raw, moving):
 
 MAX_SLAM_MAP_CELLS = 1_000_000  # Bound map work on the safety-scan ROS executor.
 
+def submap_callback(msg):
+    """Observe real Cartographer placements; never infer revision from /map ticks."""
+    global _map_epoch, _trajectory_ids, _submap_versions
+    try:
+        submaps = {}
+        versions = {}
+        trajectories = set()
+        for item in msg.submap:
+            trajectory = int(item.trajectory_id)
+            index = int(item.submap_index)
+            if trajectory < 0 or index < 0:
+                raise ValueError("negative submap identity")
+            trajectories.add(trajectory)
+            p, q = item.pose.position, item.pose.orientation
+            key = f"{trajectory}:{index}"
+            if key in submaps:
+                raise ValueError("duplicate submap")
+            versions[key] = int(item.submap_version)
+            submaps[key] = (float(p.x), float(p.y),
+                            quaternion_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w)),
+                            int(item.submap_version))
+        if not submaps:
+            raise ValueError("empty submap list")
+        with state_lock:
+            if ((_trajectory_ids and not trajectories <= _trajectory_ids)
+                    or any(key in _submap_versions and version < _submap_versions[key]
+                           for key, version in versions.items())):
+                _map_epoch += 1
+            _trajectory_ids = frozenset(trajectories)
+            _submap_versions = versions
+            revision, status = map_revisions.observe(submaps, boot_id=BOOT_ID,
+                                                      map_epoch=_map_epoch, healthy=True)
+            slam = dict(state.get("slam") or {})
+            slam.update(map_epoch=_map_epoch, map_revision=revision,
+                        map_revision_status=status)
+            state["slam"] = slam
+        return True
+    except Exception as exc:
+        with state_lock:
+            map_revisions.observe({}, boot_id=BOOT_ID, map_epoch=_map_epoch, healthy=False)
+            slam = dict(state.get("slam") or {})
+            slam.update(map_epoch=_map_epoch, map_revision=None,
+                        map_revision_status="unknown", submap_error=repr(exc))
+            state["slam"] = slam
+        return False
+
+
 def occupancy_callback(msg):
     """Publish a validated map atomically; False permanently sheds a bad feed.
 
@@ -979,7 +1034,7 @@ def occupancy_callback(msg):
     header must never leave a previously valid map authoritative or kill the
     shared ROS executor. A bridge restart is required to rearm a shed feed.
     """
-    global slam_grid
+    global slam_grid, _map_snapshot_sequence
     width = height = 0
     reason = None
     frame_id = "map"
@@ -1011,14 +1066,17 @@ def occupancy_callback(msg):
             slam = dict(state.get("slam") or {})
             slam.update({"map_at": None, "map_age_s": None, "map_width": width,
                          "map_height": height, "known_cells": 0, "occupied_cells": 0,
+                         "map_snapshot_id": None,
                          "map_rejected": reason})
             state["slam"] = slam
         return False
     now = time.time()
     with state_lock:
         slam_grid = grid
+        _map_snapshot_sequence += 1
         slam = dict(state.get("slam") or {})
         slam.update({"map_at": now, "map_age_s": 0.0,
+                     "map_snapshot_id": f"grid-{_map_snapshot_sequence}",
                      "frame_id": frame_id,
                      "map_width": width, "map_height": height,
                      "resolution_m": resolution, "known_cells": known,
@@ -1049,6 +1107,7 @@ def ros_thread():
         from rclpy.node import Node
         from sensor_msgs.msg import LaserScan
         from nav_msgs.msg import OccupancyGrid
+        from cartographer_ros_msgs.msg import SubmapList
         from rclpy.time import Time
         from tf2_ros import Buffer, TransformListener
     except Exception as e:
@@ -1062,6 +1121,7 @@ def ros_thread():
             self.create_subscription(LaserScan, "/scan", scan_callback, 10)
             self.map_feed_shed = False
             self.map_subscription = self.create_subscription(OccupancyGrid, "/map", self.receive_map, 1)
+            self.create_subscription(SubmapList, "/submap_list", submap_callback, 10)
             self.tf_buffer = Buffer()
             self.tf_listener = TransformListener(self.tf_buffer, self)
             self.accepted_slam_pose = None
@@ -1140,12 +1200,17 @@ def ros_thread():
 def snapshot(full=False):
     with state_lock:
         out = dict(state)
+        out["boot_id"] = BOOT_ID
+        out["robot_monotonic_s"] = time.monotonic()
         # Explicit live readback of the existing hard-disabled semantic path.
         # This field does not grant or change execution authority.
         out["semantic_execution_enabled"] = False
         out["uptime_s"] = round(time.time() - state["started_at"], 2)
         out["scan_age_s"] = None if not state.get("scan_at") else round(time.time() - state["scan_at"], 3)
         slam = dict(out.get("slam") or {})
+        revision = map_revisions.status()
+        slam.update(map_epoch=_map_epoch, map_revision=revision["map_revision"],
+                    map_revision_status=revision["status"])
         slam["pose_age_s"] = None if not slam.get("pose_at") else round(time.time() - float(slam["pose_at"]), 3)
         slam["map_age_s"] = None if not slam.get("map_at") else round(time.time() - float(slam["map_at"]), 3)
         pose_age = slam.get("pose_age_s")
@@ -1274,65 +1339,60 @@ def run_supervised_calibration(action: str, duration: float):
             "duration": duration, "supervision": supervised, "before": before, "status": after}
 
 
-def capture_frame(timeout=4.0, max_bytes=1_500_000):
-    """Return one JPEG from the MJPEG stream.
-
-    The Yahboom video server may connect but emit no bytes unless the app
-    control state is Standard/Fullscreen. Stationary capture may prepare that
-    mode. During an active motion lease, send only that non-motion mode packet;
-    the motor-stop packet remains categorically forbidden.
-    """
-    timeout = float(timeout)
-    deadline = time.time() + timeout
-    ctrl = None
-    moving_capture = active_motion_lease() is not None
-    if moving_capture:
-        remember("moving_frame_requested")
-    try:
-        ctrl = socket.create_connection((HOST, APP_PORT), timeout=1.2)
-        ctrl.settimeout(0.25)
+def setup_camera_mode(*, force=False):
+    """One bridge-lifecycle app handshake, retried only after stream failure."""
+    global _camera_mode_ready
+    with app_io_lock:
+        if _camera_mode_ready and not force:
+            return True
         try:
-            ctrl.recv(256)
-        except Exception:
-            pass
-        ctrl.sendall(pkt(0x0F, [0x01]))  # Standard/control mode; not a motor command.
-        if not moving_capture:
-            time.sleep(0.05)
-            ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
-            time.sleep(0.15)
-    except Exception as e:
-        remember("camera_standard_failed", moving_capture=moving_capture, error=repr(e))
+            with socket.create_connection((HOST, APP_PORT), timeout=1.2) as ctrl:
+                ctrl.settimeout(0.25)
+                try:
+                    ctrl.recv(256)
+                except Exception:
+                    pass
+                ctrl.sendall(pkt(0x0F, [0x01]))
+            _camera_mode_ready = True
+            return True
+        except Exception as exc:
+            _camera_mode_ready = False
+            remember("camera_mode_setup_failed", error=repr(exc))
+            return False
 
-    try:
-        req = urllib.request.Request(CAMERA_URL, headers={"User-Agent": "beep-bridge/0.3"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            buf = bytearray()
-            while time.time() < deadline and len(buf) < max_bytes:
-                chunk = r.read(4096)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                start = buf.find(b"\xff\xd8")
-                end = buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
-                if start >= 0 and end >= 0:
-                    jpg = bytes(buf[start:end + 2])
-                    with state_lock:
-                        state["last_frame_at"] = time.time()
-                        state["last_frame_bytes"] = len(jpg)
-                    remember("frame", bytes=len(jpg), moving_capture=moving_capture)
-                    return jpg
-    finally:
-        if ctrl is not None:
-            try:
-                if not moving_capture:
-                    ctrl.sendall(pkt(0x12, [CMD_PAYLOAD["stop"]]))
-            except Exception:
-                pass
-            try:
-                ctrl.close()
-            except Exception:
-                pass
+
+def _read_camera_stream(timeout, max_bytes):
+    deadline = time.time() + timeout
+    req = urllib.request.Request(CAMERA_URL, headers={"User-Agent": "beep-bridge/0.3"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        buf = bytearray()
+        while time.time() < deadline and len(buf) < max_bytes:
+            chunk = r.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            start = buf.find(b"\xff\xd8")
+            end = buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+            if start >= 0 and end >= 0:
+                jpg = bytes(buf[start:end + 2])
+                with state_lock:
+                    state["last_frame_at"] = time.time()
+                    state["last_frame_bytes"] = len(jpg)
+                remember("frame", bytes=len(jpg), moving_capture=active_motion_lease() is not None)
+                return jpg
     raise TimeoutError("no JPEG frame from MJPEG stream")
+
+
+def capture_frame(timeout=4.0, max_bytes=1_500_000):
+    """Read port 6500 only on the normal path; never send a motor packet."""
+    timeout = float(timeout)
+    try:
+        return _read_camera_stream(timeout, max_bytes)
+    except (OSError, TimeoutError):
+        # An actual stream failure can mean the vendor server lost camera mode.
+        if not setup_camera_mode(force=True):
+            raise
+        return _read_camera_stream(timeout, max_bytes)
 
 
 
@@ -1923,11 +1983,17 @@ def slam_map_snapshot():
     with state_lock:
         grid = slam_grid
         slam = dict(state.get("slam") or {})
+        revision = map_revisions.status()
+        provenance = {"boot_id": BOOT_ID, "map_epoch": _map_epoch,
+                      "map_revision": revision["map_revision"],
+                      "map_revision_status": revision["status"],
+                      "map_snapshot_id": slam.get("map_snapshot_id")}
     map_at = slam.get("map_at")
     if grid is None or map_at is None or time.time() - float(map_at) > 2.5:
-        return {"ok": False, "reason": "slam_grid_unavailable_or_stale"}
+        return {"ok": False, "reason": "slam_grid_unavailable_or_stale", **provenance}
     return {
         "ok": True,
+        **provenance,
         "frame_id": slam.get("frame_id") or "map",
         "width": grid.width,
         "height": grid.height,
@@ -3476,6 +3542,7 @@ def main():
     MAP_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=ros_thread, daemon=True).start()
     stop_burst(1)
+    setup_camera_mode()
     httpd = ThreadingHTTPServer((HTTP_BIND, HTTP_PORT), Handler)
     if MOTOR_BACKEND == "sdk":
         try:
