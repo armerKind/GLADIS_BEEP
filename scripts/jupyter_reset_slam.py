@@ -72,6 +72,53 @@ for service, wanted in expected.items():
     print(service, actual)
     if actual != wanted:
         raise SystemExit(1)
+
+def wait_for_usable_slam(seconds):
+    previous_scan_count = None
+    advancing = False
+    for _ in range(seconds):
+        require_stopped()
+        status = json.load(urllib.request.urlopen('http://127.0.0.1:8766/status', timeout=5))
+        count = status.get('scan_count', 0)
+        if previous_scan_count is not None and count > previous_scan_count:
+            advancing = True
+        previous_scan_count = count
+        slam = status.get('slam') or {}
+        if (advancing and status.get('scan_age_s', float('inf')) < .6
+                and slam.get('usable') is True):
+            print('SLAM ready: advancing fresh scans, valid pose and map')
+            return True
+        time.sleep(1)
+    print('SLAM not ready:', slam.get('submap_error'), slam.get('tf_error'))
+    return False
+
+if not wait_for_usable_slam(15):
+    # A downstream-only reset can leave Cartographer subscribed to /scan but
+    # receiving no scan samples. Recreate the vendor publisher once, while
+    # stopped and unowned, before rebuilding Cartographer's empty trajectory.
+    require_stopped()
+    baseline = json.load(urllib.request.urlopen('http://127.0.0.1:8766/status', timeout=5)).get('scan_count', 0)
+    result = subprocess.run(['sudo', 'systemctl', 'restart', 'YahboomStart'],
+                            text=True, capture_output=True, timeout=50)
+    print('restart authoritative LiDAR launch', result.returncode, result.stderr.strip())
+    if result.returncode:
+        raise RuntimeError('YahboomStart restart failed')
+    for _ in range(20):
+        time.sleep(1)
+        require_stopped()
+        status = json.load(urllib.request.urlopen('http://127.0.0.1:8766/status', timeout=5))
+        if (status.get('scan_count', 0) > baseline
+                and status.get('scan_age_s', float('inf')) < .6):
+            break
+    else:
+        raise RuntimeError('fresh LiDAR scans did not resume after YahboomStart restart')
+    require_stopped()
+    result = subprocess.run(['sudo', 'systemctl', 'restart',
+                             'beep-cartographer', 'beep-occupancy-grid'],
+                            text=True, capture_output=True, timeout=45)
+    print('restart downstream SLAM', result.returncode, result.stderr.strip())
+    if result.returncode or not wait_for_usable_slam(30):
+        raise RuntimeError('SLAM remains unusable after one publisher/downstream reset')
 '''
     uri = f"ws://{HOST}:8888/api/kernels/{kernel_id}/channels"
     try:
@@ -83,7 +130,7 @@ for service, wanted in expected.items():
                 "channel": "shell", "buffers": [],
             }
             await ws.send(json.dumps(message))
-            deadline = time.monotonic() + 75
+            deadline = time.monotonic() + 240
             output: list[str] = []
             while time.monotonic() < deadline:
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.monotonic())))

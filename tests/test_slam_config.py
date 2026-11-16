@@ -25,14 +25,16 @@ class SlamConfigTests(unittest.TestCase):
         text = CONFIG.read_text()
         self.assertNotEqual(lua_string(text, "published_frame"), "base_link")
 
-    def test_reset_preserves_healthy_lidar_owner_and_restarts_downstream_slam(self):
+    def test_reset_preserves_healthy_lidar_owner_before_bounded_recovery(self):
         text = RESET_SCRIPT.read_text()
         stop_duplicate = text.index("'stop', 'XGO_Start'")
         restart_slam = text.index("'restart', 'beep-cartographer', 'beep-occupancy-grid'")
         restart_bridge = text.index("'restart', 'beep-bridge'")
+        fallback = text.index("'restart', 'YahboomStart'")
         self.assertLess(stop_duplicate, restart_slam)
         self.assertLess(restart_slam, restart_bridge)
-        self.assertNotIn("'restart', 'YahboomStart'", text)
+        self.assertLess(restart_bridge, fallback)
+        self.assertIn('if not wait_for_usable_slam(15):', text)
         self.assertIn("'XGO_Start': 'inactive'", text)
         self.assertIn("'YahboomStart': 'active'", text)
 
