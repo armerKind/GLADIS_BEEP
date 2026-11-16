@@ -98,15 +98,34 @@ class CollisionSafetyTests(unittest.TestCase):
             before_pose, {"yaw": -math.radians(18)}
         ))
 
-    def test_turn_requires_start_margin_above_runtime_sweep_floor(self):
+    def test_sweep_clear_but_below_start_margin_stops_instead_of_reversing(self):
         marginal = {
             "front": 0.63, "front_left": 0.65, "front_right": 0.46,
             "left": 0.58, "right": 0.43, "rear": 1.0,
         }
         action, duration, reason = bridge.choose_explore_action(marginal)
-        self.assertEqual(action, "back")
-        self.assertEqual(duration, bridge.REVERSE_ESCAPE_MAX_S)
-        self.assertEqual(reason, "turn_sweep_blocked_backoff")
+        self.assertEqual((action, duration, reason),
+                         ("stop", 0.0, "turn_start_margin_not_met"))
+
+    def test_backoff_only_when_turn_sweep_is_actually_blocked(self):
+        blocked = {"front": 0.63, "front_left": 0.65, "front_right": 0.46,
+                   "left": 0.58, "right": 0.41, "rear": 1.0}
+        self.assertEqual(bridge.choose_explore_action(blocked),
+                         ("back", bridge.REVERSE_ESCAPE_MAX_S, "turn_sweep_blocked_backoff"))
+
+    def test_front_breach_in_start_margin_band_stops_not_backs_off(self):
+        marginal = {"front": 0.44, "front_left": 0.48, "front_right": 0.49,
+                    "left": 0.58, "right": 0.47, "rear": 1.0}
+        self.assertEqual(bridge.choose_explore_action(marginal),
+                         ("stop", 0.0, "turn_start_margin_not_met"))
+
+    def test_exact_sweep_floor_is_not_sufficient_turn_start_margin(self):
+        marginal = {"front": 0.62, "front_left": 0.65, "front_right": 0.50,
+                    "left": 0.70, "right": bridge.TURN_SWEEP_M, "rear": 1.0}
+        self.assertEqual(bridge.choose_explore_action(marginal),
+                         ("stop", 0.0, "turn_start_margin_not_met"))
+        clear = dict(marginal, right=bridge.TURN_START_CLEARANCE_M)
+        self.assertEqual(bridge.choose_explore_action(clear)[0], "turnleft")
 
     def test_front_breach_prefers_guarded_turn_when_full_start_margin_exists(self):
         recoverable = {
@@ -265,7 +284,7 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_backward_supervisor_stops_when_front_clearance_worsens(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
-        worsened = dict(baseline, front=0.67, front_left=0.37, front_right=0.69)
+        worsened = dict(baseline, front=0.81, front_left=0.39, front_right=0.711)
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
@@ -279,9 +298,9 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
 
-    def test_backward_supervisor_tolerates_three_cm_triplet_jitter(self):
+    def test_backward_supervisor_tolerates_sub_two_cm_triplet_change(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
-        worsened = dict(baseline, front=0.81, front_left=0.39, front_right=0.711)
+        worsened = dict(baseline, front=0.84, front_left=0.40, front_right=0.719)
         state = {"scan_seen": True, "scan_age_s": 0.01,
                  "slam": {"usable": True}, "sectors": worsened,
                  "pose": {"yaw": 0.0}}
@@ -291,10 +310,10 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["reason"], "window_complete")
 
-    def test_supervised_reverse_and_exploration_use_bounded_lower_speed(self):
-        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.06)
-        self.assertEqual(bridge.REVERSE_ESCAPE_STEP, 6)
-        self.assertEqual(bridge.app_joystick_percent(bridge.REVERSE_ESCAPE_STEP), 60)
+    def test_supervised_reverse_and_exploration_use_captured_app_scale(self):
+        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.02)
+        self.assertEqual(bridge.REVERSE_ESCAPE_STEP, 10)
+        self.assertEqual(bridge.app_joystick_percent(bridge.REVERSE_ESCAPE_STEP), 100)
         self.assertEqual(bridge.explore_step_for("backward"), bridge.REVERSE_ESCAPE_STEP)
         state = {"sectors": FRONT_BLOCKED_REAR_CLEAR, "pose": {"yaw": 0.0}}
         with patch.object(bridge, "snapshot", return_value=state), \

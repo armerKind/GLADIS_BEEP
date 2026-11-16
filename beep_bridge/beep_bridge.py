@@ -57,9 +57,9 @@ HARD_CLEARANCE_M = max(0.18, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.18
 CLEARANCE_PROFILE = os.environ.get("BEEP_CLEARANCE_PROFILE", "conservative")
 if CLEARANCE_PROFILE not in ("conservative", "commissioning_030"):
     raise ValueError("unknown BEEP_CLEARANCE_PROFILE")
-# A recovery reverse is one sustained, low-speed SDK/app gait command, not repeated
-# stop/start pulses. The range stays inside the vendor SDK's documented move-Y span.
-REVERSE_ESCAPE_STEP = min(8, max(5, int(os.environ.get("BEEP_REVERSE_STEP", "6"))))
+# Keep app reverse at the captured full-scale joystick value (0x9C); the SDK
+# backend is explicit opt-in. Avoid repeated stop/start pulses during recovery.
+REVERSE_ESCAPE_STEP = min(12, max(10, int(os.environ.get("BEEP_REVERSE_STEP", "10"))))
 def clearance_setting(name, conservative):
     floor = 0.30 if CLEARANCE_PROFILE == "commissioning_030" else conservative
     value = float(os.environ.get(name, str(floor)))
@@ -79,7 +79,7 @@ TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.42)
 TURN_START_CLEARANCE_M = max(TURN_SWEEP_M + 0.03,
                              float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.45")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
-BACKOFF_MAX_FRONT_LOSS_M = min(0.06, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.06"))))
+BACKOFF_MAX_FRONT_LOSS_M = min(0.02, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.02"))))
 BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
     min(5.0, max(1.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "5.0"))))
 )
@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.3-reverse-tolerance",
+    "version": "0.22.4-app-reverse-settling",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -470,10 +470,11 @@ def app_transaction(action, packets):
                 # overwritten by stale "moving=True" from this transaction.
                 with state_lock:
                     now = time.time()
+                    was_moving = bool(state.get("moving"))
                     state["last_command"] = ("app:curve_" + action[5:] if action.startswith("curve")
                                              else "app:" + action)
                     state["last_command_at"] = now
-                    if action.startswith("curve"):
+                    if action != "stop" or was_moving:
                         state["last_motion_at"] = now
                     state["moving"] = action != "stop"
     except Exception:
@@ -1780,12 +1781,15 @@ def choose_explore_action(sectors):
     front_breach = front < FOOTPRINT_FRONT_M or min(fl, fr) < FOOTPRINT_DIAGONAL_M
     body_sides_clear = min(left, right) >= FOOTPRINT_SIDE_M
     rear_escape_clear = rear >= FOOTPRINT_REAR_M and body_sides_clear
+    sweep_min = min(front, fl, fr, left, right, rear)
 
     if front_breach:
-        if min(front, fl, fr, left, right, rear) >= TURN_START_CLEARANCE_M:
+        if sweep_min >= TURN_START_CLEARANCE_M:
             if max(left, fl) >= max(right, fr):
                 return "turnleft", 0.30, "front_breach_sweep_left"
             return "turnright", 0.30, "front_breach_sweep_right"
+        if sweep_min >= TURN_SWEEP_M:
+            return "stop", 0.0, "turn_start_margin_not_met"
         if (front >= 0.46 and min(fl, fr) >= TURN_SWEEP_M and
                 left >= FOOTPRINT_SIDE_M and right >= 0.55 and rear >= FOOTPRINT_REAR_M):
             return "right", 0.35, "bounded_lateral_turn_setup"
@@ -1798,11 +1802,13 @@ def choose_explore_action(sectors):
             fr >= FOOTPRINT_DIAGONAL_M):
         return "forward", 0.50, "full_body_corridor_clear"
 
-    sweep_clear = min(front, fl, fr, left, right, rear) >= TURN_START_CLEARANCE_M
+    sweep_clear = sweep_min >= TURN_START_CLEARANCE_M
     if sweep_clear:
         if max(left, fl) >= max(right, fr):
             return "turnleft", 0.30, "footprint_sweep_left"
         return "turnright", 0.30, "footprint_sweep_right"
+    if sweep_min >= TURN_SWEEP_M:
+        return "stop", 0.0, "turn_start_margin_not_met"
     if rear_escape_clear:
         return "back", REVERSE_ESCAPE_MAX_S, "turn_sweep_blocked_backoff"
     return "stop", 0.0, "footprint_boxed_in_stop"

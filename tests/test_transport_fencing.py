@@ -195,6 +195,38 @@ class TransportFencingTests(unittest.TestCase):
         self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]),
                                                bridge.pkt(0x11, [0, 0x9C])])
 
+    def test_full_scale_reverse_and_stop_extend_slam_settling_window(self):
+        self.rig = SocketRig()
+        with patch.dict(bridge.state, {"moving": False, "last_motion_at": None}):
+            bridge.motion_context.lease = self.lease
+            try:
+                bridge.app_send("backward", step=10)
+            finally:
+                del bridge.motion_context.lease
+            self.assertEqual(self.first_writes(), [bridge.pkt(0x0F, [1]),
+                                                   bridge.pkt(0x11, [0, 0x9C])])
+            started = bridge.state["last_motion_at"]
+            self.assertIsNotNone(started)
+            bridge.app_send("stop")
+            stopped = bridge.state["last_motion_at"]
+            self.assertGreaterEqual(stopped, started)
+            self.assertFalse(bridge.state["moving"])
+            bridge.app_send("stop")
+            self.assertEqual(bridge.state["last_motion_at"], stopped)
+
+    def test_every_app_motion_direction_updates_slam_motion_clock(self):
+        for action in ("forward", "back", "backward", "turnleft", "turnright"):
+            with self.subTest(action=action), patch.dict(
+                    bridge.state, {"moving": False, "last_motion_at": None}):
+                self.rig = SocketRig()
+                bridge.motion_context.lease = self.lease
+                try:
+                    bridge.app_send(action)
+                finally:
+                    del bridge.motion_context.lease
+                self.assertIsNotNone(bridge.state["last_motion_at"])
+                self.assertTrue(bridge.state["moving"])
+
     def test_cancel_during_greeting_timeout_still_fences_motion(self):
         worker = self.start("recv", "timeout")
         self.lease.cancel_event.set()
