@@ -79,9 +79,9 @@ TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.42)
 TURN_START_CLEARANCE_M = max(TURN_SWEEP_M + 0.03,
                              float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.45")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
-BACKOFF_MAX_FRONT_LOSS_M = min(0.02, max(0.005, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.02"))))
+BACKOFF_MAX_FRONT_LOSS_M = max(0.02, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.08")))
 BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
-    min(5.0, max(1.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "5.0"))))
+    max(5.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "20.0")))
 )
 REVERSE_ESCAPE_MAX_S = min(1.2, max(
     0.30, float(os.environ.get("BEEP_REVERSE_ESCAPE_MAX_S", "1.2"))))
@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.4-app-reverse-settling",
+    "version": "0.22.5-bounded-reverse-recovery",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1814,6 +1814,22 @@ def choose_explore_action(sectors):
     return "stop", 0.0, "footprint_boxed_in_stop"
 
 
+def turn_after_stopped_backoff(supervised, status):
+    """Permit one reassessed turn after selected backoff endings, never a blind retry."""
+    if str(supervised.get("reason")) not in (
+            "reverse_clearance_gain_not_reached", "heading_drift_during_backoff",
+            "front_clearance_worsening_during_backoff"):
+        return None
+    if (motion_is_cancelled() or status.get("fall_suspected") or
+            status.get("moving") is True or not scan_ok(status) or not slam_ok(status)):
+        return None
+    sectors = validated_sector_values(status.get("sectors"))
+    if sectors is None or min(sectors.values()) < TURN_START_CLEARANCE_M:
+        return None
+    return ("turnleft" if max(sectors["left"], sectors["front_left"]) >=
+            max(sectors["right"], sectors["front_right"]) else "turnright")
+
+
 def escape_made_progress(action, before, after, before_pose=None, after_pose=None):
     """Require measured geometric improvement before allowing another escape."""
     before_values = validated_sector_values(before)
@@ -1865,6 +1881,8 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
     trace = []
     last_escape_action = None
     consecutive_escape_actions = 0
+    forced_turn_action = None
+    backoff_turn_recoveries = 0
     m = ensure_room_map(name=name, reset=reset_map)
     active_explore = {"active": True, "started_at": started, "name": name}
     reason = "max_duration"
@@ -1915,6 +1933,9 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                     break
                 sec = st.get("sectors", {})
                 action, dur, why = choose_explore_action(sec)
+                if forced_turn_action is not None:
+                    action, dur, why = forced_turn_action, 2.0, "reassess_after_stopped_backoff"
+                    forced_turn_action = None
                 if action == "stop":
                     reason = why
                     trace.append({"action": "stop", "why": why, "sectors": sec})
@@ -1965,6 +1986,13 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                               "progress": progress, "supervisor_reason": supervised["reason"],
                               "recovery_attempts": supervised.get("attempts")})
                 if not supervised["ok"]:
+                    if action in ("back", "backward") and backoff_turn_recoveries < 1:
+                        forced_turn_action = turn_after_stopped_backoff(supervised, snapshot())
+                        if forced_turn_action is not None:
+                            backoff_turn_recoveries += 1
+                            trace.append({"action": "stop_reassess", "why": supervised["reason"],
+                                          "next_turn": forced_turn_action})
+                            continue
                     reason = str(supervised["reason"])
                     break
                 if not progress:
@@ -2068,6 +2096,8 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
     baseline_yaw = None
     if baseline_pose is not None and baseline_pose.get("yaw") is not None:
         baseline_yaw = float(baseline_pose["yaw"])
+    worsening_scans = 0
+    last_front_scan_count = None
     while time.time() < deadline:
         if motion_is_cancelled():
             return {"ok": False, "reason": "motion_cancelled", "elapsed_s": time.time() - started}
@@ -2103,9 +2133,20 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
             current_front = sum(sec[name] for name in ("front", "front_left", "front_right")) / 3.0
             if baseline_front is None:
                 baseline_front = current_front
-            elif baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M:
-                return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
-                        "elapsed_s": time.time() - started}
+            else:
+                count = st.get("scan_count")
+                if not isinstance(count, int):
+                    # Without scan identity, fail closed on a worsening sample.
+                    if baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M:
+                        return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
+                                "elapsed_s": time.time() - started}
+                elif count != last_front_scan_count:
+                    last_front_scan_count = count
+                    worsening_scans = (worsening_scans + 1 if
+                                       baseline_front - current_front > BACKOFF_MAX_FRONT_LOSS_M else 0)
+                    if worsening_scans >= 2:
+                        return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
+                                "elapsed_s": time.time() - started}
             yaw = ((st.get("pose") or {}).get("yaw"))
             if yaw is None:
                 return {"ok": False, "reason": "reverse_yaw_unavailable",
@@ -2253,6 +2294,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     consecutive_escape_actions = 0
     total_escape_actions = 0
     forced_turn_action = None
+    backoff_turn_recoveries = 0
     coverage_samples = deque()
     initial_known_cells = None
     final_known_cells = None
@@ -2293,7 +2335,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
                 remaining = max_duration - (time.time() - started)
-                if forced_turn_action and min(sec.values()) >= TURN_SWEEP_M:
+                if forced_turn_action and min(sec.values()) >= TURN_START_CLEARANCE_M:
                     action, duration, why = forced_turn_action, 2.5, "alternate_after_ineffective_turn"
                     forced_turn_action = None
                 if (current_action in ("curveleft", "curveright") and
@@ -2392,6 +2434,13 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     "recovery_attempts": supervised.get("attempts"),
                 })
                 if not supervised["ok"]:
+                    if action in ("back", "backward") and backoff_turn_recoveries < 1:
+                        forced_turn_action = turn_after_stopped_backoff(supervised, snapshot())
+                        if forced_turn_action is not None:
+                            backoff_turn_recoveries += 1
+                            trace.append({"action": "stop_reassess", "why": supervised["reason"],
+                                          "next_turn": forced_turn_action})
+                            continue
                     reason = str(supervised["reason"])
                     break
                 if action in ("turnleft", "turnright"):

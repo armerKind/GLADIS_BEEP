@@ -284,21 +284,51 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_backward_supervisor_stops_when_front_clearance_worsens(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
-        worsened = dict(baseline, front=0.81, front_left=0.39, front_right=0.711)
+        worsened = dict(baseline, front=0.54, front_left=0.37, front_right=0.69)
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
             "slam": {"usable": True},
             "sectors": worsened,
             "pose": {"yaw": 0.01},
+            "scan_count": 101,
         }
-        with patch.object(bridge, "snapshot", return_value=state):
+        with patch.object(bridge, "snapshot", side_effect=[state, dict(state, scan_count=101),
+                                                           dict(state, scan_count=102)]):
             result = bridge.supervise_lidar_motion(
                 "back", 0.30, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
 
-    def test_backward_supervisor_tolerates_sub_two_cm_triplet_change(self):
+    def test_backward_supervisor_ignores_one_worsening_scan_then_recovers(self):
+        baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.62, front_right=0.72)
+        bad = dict(baseline, front=0.57, front_left=0.56, front_right=0.69)
+        def sample(count, sectors):
+            return {"scan_seen": True, "scan_age_s": 0.01, "scan_count": count,
+                    "slam": {"usable": True}, "sectors": sectors, "pose": {"yaw": 0.0}}
+        states = [sample(1, bad), sample(1, bad), sample(2, baseline)]
+        with patch.object(bridge, "snapshot", side_effect=states):
+            result = bridge.supervise_lidar_motion(
+                "back", 0.21, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "window_complete")
+
+    def test_post_backoff_turn_requires_safe_settled_envelope(self):
+        reason = {"ok": False, "reason": "front_clearance_worsening_during_backoff"}
+        status = {"moving": False, "scan_seen": True, "scan_age_s": 0.01,
+                  "slam": {"usable": True},
+                  "sectors": dict(FRONT_BLOCKED_REAR_CLEAR, front=0.55,
+                                  front_left=0.51, front_right=0.50, left=0.8,
+                                  right=0.55, rear=0.9)}
+        self.assertEqual(bridge.turn_after_stopped_backoff(reason, status), "turnleft")
+        self.assertIsNone(bridge.turn_after_stopped_backoff(
+            reason, dict(status, sectors=dict(status["sectors"], front_right=0.43))))
+        self.assertIsNone(bridge.turn_after_stopped_backoff(
+            reason, dict(status, fall_suspected=True)))
+        self.assertIsNone(bridge.turn_after_stopped_backoff(
+            {"ok": False, "reason": "scan_stale_during_lidar_walk"}, status))
+
+    def test_backward_supervisor_tolerates_sub_eight_cm_triplet_change(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
         worsened = dict(baseline, front=0.84, front_left=0.40, front_right=0.719)
         state = {"scan_seen": True, "scan_age_s": 0.01,
@@ -311,7 +341,8 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(result["reason"], "window_complete")
 
     def test_supervised_reverse_and_exploration_use_captured_app_scale(self):
-        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.02)
+        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.08)
+        self.assertEqual(math.degrees(bridge.BACKOFF_MAX_HEADING_DRIFT_RAD), 20.0)
         self.assertEqual(bridge.REVERSE_ESCAPE_STEP, 10)
         self.assertEqual(bridge.app_joystick_percent(bridge.REVERSE_ESCAPE_STEP), 100)
         self.assertEqual(bridge.explore_step_for("backward"), bridge.REVERSE_ESCAPE_STEP)
@@ -330,14 +361,14 @@ class CollisionSafetyTests(unittest.TestCase):
             "scan_age_s": 0.01,
             "slam": {"usable": True},
             "sectors": baseline,
-            "pose": {"yaw": math.radians(6.0)},
+            "pose": {"yaw": math.radians(21.0)},
         }
         with patch.object(bridge, "snapshot", return_value=state):
             result = bridge.supervise_lidar_motion(
                 "back", 0.30, baseline_sectors=baseline, baseline_pose={"yaw": 0.0})
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "heading_drift_during_backoff")
-        self.assertGreater(result["heading_drift_degrees"], 5.0)
+        self.assertGreater(result["heading_drift_degrees"], 20.0)
 
     def test_backward_supervisor_stops_as_soon_as_clearance_gain_is_reached(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.50, front_left=0.50, front_right=0.50)
