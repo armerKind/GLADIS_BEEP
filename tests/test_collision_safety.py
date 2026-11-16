@@ -324,6 +324,8 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertIsNone(bridge.turn_after_stopped_backoff(
             reason, dict(status, sectors=dict(status["sectors"], front_right=0.43))))
         self.assertIsNone(bridge.turn_after_stopped_backoff(
+            reason, dict(status, moving=None)))
+        self.assertIsNone(bridge.turn_after_stopped_backoff(
             reason, dict(status, fall_suspected=True)))
         self.assertIsNone(bridge.turn_after_stopped_backoff(
             {"ok": False, "reason": "scan_stale_during_lidar_walk"}, status))

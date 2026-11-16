@@ -1821,7 +1821,7 @@ def turn_after_stopped_backoff(supervised, status):
             "front_clearance_worsening_during_backoff"):
         return None
     if (motion_is_cancelled() or status.get("fall_suspected") or
-            status.get("moving") is True or not scan_ok(status) or not slam_ok(status)):
+            status.get("moving") is not False or not scan_ok(status) or not slam_ok(status)):
         return None
     sectors = validated_sector_values(status.get("sectors"))
     if sectors is None or min(sectors.values()) < TURN_START_CLEARANCE_M:
