@@ -1,0 +1,41 @@
+{
+  "actual_mission_duration_s": 25.49,
+  "bridge_version": "0.22.6-turn-start-sweep-aligned",
+  "final_reported_state": {
+    "lease": null,
+    "map_revision_status": "verified",
+    "mission_state": "cancelled",
+    "moving": false,
+    "scan_count": 1334,
+    "slam_usable": true
+  },
+  "mission_state": "cancelled",
+  "moving_eyes": {
+    "bias_hints_accepted": 4,
+    "captured_frames": 81,
+    "coordinator_actions": {
+      "continue_local": 4,
+      "goal_revision_changed": 2
+    },
+    "gemini_inference_attempts": 9,
+    "gemini_inference_errors": 0,
+    "journal_perception_windows": 6,
+    "motor_dispatch_performed": false
+  },
+  "operator_observation": "Stopped normally; no contact or fall",
+  "post_reverse_turn_handoffs": 0,
+  "raw_artifacts_local_only": "captures/eyes/moving/20261116T221124-moving-7aa03c18",
+  "requested_duration_s": 90,
+  "reverse_escapes": 1,
+  "reverse_gain_reached": 1,
+  "source_commit": "e7d70da",
+  "termination_reason": "exception:MotionCancelled('app packet collision veto')",
+  "trace_actions": {
+    "back": 1,
+    "curveleft": 16,
+    "curveright": 15,
+    "forward": 16,
+    "stop_reassess": 1
+  },
+  "trace_entries": 49
+}
