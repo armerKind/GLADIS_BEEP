@@ -315,10 +315,10 @@ This presentation-safe fallback makes **no global-SLAM claim**. It:
 - preserves fluent forward gait across compatible clear windows and steers with in-gait curves rather than stop/start nudges,
 - uses a single continuous in-place yaw command (step 30) with live LiDAR/SLAM monitoring; no 0.30-second pivot bursts, and reports a turn only after at least 10 degrees of settled yaw confirmed across three samples,
 - uses one continuous app-parity reverse command (step 10 by default, mapping to 100% vendor joystick; optional override is clamped to 10–12) with live six-sector LiDAR and usable-SLAM guards; it ends at 0.08 m frontal-clearance gain or aborts after two distinct worsening scans exceeding 0.08 m frontal loss, 20 degrees yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds,
-- prefers in-place turning with at least 0.45 m all-sector start clearance; the ≥0.42 m but <0.45 m band stops instead of selecting reverse or discarding the turn-start margin, and backoff requires a genuinely blocked (<0.42 m) sweep plus rear/side clearance,
-- keeps reverse bounded and one-shot: no automatic reverse retries or yaw-correction bursts; a local/legacy walk may reassess one stopped backoff into a turn if scans, SLAM, all sectors and the 0.45 m turn-start margin pass; frontier exploration drops a blocked route after a successful reverse and replans a new route,
+- permits an in-place turn when all six sectors meet the 0.42 m start/sweep floor; a genuinely blocked (<0.42 m) sweep can select bounded reverse only with rear/side clearance,
+- keeps reverse bounded and one-shot: no automatic reverse retries or yaw-correction bursts; a local/legacy walk may reassess one stopped backoff into a turn if scans, SLAM and all sectors meet the 0.42 m start/sweep floor; frontier exploration drops a blocked route after a successful reverse and replans a new route,
 - uses autonomous lateral movement only as a narrowly bounded right-shift turn setup when its front/diagonal/side/rear guards pass; no reverse arcs,
-- requires a 0.45 m start margin before a turn while preserving the 0.42 m hard sweep floor during motion,
+- requires all six sectors ≥0.42 m before and throughout a turn; the former 0.03 m pre-turn margin is removed at the operator's request, but any measured in-motion breach below the floor aborts,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or repeated identical escapes; people in view trigger yielding and route replanning, not terminal semantic-goal failure,
 - retains the firmware gait/normal pace and does not add per-command posture writes.
 

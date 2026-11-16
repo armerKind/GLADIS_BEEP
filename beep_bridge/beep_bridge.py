@@ -76,8 +76,8 @@ FOOTPRINT_SIDE_M = clearance_setting("BEEP_FOOTPRINT_SIDE_M", 0.35)
 FOOTPRINT_REAR_M = clearance_setting("BEEP_FOOTPRINT_REAR_M", 0.45)
 FORWARD_CORRIDOR_M = max(FOOTPRINT_FRONT_M, clearance_setting("BEEP_FORWARD_CORRIDOR_M", 0.65))
 TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.42)
-TURN_START_CLEARANCE_M = max(TURN_SWEEP_M + 0.03,
-                             float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.45")))
+TURN_START_CLEARANCE_M = max(TURN_SWEEP_M,
+                             float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.42")))
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
 BACKOFF_MAX_FRONT_LOSS_M = max(0.02, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.08")))
 BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.5-bounded-reverse-recovery",
+    "version": "0.22.6-turn-start-sweep-aligned",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,

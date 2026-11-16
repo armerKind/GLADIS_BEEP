@@ -98,14 +98,14 @@ class CollisionSafetyTests(unittest.TestCase):
             before_pose, {"yaw": -math.radians(18)}
         ))
 
-    def test_sweep_clear_but_below_start_margin_stops_instead_of_reversing(self):
+    def test_sweep_clear_in_former_turn_deadband_can_start_turn(self):
         marginal = {
             "front": 0.63, "front_left": 0.65, "front_right": 0.46,
             "left": 0.58, "right": 0.43, "rear": 1.0,
         }
-        action, duration, reason = bridge.choose_explore_action(marginal)
-        self.assertEqual((action, duration, reason),
-                         ("stop", 0.0, "turn_start_margin_not_met"))
+        self.assertEqual(bridge.TURN_START_CLEARANCE_M, bridge.TURN_SWEEP_M)
+        action, _, reason = bridge.choose_explore_action(marginal)
+        self.assertEqual((action, reason), ("turnleft", "footprint_sweep_left"))
 
     def test_backoff_only_when_turn_sweep_is_actually_blocked(self):
         blocked = {"front": 0.63, "front_left": 0.65, "front_right": 0.46,
@@ -113,19 +113,17 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(bridge.choose_explore_action(blocked),
                          ("back", bridge.REVERSE_ESCAPE_MAX_S, "turn_sweep_blocked_backoff"))
 
-    def test_front_breach_in_start_margin_band_stops_not_backs_off(self):
+    def test_front_breach_in_former_start_margin_band_turns(self):
         marginal = {"front": 0.44, "front_left": 0.48, "front_right": 0.49,
                     "left": 0.58, "right": 0.47, "rear": 1.0}
-        self.assertEqual(bridge.choose_explore_action(marginal),
-                         ("stop", 0.0, "turn_start_margin_not_met"))
+        self.assertEqual(bridge.choose_explore_action(marginal)[0], "turnleft")
 
-    def test_exact_sweep_floor_is_not_sufficient_turn_start_margin(self):
+    def test_exact_sweep_floor_can_start_turn_but_below_floor_backs_off(self):
         marginal = {"front": 0.62, "front_left": 0.65, "front_right": 0.50,
                     "left": 0.70, "right": bridge.TURN_SWEEP_M, "rear": 1.0}
-        self.assertEqual(bridge.choose_explore_action(marginal),
-                         ("stop", 0.0, "turn_start_margin_not_met"))
-        clear = dict(marginal, right=bridge.TURN_START_CLEARANCE_M)
-        self.assertEqual(bridge.choose_explore_action(clear)[0], "turnleft")
+        self.assertEqual(bridge.choose_explore_action(marginal)[0], "turnleft")
+        blocked = dict(marginal, right=bridge.TURN_SWEEP_M - 0.001)
+        self.assertEqual(bridge.choose_explore_action(blocked)[0], "back")
 
     def test_front_breach_prefers_guarded_turn_when_full_start_margin_exists(self):
         recoverable = {
@@ -321,8 +319,10 @@ class CollisionSafetyTests(unittest.TestCase):
                                   front_left=0.51, front_right=0.50, left=0.8,
                                   right=0.55, rear=0.9)}
         self.assertEqual(bridge.turn_after_stopped_backoff(reason, status), "turnleft")
+        self.assertEqual(bridge.turn_after_stopped_backoff(
+            reason, dict(status, sectors=dict(status["sectors"], front_right=0.43))), "turnleft")
         self.assertIsNone(bridge.turn_after_stopped_backoff(
-            reason, dict(status, sectors=dict(status["sectors"], front_right=0.43))))
+            reason, dict(status, sectors=dict(status["sectors"], front_right=0.419))))
         self.assertIsNone(bridge.turn_after_stopped_backoff(
             reason, dict(status, moving=None)))
         self.assertIsNone(bridge.turn_after_stopped_backoff(
