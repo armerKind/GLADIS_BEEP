@@ -48,44 +48,43 @@ HTTP_BIND = os.environ.get("BEEP_BRIDGE_BIND", "0.0.0.0")
 HTTP_PORT = int(os.environ.get("BEEP_BRIDGE_PORT", "8766"))
 MAX_MOVE_S = float(os.environ.get("BEEP_MAX_MOVE_S", "5.0"))
 FORWARD_UNTIL_MAX_S = float(os.environ.get("BEEP_FORWARD_UNTIL_MAX_S", "12.0"))
-FRONT_STOP_M = float(os.environ.get("BEEP_FRONT_STOP_M", "0.35"))
+FRONT_STOP_M = max(0.22, float(os.environ.get("BEEP_FRONT_STOP_M", "0.30")))
 SIDE_STOP_M = float(os.environ.get("BEEP_SIDE_STOP_M", "0.22"))
 SCAN_STALE_S = float(os.environ.get("BEEP_SCAN_STALE_S", "0.60"))
-HARD_CLEARANCE_M = max(0.18, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.18")))
-# Startup-only commissioning hypothesis, never a live safety override. Distances
-# are LiDAR-origin ranges, not distances from a physically measured body edge.
-CLEARANCE_PROFILE = os.environ.get("BEEP_CLEARANCE_PROFILE", "conservative")
-if CLEARANCE_PROFILE not in ("conservative", "commissioning_030"):
+HARD_CLEARANCE_M = max(0.15, float(os.environ.get("BEEP_HARD_CLEARANCE_M", "0.20")))
+# Startup-only room-scale defaults, never a live safety override. Distances
+# are LiDAR-origin ranges, not physically measured body-edge margins.
+CLEARANCE_PROFILE = os.environ.get("BEEP_CLEARANCE_PROFILE", "room_scale")
+if CLEARANCE_PROFILE not in ("room_scale", "conservative", "commissioning_030"):
     raise ValueError("unknown BEEP_CLEARANCE_PROFILE")
 # Keep app reverse at the captured full-scale joystick value (0x9C); the SDK
 # backend is explicit opt-in. Avoid repeated stop/start pulses during recovery.
 REVERSE_ESCAPE_STEP = min(12, max(10, int(os.environ.get("BEEP_REVERSE_STEP", "10"))))
-def clearance_setting(name, conservative):
-    floor = 0.30 if CLEARANCE_PROFILE == "commissioning_030" else conservative
-    value = float(os.environ.get(name, str(floor)))
+def clearance_setting(name, default, minimum):
+    floor = max(minimum, 0.30) if CLEARANCE_PROFILE == "commissioning_030" else minimum
+    value = float(os.environ.get(name, str(default)))
     if not math.isfinite(value):
         raise ValueError("nonfinite clearance: " + name)
-    if name in ("BEEP_FOOTPRINT_DIAGONAL_M", "BEEP_FOOTPRINT_SIDE_M", "BEEP_TURN_SWEEP_M") and CLEARANCE_PROFILE == "commissioning_030":
-        return max(0.25, value)
     return max(floor, value)
 
 
-FOOTPRINT_FRONT_M = clearance_setting("BEEP_FOOTPRINT_FRONT_M", 0.55)
-FOOTPRINT_DIAGONAL_M = clearance_setting("BEEP_FOOTPRINT_DIAGONAL_M", 0.42)
-FOOTPRINT_SIDE_M = clearance_setting("BEEP_FOOTPRINT_SIDE_M", 0.35)
-FOOTPRINT_REAR_M = clearance_setting("BEEP_FOOTPRINT_REAR_M", 0.45)
-FORWARD_CORRIDOR_M = max(FOOTPRINT_FRONT_M, clearance_setting("BEEP_FORWARD_CORRIDOR_M", 0.65))
-TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.42)
+FOOTPRINT_FRONT_M = clearance_setting("BEEP_FOOTPRINT_FRONT_M", 0.38, 0.28)
+FOOTPRINT_DIAGONAL_M = clearance_setting("BEEP_FOOTPRINT_DIAGONAL_M", 0.30, 0.22)
+FOOTPRINT_SIDE_M = clearance_setting("BEEP_FOOTPRINT_SIDE_M", 0.24, 0.18)
+FOOTPRINT_REAR_M = clearance_setting("BEEP_FOOTPRINT_REAR_M", 0.28, 0.22)
+FORWARD_CORRIDOR_M = max(FOOTPRINT_FRONT_M, clearance_setting("BEEP_FORWARD_CORRIDOR_M", 0.45, 0.32))
+TURN_SWEEP_M = clearance_setting("BEEP_TURN_SWEEP_M", 0.28, 0.22)
 TURN_START_CLEARANCE_M = max(TURN_SWEEP_M,
-                             float(os.environ.get("BEEP_TURN_START_CLEARANCE_M", "0.42")))
+    clearance_setting("BEEP_TURN_START_CLEARANCE_M", 0.28, 0.22))
+SIDE_STEER_M = clearance_setting("BEEP_SIDE_STEER_M", 0.36, 0.26)
 ESCAPE_CLEARANCE_GAIN_M = max(0.08, float(os.environ.get("BEEP_ESCAPE_CLEARANCE_GAIN_M", "0.08")))
-BACKOFF_MAX_FRONT_LOSS_M = max(0.02, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.08")))
+BACKOFF_MAX_FRONT_LOSS_M = max(0.02, float(os.environ.get("BEEP_BACKOFF_MAX_FRONT_LOSS_M", "0.12")))
 BACKOFF_MAX_HEADING_DRIFT_RAD = math.radians(
     max(5.0, float(os.environ.get("BEEP_BACKOFF_MAX_HEADING_DRIFT_DEG", "20.0")))
 )
 REVERSE_ESCAPE_MAX_S = min(1.2, max(
     0.30, float(os.environ.get("BEEP_REVERSE_ESCAPE_MAX_S", "1.2"))))
-ROBOT_FOOTPRINT_RADIUS_M = max(0.35, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.35")))
+ROBOT_FOOTPRINT_RADIUS_M = max(0.22, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.28")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
 TURN_SETTLE_SAMPLES = 3
@@ -167,7 +166,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.8-consecutive-backoff-turns",
+    "version": "0.22.9-room-scale-envelope",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1814,8 +1813,8 @@ def choose_explore_action(sectors):
             return "turnright", 0.30, "front_breach_sweep_right"
         if sweep_min >= TURN_SWEEP_M:
             return "stop", 0.0, "turn_start_margin_not_met"
-        if (front >= 0.46 and min(fl, fr) >= TURN_SWEEP_M and
-                left >= FOOTPRINT_SIDE_M and right >= 0.55 and rear >= FOOTPRINT_REAR_M):
+        if (front >= FOOTPRINT_FRONT_M and min(fl, fr) >= TURN_SWEEP_M and
+                left >= FOOTPRINT_SIDE_M and right >= SIDE_STEER_M and rear >= FOOTPRINT_REAR_M):
             return "right", 0.35, "bounded_lateral_turn_setup"
         if rear_escape_clear:
             return "back", REVERSE_ESCAPE_MAX_S, "front_footprint_breach_backoff"
@@ -1877,7 +1876,7 @@ def escape_made_progress(action, before, after, before_pose=None, after_pose=Non
         before_front = sum(before_values[name] for name in ("front", "front_left", "front_right")) / 3.0
         after_front = sum(after_values[name] for name in ("front", "front_left", "front_right")) / 3.0
         return (after_values["left"] - before_values["left"] >= 0.008 and
-                after_values["right"] >= 0.45 and after_front >= before_front - 0.02)
+                after_values["right"] >= SIDE_STEER_M and after_front >= before_front - 0.02)
     return False
 
 
@@ -2157,6 +2156,9 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
                 return {"ok": False, "reason": "rear_clearance_breach", "elapsed_s": time.time() - started}
             if min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
                 return {"ok": False, "reason": "side_clearance_breach_during_backoff", "elapsed_s": time.time() - started}
+            if min(sec[name] for name in ("front", "front_left", "front_right")) < FOOTPRINT_FRONT_M:
+                return {"ok": False, "reason": "front_clearance_worsening_during_backoff",
+                        "elapsed_s": time.time() - started}
             current_front = sum(sec[name] for name in ("front", "front_left", "front_right")) / 3.0
             if baseline_front is None:
                 baseline_front = current_front
@@ -2192,8 +2194,8 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
                         "elapsed_s": time.time() - started,
                         "front_clearance_gain_m": current_front - baseline_front}
         elif action == "right":
-            if (sec["front"] < 0.44 or min(sec["front_left"], sec["front_right"]) < TURN_SWEEP_M or
-                    sec["left"] < FOOTPRINT_SIDE_M or sec["right"] < 0.45 or
+            if (sec["front"] < FOOTPRINT_FRONT_M or min(sec["front_left"], sec["front_right"]) < TURN_SWEEP_M or
+                    sec["left"] < FOOTPRINT_SIDE_M or sec["right"] < SIDE_STEER_M or
                     sec["rear"] < FOOTPRINT_REAR_M):
                 return {"ok": False, "reason": "lateral_setup_clearance_breach",
                         "elapsed_s": time.time() - started}
@@ -3495,6 +3497,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"mission": mission_snapshot(), "status": snapshot()})
             elif p.path == "/config":
                 self.send_json({"version": state["version"], "semantic_execution_enabled": False,
+                                "clearance_profile": CLEARANCE_PROFILE,
                                 "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "sdk_body_height": SDK_BODY_HEIGHT, "sdk_shoulder_yaw": SDK_SHOULDER_YAW, "sdk_imu": SDK_IMU,
                                 "app_host": HOST, "app_port": APP_PORT, "camera_url": CAMERA_URL,
@@ -3502,6 +3505,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "front_stop_m": FRONT_STOP_M, "side_stop_m": SIDE_STOP_M, "hard_clearance_m": HARD_CLEARANCE_M,
                                 "footprint_clearance_m": {"front": FOOTPRINT_FRONT_M, "front_diagonal": FOOTPRINT_DIAGONAL_M,
                                                            "side": FOOTPRINT_SIDE_M, "rear": FOOTPRINT_REAR_M,
+                                                           "side_steer": SIDE_STEER_M,
                                                            "forward_corridor": FORWARD_CORRIDOR_M,
                                                            "turn_sweep": TURN_SWEEP_M,
                                                            "turn_start_clearance": TURN_START_CLEARANCE_M,

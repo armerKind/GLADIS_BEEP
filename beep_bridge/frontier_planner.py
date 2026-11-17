@@ -172,7 +172,7 @@ def _cluster_representative(cluster):
     return min(cluster, key=lambda cell: (cell[0] - cx) ** 2 + (cell[1] - cy) ** 2)
 
 
-def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.35, excluded=None, bias=None):
+def find_frontier_plan(grid, pose, rng, chaos=0.35, robot_radius_m=0.28, excluded=None, bias=None):
     chaos = min(max(float(chaos), 0.0), 1.0)
     excluded = list(excluded or ())
     radius_cells = max(1, int(math.ceil(float(robot_radius_m) / grid.resolution)))
@@ -244,7 +244,7 @@ def choose_natural_motion(pose, waypoint_world, sectors, rng, chaos=0.35):
     left = float(sectors.get("left") or 0.0)
     right = float(sectors.get("right") or 0.0)
 
-    if front < 0.40 or min(front_left, front_right) < 0.27:
+    if front < 0.38 or min(front_left, front_right) < 0.30:
         action = "turnright" if max(right, front_right) > max(left, front_left) else "turnleft"
         return {"action": action, "step": 30, "duration": round(rng.uniform(0.38, 0.62) * TURN_DURATION_SCALE, 2),
                 "reason": "front_blocked_open_side", "heading_error": round(heading_error, 4)}

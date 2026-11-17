@@ -340,7 +340,7 @@ class FrontierIntegrationTests(unittest.TestCase):
         status = {
             "scan_seen": True,
             "scan_age_s": 0.01,
-            "sectors": {"front": 0.41, "front_left": 0.8, "front_right": 0.8,
+            "sectors": {"front": 0.27, "front_left": 0.8, "front_right": 0.8,
                         "left": 0.8, "right": 0.8, "rear": 0.8},
             "pose": {},
         }
@@ -714,13 +714,13 @@ class FrontierIntegrationTests(unittest.TestCase):
         ordinary_asymmetry = dict(base, front=1.0, front_left=0.80, front_right=0.60,
                                   left=0.80, right=0.60)
         self.assertEqual(bridge.choose_fluent_steering(ordinary_asymmetry), "forward")
-        # The live default-scale trial reached a clear corridor but the rear
-        # was 0.444 m: steering demanded a curve its own sweep guard vetoed.
+        # A rear sector below the active sweep floor blocks a curve even when
+        # a forward corridor and frontal opening are available.
         clear_forward_narrow_rear = dict(base, front=2.47, front_left=0.63,
                                          front_right=0.97, left=0.49,
                                          right=1.02, rear=0.444)
         self.assertEqual(bridge.choose_fluent_steering(clear_forward_narrow_rear), "forward")
-        near_front_narrow_rear = dict(base, rear=0.444)
+        near_front_narrow_rear = dict(base, rear=bridge.TURN_SWEEP_M - 0.01)
         self.assertEqual(bridge.choose_fluent_steering(near_front_narrow_rear), "forward")
         tight_curve = dict(base, front=0.70, front_left=0.70, front_right=1.2, left=0.65, right=0.8)
         self.assertEqual(bridge.choose_fluent_steering(tight_curve, current_action="curveleft"), "forward")

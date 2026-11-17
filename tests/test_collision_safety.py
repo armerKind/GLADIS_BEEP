@@ -23,6 +23,48 @@ class CollisionSafetyTests(unittest.TestCase):
     def tearDown(self):
         bridge._reset_motion_state_for_tests()
 
+    def test_room_scale_defaults_and_backpack_pose_are_not_boxed_in(self):
+        self.assertEqual((bridge.HARD_CLEARANCE_M, bridge.FOOTPRINT_SIDE_M,
+                          bridge.TURN_SWEEP_M, bridge.TURN_START_CLEARANCE_M,
+                          bridge.FOOTPRINT_REAR_M, bridge.FOOTPRINT_DIAGONAL_M,
+                          bridge.FOOTPRINT_FRONT_M, bridge.FORWARD_CORRIDOR_M,
+                          bridge.SIDE_STEER_M, bridge.ROBOT_FOOTPRINT_RADIUS_M),
+                         (0.20, 0.24, 0.28, 0.28, 0.28, 0.30, 0.38, 0.45, 0.36, 0.28))
+        sectors = {"front": 0.634, "front_left": 0.532, "front_right": 2.169,
+                   "left": 0.376, "right": 2.723, "rear": 1.644}
+        self.assertEqual(bridge.choose_explore_action(sectors)[0], "forward")
+        self.assertEqual(bridge.choose_fluent_steering(sectors), "curveright")
+        status = {"scan_seen": True, "scan_age_s": 0.01, "sectors": sectors}
+        lease = bridge.begin_motion("test", max_duration=5)
+        try:
+            with patch.object(bridge, "snapshot", return_value=status):
+                bridge.app_packet_guard("forward", lease, lease.deadline)
+        finally:
+            bridge.end_motion(lease)
+
+    def test_reverse_front_proximity_floor_and_two_distinct_loss_scans(self):
+        baseline = {"front": 0.95, "front_left": 0.75, "front_right": 0.92,
+                    "left": 0.6, "right": 0.6, "rear": 0.8}
+        def state(count, front, front_left):
+            return {"scan_seen": True, "scan_age_s": 0.01,
+                    "scan_count": count, "slam": {"usable": True},
+                    "pose": {"yaw": 0.0},
+                    "sectors": dict(baseline, front=front, front_left=front_left)}
+        with patch.object(bridge, "snapshot", return_value=state(1, 0.85, 0.379)):
+            result = bridge.supervise_lidar_motion("back", 0.3, baseline_sectors=baseline,
+                                                   baseline_pose={"yaw": 0.0})
+        self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
+        samples = [state(1, 0.64, 0.62), state(1, 0.64, 0.62), state(2, 0.64, 0.62)]
+        with patch.object(bridge, "snapshot", side_effect=samples):
+            result = bridge.supervise_lidar_motion("back", 0.4, baseline_sectors=baseline,
+                                                   baseline_pose={"yaw": 0.0})
+        self.assertEqual(result["reason"], "front_clearance_worsening_during_backoff")
+        stable = state(3, 0.88, 0.70)
+        with patch.object(bridge, "snapshot", return_value=stable):
+            result = bridge.supervise_lidar_motion("back", 0.01, baseline_sectors=baseline,
+                                                   baseline_pose={"yaw": 0.0})
+        self.assertEqual(result["reason"], "window_complete")
+
     def test_recorded_wall_contact_stops_instead_of_strafing_or_scraping(self):
         action, duration, reason = bridge.choose_explore_action(WALL_CONTACT)
         self.assertEqual((action, duration), ("stop", 0.0))
@@ -60,7 +102,7 @@ class CollisionSafetyTests(unittest.TestCase):
     def test_side_footprint_breach_stops_even_when_lidar_centerline_is_open(self):
         sectors = {
             "front": 1.2, "front_left": 0.8, "front_right": 0.8,
-            "left": 0.24, "right": 1.0, "rear": 1.0,
+            "left": 0.23, "right": 1.0, "rear": 1.0,
         }
         action, duration, reason = bridge.choose_explore_action(sectors)
         self.assertEqual((action, duration), ("stop", 0.0))
@@ -72,7 +114,7 @@ class CollisionSafetyTests(unittest.TestCase):
             "left": 0.7, "right": 0.7, "rear": 0.7,
         }
         self.assertEqual(bridge.choose_explore_action(clear)[0], "forward")
-        self.assertEqual(bridge.choose_explore_action(dict(clear, front_left=0.39))[0], "back")
+        self.assertEqual(bridge.choose_explore_action(dict(clear, front_left=0.27))[0], "back")
 
     def test_backoff_progress_requires_real_front_clearance_gain(self):
         stalled = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.13, front_left=0.13)
@@ -100,7 +142,7 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_sweep_clear_in_former_turn_deadband_can_start_turn(self):
         marginal = {
-            "front": 0.63, "front_left": 0.65, "front_right": 0.46,
+            "front": 0.43, "front_left": 0.65, "front_right": 0.46,
             "left": 0.58, "right": 0.43, "rear": 1.0,
         }
         self.assertEqual(bridge.TURN_START_CLEARANCE_M, bridge.TURN_SWEEP_M)
@@ -108,8 +150,8 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual((action, reason), ("turnleft", "footprint_sweep_left"))
 
     def test_backoff_only_when_turn_sweep_is_actually_blocked(self):
-        blocked = {"front": 0.63, "front_left": 0.65, "front_right": 0.46,
-                   "left": 0.58, "right": 0.41, "rear": 1.0}
+        blocked = {"front": 0.43, "front_left": 0.65, "front_right": 0.46,
+                   "left": 0.58, "right": 0.27, "rear": 1.0}
         self.assertEqual(bridge.choose_explore_action(blocked),
                          ("back", bridge.REVERSE_ESCAPE_MAX_S, "turn_sweep_blocked_backoff"))
 
@@ -119,7 +161,7 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(bridge.choose_explore_action(marginal)[0], "turnleft")
 
     def test_exact_sweep_floor_can_start_turn_but_below_floor_backs_off(self):
-        marginal = {"front": 0.62, "front_left": 0.65, "front_right": 0.50,
+        marginal = {"front": 0.43, "front_left": 0.65, "front_right": 0.50,
                     "left": 0.70, "right": bridge.TURN_SWEEP_M, "rear": 1.0}
         self.assertEqual(bridge.choose_explore_action(marginal)[0], "turnleft")
         blocked = dict(marginal, right=bridge.TURN_SWEEP_M - 0.001)
@@ -127,7 +169,7 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_front_breach_prefers_guarded_turn_when_full_start_margin_exists(self):
         recoverable = {
-            "front": 0.52, "front_left": 0.54, "front_right": 0.51,
+            "front": 0.37, "front_left": 0.54, "front_right": 0.51,
             "left": 0.62, "right": 0.55, "rear": 1.0,
         }
         action, _, reason = bridge.choose_explore_action(recoverable)
@@ -137,8 +179,8 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_front_breach_uses_bounded_right_shift_to_open_turn_margin(self):
         constrained_left = {
-            "front": 0.47, "front_left": 0.43, "front_right": 0.49,
-            "left": 0.41, "right": 0.57, "rear": 1.0,
+            "front": 0.38, "front_left": 0.29, "front_right": 0.49,
+            "left": 0.27, "right": 0.57, "rear": 1.0,
         }
         action, duration, reason = bridge.choose_explore_action(constrained_left)
         self.assertEqual((action, duration, reason),
@@ -147,11 +189,11 @@ class CollisionSafetyTests(unittest.TestCase):
 
     def test_bounded_right_shift_requires_measured_left_clearance_gain(self):
         before = {
-            "front": 0.47, "front_left": 0.43, "front_right": 0.49,
-            "left": 0.41, "right": 0.57, "rear": 1.0,
+            "front": 0.38, "front_left": 0.29, "front_right": 0.49,
+            "left": 0.27, "right": 0.57, "rear": 1.0,
         }
         improved = dict(before, left=0.422, right=0.55)
-        stalled = dict(before, left=0.414, right=0.55)
+        stalled = dict(before, left=0.274, right=0.55)
         self.assertTrue(bridge.escape_made_progress("right", before, improved))
         self.assertFalse(bridge.escape_made_progress("right", before, stalled))
 
@@ -165,7 +207,7 @@ class CollisionSafetyTests(unittest.TestCase):
             "scan_seen": True,
             "scan_age_s": 0.01,
             "sectors": {
-                "front": 0.63, "front_left": 0.65, "front_right": 0.46,
+                "front": 0.43, "front_left": 0.65, "front_right": 0.46,
                 "left": 0.58, "right": 0.50, "rear": 1.0,
             },
             "pose": {"yaw": 0.0},
@@ -192,7 +234,7 @@ class CollisionSafetyTests(unittest.TestCase):
         clear = {"front": 0.8, "front_left": 0.7, "front_right": 0.7,
                  "left": 0.7, "right": 0.8, "rear": 0.9}
         self.assertTrue(bridge.can_continue_in_gait_curve("forward", "curveright", clear))
-        near = dict(clear, front=0.624, front_right=0.5)
+        near = dict(clear, front=0.374, front_right=0.5)
         action, _, _ = bridge.choose_explore_action(near)
         self.assertEqual(action, "turnright")
         self.assertFalse(bridge.can_continue_in_gait_curve(action, "curveright", near))
@@ -202,7 +244,7 @@ class CollisionSafetyTests(unittest.TestCase):
     def test_packet_veto_replans_into_reverse_without_cancelling_walk(self):
         clear = {"front": 0.95, "front_left": 0.8, "front_right": 0.8,
                  "left": 0.7, "right": 0.7, "rear": 0.9}
-        blocked = dict(clear, front=0.40)
+        blocked = dict(clear, front=0.27)
         opened = dict(clear, front=0.68)
         def status(sectors, scan_seen=True):
             return {"scan_seen": scan_seen, "scan_age_s": 0.01,
@@ -239,7 +281,7 @@ class CollisionSafetyTests(unittest.TestCase):
                     bridge.app_packet_guard("turnleft", lease, lease.deadline)
             # A close front is not a reverse veto, but a rear breach is.
             with patch.object(bridge, "snapshot", return_value=dict(status,
-                    sectors=dict(clear, rear=0.44))):
+                    sectors=dict(clear, rear=0.27))):
                 with self.assertRaises(bridge.AppPacketCollisionVeto):
                     bridge.app_packet_guard("back", lease, lease.deadline)
         finally:
@@ -276,7 +318,7 @@ class CollisionSafetyTests(unittest.TestCase):
         with patch.object(bridge, "forward_continuous_until", return_value=guarded) as continuous:
             result = bridge.forward_until(target_front=0.10, max_duration=2.0)
 
-        continuous.assert_called_once_with(target_front=0.55, max_duration=2.0, min_target=0.55)
+        continuous.assert_called_once_with(target_front=0.38, max_duration=2.0, min_target=0.38)
         self.assertEqual(result["controller"], "forward_continuous_until")
         self.assertEqual(result["mode"], "forward_until")
         self.assertFalse(result["ok"])
@@ -287,7 +329,7 @@ class CollisionSafetyTests(unittest.TestCase):
             "scan_seen": True,
             "scan_age_s": 0.01,
             "sectors": {
-                "front": 0.60, "front_left": 0.80, "front_right": 0.80,
+                "front": 0.44, "front_left": 0.80, "front_right": 0.80,
                 "left": 0.70, "right": 0.70, "rear": 0.70,
             },
         }
@@ -304,7 +346,7 @@ class CollisionSafetyTests(unittest.TestCase):
                      "pose_age_s": 0.01, "map_age_s": 0.01},
             "pose": {"yaw": 0.0},
             "sectors": {
-                "front": 0.54, "front_left": 0.80, "front_right": 0.80,
+                "front": 0.37, "front_left": 0.80, "front_right": 0.80,
                 "left": 0.70, "right": 0.70, "rear": 0.70,
             },
         }
@@ -327,13 +369,13 @@ class CollisionSafetyTests(unittest.TestCase):
                 "left": 0.70, "right": 0.70, "rear": 0.70,
             },
         }
-        breached = dict(safe, sectors=dict(safe["sectors"], front=0.54))
+        breached = dict(safe, sectors=dict(safe["sectors"], front=0.37))
         with patch.object(bridge, "snapshot", side_effect=[safe, breached]), \
                 patch.object(bridge, "motor_send") as motor, \
                 patch.object(bridge, "stop_burst"):
-            result = bridge.forward_continuous_until(target_front=0.55, max_duration=1.0)
+            result = bridge.forward_continuous_until(target_front=0.38, max_duration=1.0)
         self.assertFalse(result["ok"])
-        self.assertTrue(result["reason"].startswith("footprint_clearance_breach:front=0.540"))
+        self.assertTrue(result["reason"].startswith("footprint_clearance_breach:front=0.370"))
         motor.assert_called_once_with("forward", step=None)
 
     def test_backward_supervisor_stops_when_rear_clearance_closes(self):
@@ -343,7 +385,7 @@ class CollisionSafetyTests(unittest.TestCase):
             "slam": {"usable": True},
             "sectors": {
                 "front": 0.20, "front_left": 0.22, "front_right": 0.24,
-                "left": 0.5, "right": 0.5, "rear": 0.31,
+                "left": 0.5, "right": 0.5, "rear": 0.27,
             },
         }
         with patch.object(bridge, "snapshot", return_value=state):
@@ -356,7 +398,7 @@ class CollisionSafetyTests(unittest.TestCase):
             "scan_seen": True,
             "scan_age_s": 0.01,
             "slam": {"usable": True},
-            "sectors": dict(FRONT_BLOCKED_REAR_CLEAR, left=0.34),
+            "sectors": dict(FRONT_BLOCKED_REAR_CLEAR, left=0.23),
         }
         with patch.object(bridge, "snapshot", return_value=state):
             result = bridge.supervise_lidar_motion("back", 1.0)
@@ -405,7 +447,7 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(bridge.turn_after_stopped_backoff(
             reason, dict(status, sectors=dict(status["sectors"], front_right=0.43))), "turnleft")
         self.assertIsNone(bridge.turn_after_stopped_backoff(
-            reason, dict(status, sectors=dict(status["sectors"], front_right=0.419))))
+            reason, dict(status, sectors=dict(status["sectors"], front_right=0.279))))
         self.assertIsNone(bridge.turn_after_stopped_backoff(
             reason, dict(status, moving=None)))
         self.assertIsNone(bridge.turn_after_stopped_backoff(
@@ -462,7 +504,7 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertEqual(result["reason"], "window_complete")
 
     def test_supervised_reverse_and_exploration_use_captured_app_scale(self):
-        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.08)
+        self.assertEqual(bridge.BACKOFF_MAX_FRONT_LOSS_M, 0.12)
         self.assertEqual(math.degrees(bridge.BACKOFF_MAX_HEADING_DRIFT_RAD), 20.0)
         self.assertEqual(bridge.REVERSE_ESCAPE_STEP, 10)
         self.assertEqual(bridge.app_joystick_percent(bridge.REVERSE_ESCAPE_STEP), 100)

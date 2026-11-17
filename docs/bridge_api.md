@@ -103,7 +103,7 @@ Supported primitive names:
 forward  back  left  right  turnleft  turnright  stop
 ```
 
-Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A primitive issues one bounded movement command, waits continuously, then attempts `stop_burst()`. `/move` performs no LiDAR freshness or clearance check. Autonomous recovery is different: reverse uses the captured full-scale app joystick packet `0x11 [0x00, 0x9C]`, supervised continuously against fresh six-sector LiDAR and usable SLAM, stopping at 0.08 m frontal-clearance gain or aborting on two distinct scans exceeding 0.08 m frontal loss, 20-degree yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds. A failed reverse is not repeated automatically; a stopped mission can select one fully guarded turn after reassessment. In-place turns likewise hold one yaw command and poll sensors/SLAM until the requested angle is reached (with at least 10 degrees required for reported success) or a guard stops motion.
+Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A primitive issues one bounded movement command, waits continuously, then attempts `stop_burst()`. `/move` performs no LiDAR freshness or clearance check. Autonomous recovery is different: reverse uses the captured full-scale app joystick packet `0x11 [0x00, 0x9C]`, supervised continuously against fresh six-sector LiDAR and usable SLAM, stopping at 0.08 m frontal-clearance gain or aborting on any front-triplet sector <0.38 m or two distinct worsening scans exceeding 0.12 m mean frontal loss, 20-degree yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds. A failed reverse is not repeated automatically; a stopped mission can select up to two consecutive fully guarded turns after backoff reassessment, resetting on completed forward progress. In-place turns likewise hold one yaw command and poll sensors/SLAM until the requested angle is reached (with at least 10 degrees required for reported success) or a guard stops motion.
 
 ## Vendor preset actions
 
@@ -134,7 +134,7 @@ POST /mark_object
 Default sequence:
 
 1. continuously approach generic frontal LiDAR geometry,
-2. stop no closer than the 0.55 m autonomous front floor,
+2. stop no closer than the 0.38 m default autonomous front floor,
 3. perform a LiDAR-sweep-guarded, measured-yaw turn (`90°` by default),
 4. execute `pee`.
 
@@ -173,7 +173,7 @@ Example:
 }
 ```
 
-`pulse`, `stall_window`, `stall_delta`, and `reorient` remain accepted for API compatibility but are ignored. The endpoint delegates to `forward_continuous_until`; open-loop pulses and blind reorientation are disabled. `max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds), and every autonomous center-front target is clamped to at least 0.55 m. The approach requires all six sectors, at least 0.42 m on both front diagonals, and at least 0.35 m on both sides throughout. The subsequent guarded turn requires 0.42 m in every sector and aborts any 0.75-second window that produces less than 10 degrees of measured yaw.
+`pulse`, `stall_window`, `stall_delta`, and `reorient` remain accepted for API compatibility but are ignored. The endpoint delegates to `forward_continuous_until`; open-loop pulses and blind reorientation are disabled. `max_duration` is clamped by `BEEP_FORWARD_UNTIL_MAX_S` (default 12 seconds), and every autonomous center-front target is clamped to at least 0.38 m by default. The approach requires all six sectors, at least 0.30 m on both front diagonals, and at least 0.24 m on both sides throughout. The subsequent guarded turn requires 0.28 m in every sector and aborts any 0.75-second window that produces less than 10 degrees of measured yaw.
 
 ## Navigation modes
 
@@ -206,7 +206,7 @@ Behavior:
 
 - uses the authoritative ROS occupancy grid,
 - detects and clusters free/unknown boundaries,
-- inflates obstacles by a conservative 0.35 m robot radius,
+- inflates obstacles by a 0.28 m default LiDAR-center radius,
 - runs A* through known free space,
 - keeps selected frontiers until reached or lost,
 - maintains fluent forward gait across compatible replanning windows,
@@ -306,19 +306,21 @@ GET /lidar_walk?max_duration=90
 GET /demo_walk?max_duration=90
 ```
 
+The `0.22.9-room-scale-envelope` default profile uses LiDAR-center clearance values (metres): hard 0.20 (floor 0.15), front 0.38 (floor 0.28), diagonal 0.30 (floor 0.22), `FRONT_STOP_M` 0.30 (floor 0.22), side 0.24 (floor 0.18), rear 0.28 (floor 0.22), turn sweep/start 0.28 (floor 0.22), forward corridor 0.45 (floor 0.32), side-steer 0.36 (floor 0.26), and occupancy-grid radius 0.28 (floor 0.22). The hard and front-stop floors are startup clamps, not permission to skip the packet guard. `BEEP_CLEARANCE_PROFILE=commissioning_030` is a distinct legacy override; read `/config.clearance_profile` before motion. The 0.17 m corner-radius estimate is operator-provided, not measured from the photo; these ranges do not prove a particular swept-leg margin.
+
 This presentation-safe fallback makes **no global-SLAM claim**. It:
 
 - keeps one fluent forward SDK gait active across compatible clear windows,
 - adjusts yaw in gait with `curveleft`/`curveright`, then clears yaw without neutralizing forward motion,
 - polls all six local LiDAR sectors approximately every 80 ms,
-- requires 0.65 m forward corridor, 0.55 m front, 0.42 m front diagonals, 0.35 m sides, and 0.45 m rear under the default conservative profile,
+- requires 0.45 m forward corridor, 0.38 m front, 0.30 m front diagonals, 0.24 m sides, and 0.28 m rear under the default room-scale profile,
 - preserves fluent forward gait across compatible clear windows and steers with in-gait curves rather than stop/start nudges,
 - uses a single continuous in-place yaw command (step 30) with live LiDAR/SLAM monitoring; no 0.30-second pivot bursts, and reports a turn only after at least 10 degrees of settled yaw confirmed across three samples,
-- uses one continuous app-parity reverse command (step 10 by default, mapping to 100% vendor joystick; optional override is clamped to 10–12) with live six-sector LiDAR and usable-SLAM guards; it ends at 0.08 m frontal-clearance gain or aborts after two distinct worsening scans exceeding 0.08 m frontal loss, 20 degrees yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds,
-- permits an in-place turn when all six sectors meet the 0.42 m start/sweep floor; a genuinely blocked (<0.42 m) sweep can select bounded reverse only with rear/side clearance,
-- keeps reverse bounded and one-shot per escape: no automatic reverse retries or yaw-correction bursts; local/legacy walks may reassess up to two consecutive stopped backoffs into guarded turns when scans, SLAM and all sectors meet the 0.42 m start/sweep floor, resetting the handoff counter only after a successful forward segment; frontier exploration drops a blocked route after a successful reverse and replans a new route,
+- uses one continuous app-parity reverse command (step 10 by default, mapping to 100% vendor joystick; optional override is clamped to 10–12) with live six-sector LiDAR and usable-SLAM guards; it ends at 0.08 m frontal-clearance gain or aborts on any front-triplet sector <0.38 m or after two distinct worsening scans exceeding 0.12 m mean frontal loss, 20 degrees yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds,
+- permits an in-place turn when all six sectors meet the 0.28 m start/sweep floor; a genuinely blocked (<0.28 m) sweep can select bounded reverse only with rear/side clearance,
+- keeps reverse bounded and one-shot per escape: no automatic reverse retries or yaw-correction bursts; local/legacy walks may reassess up to two consecutive stopped backoffs into guarded turns when scans, SLAM and all sectors meet the 0.28 m start/sweep floor, resetting the handoff counter only after a successful forward segment; frontier exploration drops a blocked route after a successful reverse and replans a new route,
 - uses autonomous lateral movement only as a narrowly bounded right-shift turn setup when its front/diagonal/side/rear guards pass; no reverse arcs,
-- requires all six sectors ≥0.42 m before and throughout a turn; the former 0.03 m pre-turn margin is removed at the operator's request, but any measured in-motion breach below the floor aborts,
+- requires all six sectors ≥0.28 m before and throughout a turn; the former 0.03 m pre-turn margin is removed at the operator's request, but any measured in-motion breach below the floor aborts,
 - fails closed on missing sectors, boxed-in geometry, failed progress, or repeated identical escapes; people in view trigger yielding and route replanning, not terminal semantic-goal failure,
 - retains the firmware gait/normal pace and does not add per-command posture writes.
 
