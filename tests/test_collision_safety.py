@@ -268,6 +268,28 @@ class CollisionSafetyTests(unittest.TestCase):
         reverse.assert_called_once()
         self.assertGreaterEqual(stop.call_count, 1)
 
+    def test_lateral_right_packet_fence_matches_supervised_room_scale_envelope(self):
+        # The live 0.22.9 veto had left=0.279, below TURN_SWEEP_M=0.28
+        # but above SIDE_M=0.24; only an in-place turn needs the full sweep.
+        sec = {"front": 1.682, "front_left": 0.292, "front_right": 1.625,
+               "left": 0.279, "right": 1.631, "rear": 1.322}
+        lease = bridge.begin_motion("test", max_duration=5)
+        try:
+            def check(action, values):
+                status = {"scan_seen": True, "scan_age_s": 0.01,
+                          "scan_count": 866, "sectors": values, "slam": {"usable": True}}
+                with patch.object(bridge, "snapshot", return_value=status):
+                    bridge.app_packet_guard(action, lease, lease.deadline)
+            check("right", sec)
+            for breached in (dict(sec, left=0.239), dict(sec, front_left=0.279),
+                             dict(sec, right=0.359), dict(sec, rear=0.279)):
+                with self.assertRaises(bridge.AppPacketCollisionVeto):
+                    check("right", breached)
+            with self.assertRaises(bridge.AppPacketCollisionVeto):
+                check("turnright", sec)
+        finally:
+            bridge.end_motion(lease)
+
     def test_packet_guard_preserves_rear_side_and_turn_envelope(self):
         clear = {"front": 0.3, "front_left": 0.2, "front_right": 0.2,
                  "left": 0.7, "right": 0.7, "rear": 0.9}

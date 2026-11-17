@@ -166,7 +166,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.9-room-scale-envelope",
+    "version": "0.22.9.1-room-scale-lateral-fence",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -410,6 +410,13 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
     elif action in ("back", "backward"):
         safe = (slam_ok(status) and sec["rear"] >= FOOTPRINT_REAR_M
                 and min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+    elif action == "right":
+        # A lateral right-shift uses its own swept envelope, not an in-place
+        # turn's all-sector floor. Keep the supervisor and packet fence equal.
+        safe = (sec["front"] >= FOOTPRINT_FRONT_M and
+                min(sec["front_left"], sec["front_right"]) >= TURN_SWEEP_M and
+                sec["left"] >= FOOTPRINT_SIDE_M and sec["right"] >= SIDE_STEER_M and
+                sec["rear"] >= FOOTPRINT_REAR_M)
     else:
         safe = (min(sec.values()) >= max(TURN_SWEEP_M, FOOTPRINT_SIDE_M)
                 and sec["rear"] >= FOOTPRINT_REAR_M)
