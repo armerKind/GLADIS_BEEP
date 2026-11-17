@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.6-turn-start-sweep-aligned",
+    "version": "0.22.7-packet-veto-reassess",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -212,6 +212,17 @@ class MotionBusy(RuntimeError):
 
 class MotionCancelled(RuntimeError):
     pass
+
+
+class AppPacketCollisionVeto(MotionCancelled):
+    """A live clearance veto, distinct from lease/cancellation failures."""
+
+    def __init__(self, action, sectors, scan_count):
+        self.action = action
+        self.sectors = dict(sectors)
+        self.scan_count = scan_count
+        self.sent_bytes = 0
+        super().__init__("app packet collision veto")
 
 
 class MotionLease:
@@ -404,7 +415,9 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
         safe = (min(sec.values()) >= max(TURN_SWEEP_M, FOOTPRINT_SIDE_M)
                 and sec["rear"] >= FOOTPRINT_REAR_M)
     if not safe:
-        raise MotionCancelled("app packet collision veto")
+        remember("app_packet_collision_veto", action=action, scan_count=status.get("scan_count"),
+                 sectors=sec)
+        raise AppPacketCollisionVeto(action, sec, status.get("scan_count"))
     # Snapshot/mission lock acquisition can itself outlast authority.
     if (lease.cancel_event.is_set() or lease.ended_event.is_set()
             or time.monotonic() >= min(deadline, lease.deadline)):
@@ -415,23 +428,27 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
 
 def app_write_packet(sock, packet, action, lease, deadline, stop_seq=None):
     """Owned motion never uses sendall's uncancellable internal retry loop."""
-    app_packet_guard(action, lease, deadline, stop_seq)
-    if lease is None or action == "stop":
-        sock.sendall(packet)
-        return
-    sock.setblocking(False)
     offset = 0
-    while offset < len(packet):
+    try:
         app_packet_guard(action, lease, deadline, stop_seq)
-        try:
-            written = sock.send(packet[offset:])
-        except (BlockingIOError, InterruptedError):
-            lease.cancel_event.wait(0.005)
-            continue
-        if written <= 0:
-            raise ConnectionError("app socket closed during packet")
-        offset += written
-    app_packet_guard(action, lease, deadline, stop_seq)
+        if lease is None or action == "stop":
+            sock.sendall(packet)
+            return
+        sock.setblocking(False)
+        while offset < len(packet):
+            app_packet_guard(action, lease, deadline, stop_seq)
+            try:
+                written = sock.send(packet[offset:])
+            except (BlockingIOError, InterruptedError):
+                lease.cancel_event.wait(0.005)
+                continue
+            if written <= 0:
+                raise ConnectionError("app socket closed during packet")
+            offset += written
+        app_packet_guard(action, lease, deadline, stop_seq)
+    except AppPacketCollisionVeto as veto:
+        veto.sent_bytes = offset
+        raise
 
 
 def app_transaction(action, packets):
@@ -443,6 +460,7 @@ def app_transaction(action, packets):
     lease = getattr(motion_context, "lease", None)
     stop_seq = _last_stop_seq
     deadline = time.monotonic() + 1.5
+    sent_any = False
     try:
         app_packet_guard(action, lease, deadline, stop_seq)
         # Connection setup and greeting cannot hold the register-write lock:
@@ -461,6 +479,7 @@ def app_transaction(action, packets):
                 app_packet_guard(action, lease, deadline, stop_seq)
                 for packet, delay in packets:
                     app_write_packet(sock, packet, action, lease, deadline, stop_seq)
+                    sent_any = True
                     if delay:
                         if lease is not None and action != "stop":
                             lease.cancel_event.wait(delay)
@@ -477,8 +496,13 @@ def app_transaction(action, packets):
                     if action != "stop" or was_moving:
                         state["last_motion_at"] = now
                     state["moving"] = action != "stop"
-    except Exception:
-        if lease is not None and action != "stop":
+    except Exception as exc:
+        # A pre-write clearance veto is a local planning outcome, not a lease
+        # cancellation. Any partially/fully transmitted command remains fatal:
+        # the vendor has already seen bytes which cannot be revoked.
+        prewrite_veto = (isinstance(exc, AppPacketCollisionVeto) and not sent_any
+                         and not getattr(exc, "sent_bytes", 0))
+        if lease is not None and action != "stop" and not prewrite_veto:
             lease.cancel_event.set()
         raise
 
@@ -2278,6 +2302,17 @@ def coverage_has_plateaued(samples, now, window_s, min_growth_cells):
     return max(c for _, c in recent) - min(c for _, c in recent) < int(min_growth_cells)
 
 
+def can_continue_in_gait_curve(action, current_action, sectors):
+    """Never override a turn/back decision with forward below its own packet fence."""
+    sec = validated_sector_values(sectors)
+    return bool(sec is not None and action == "forward" and
+                current_action in ("curveleft", "curveright") and
+                sec["front"] >= FORWARD_CORRIDOR_M and
+                min(sec["front_left"], sec["front_right"]) >= FOOTPRINT_DIAGONAL_M and
+                min(sec.values()) >= TURN_SWEEP_M and
+                min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+
+
 def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=60.0,
                coverage_window=45.0, min_growth_cells=150):
     """Fluent local walk, optionally stopped by guarded-SLAM coverage plateau."""
@@ -2293,6 +2328,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     last_escape_action = None
     consecutive_escape_actions = 0
     total_escape_actions = 0
+    packet_veto_retries = 0
     forced_turn_action = None
     backoff_turn_recoveries = 0
     coverage_samples = deque()
@@ -2338,9 +2374,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 if forced_turn_action and min(sec.values()) >= TURN_START_CLEARANCE_M:
                     action, duration, why = forced_turn_action, 2.5, "alternate_after_ineffective_turn"
                     forced_turn_action = None
-                if (current_action in ("curveleft", "curveright") and
-                        min(sec.values()) >= TURN_SWEEP_M and
-                        min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M):
+                if can_continue_in_gait_curve(action, current_action, sec):
                     action, why = "forward", "continue_in_gait_curve"
                 if action == "stop":
                     stop_burst(3)
@@ -2355,7 +2389,28 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     desired_action = choose_fluent_steering(
                         sec, current_action=current_action, bias=active_mission_bias(),
                         yaw=(st.get("pose") or {}).get("yaw"))
-                    current_action, gait_started = apply_navigation_course(current_action, desired_action)
+                    try:
+                        current_action, gait_started = apply_navigation_course(current_action, desired_action)
+                    except AppPacketCollisionVeto as veto:
+                        stop_burst(2)
+                        current_action = None
+                        packet_veto_retries += 1
+                        after_veto = snapshot()
+                        trace.append({"action": "stop_reassess", "why": "app_packet_collision_veto",
+                                      "veto_action": veto.action, "veto_scan_count": veto.scan_count,
+                                      "veto_sectors": veto.sectors,
+                                      "sectors": after_veto.get("sectors") or {}})
+                        if motion_is_cancelled():
+                            reason = "motion_cancelled"
+                            break
+                        if not scan_ok(after_veto) or (coverage_goal and not slam_ok(after_veto)):
+                            reason = "sensor_invalid_after_packet_veto"
+                            break
+                        if packet_veto_retries > 3:
+                            reason = "repeated_packet_collision_veto"
+                            break
+                        time.sleep(0.10)
+                        continue
                     segment_s = min(0.50, remaining)
                     supervised = (supervise_lidar_motion(current_action, segment_s)
                                   if current_action in ("curveleft", "curveright")
@@ -2373,6 +2428,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                             continue
                         reason = str(supervised["reason"])
                         break
+                    packet_veto_retries = 0
                     continue
                 total_escape_actions += 1
                 if total_escape_actions > 4:
@@ -2771,6 +2827,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     selected_target_world = None
     selected_meta = None
     stall_count = 0
+    packet_veto_retries = 0
     gait_action = None
     reason = "max_duration"
     active_explore = {"active": True, "mode": "frontier_explore", "started_at": started, "name": name, "chaos": chaos, "seed": actual_seed}
@@ -2896,8 +2953,32 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 before_pose = pose_tuple
                 motion_window = {"ok": True, "reason": "bounded_turn", "elapsed_s": float(decision["duration"])}
                 if decision["action"] == "forward":
-                    gait_action, gait_started = start_or_continue_fluent_forward(gait_action, decision["step"])
+                    try:
+                        gait_action, gait_started = start_or_continue_fluent_forward(gait_action, decision["step"])
+                    except AppPacketCollisionVeto as veto:
+                        stop_burst(2)
+                        gait_action = None
+                        packet_veto_retries += 1
+                        after_veto = snapshot()
+                        trace.append({"event": "packet_veto_reassess", "action": veto.action,
+                                      "scan_count": veto.scan_count, "veto_sectors": veto.sectors,
+                                      "sectors_after": after_veto.get("sectors") or {}})
+                        if motion_is_cancelled():
+                            reason = "motion_cancelled"
+                            break
+                        if not scan_ok(after_veto) or not slam_ok(after_veto):
+                            reason = "sensor_invalid_after_packet_veto"
+                            break
+                        if packet_veto_retries > 3:
+                            reason = "repeated_packet_collision_veto"
+                            break
+                        if selected_target_world is not None:
+                            excluded_world.append(selected_target_world)
+                        selected_target_world = None
+                        selected_meta = None
+                        continue
                     motion_window = supervise_fluent_forward(float(decision["duration"]))
+                    packet_veto_retries = 0
                     motion_window["gait_started"] = gait_started
                     if not motion_window["ok"]:
                         stop_burst(2)

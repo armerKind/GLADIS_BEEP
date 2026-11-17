@@ -1,6 +1,6 @@
 import math
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from beep_bridge import beep_bridge as bridge
 
@@ -187,6 +187,89 @@ class CollisionSafetyTests(unittest.TestCase):
             self.assertGreaterEqual(kwargs["max_duration"], 1.0)
             self.assertLessEqual(kwargs["max_duration"], 1.2)
         motor.assert_not_called()
+
+    def test_curve_continuation_does_not_override_guarded_turn(self):
+        clear = {"front": 0.8, "front_left": 0.7, "front_right": 0.7,
+                 "left": 0.7, "right": 0.8, "rear": 0.9}
+        self.assertTrue(bridge.can_continue_in_gait_curve("forward", "curveright", clear))
+        near = dict(clear, front=0.624, front_right=0.5)
+        action, _, _ = bridge.choose_explore_action(near)
+        self.assertEqual(action, "turnright")
+        self.assertFalse(bridge.can_continue_in_gait_curve(action, "curveright", near))
+        self.assertFalse(bridge.can_continue_in_gait_curve("forward", "curveright", near))
+        self.assertFalse(bridge.can_continue_in_gait_curve("back", "curveright", clear))
+
+    def test_packet_veto_replans_into_reverse_without_cancelling_walk(self):
+        clear = {"front": 0.95, "front_left": 0.8, "front_right": 0.8,
+                 "left": 0.7, "right": 0.7, "rear": 0.9}
+        blocked = dict(clear, front=0.40)
+        opened = dict(clear, front=0.68)
+        def status(sectors, scan_seen=True):
+            return {"scan_seen": scan_seen, "scan_age_s": 0.01,
+                    "scan_count": 4, "sectors": sectors, "pose": {"yaw": 0.0},
+                    "slam": {"usable": True, "pose_valid": True,
+                             "pose_age_s": 0.01, "map_age_s": 0.01}}
+        veto = bridge.AppPacketCollisionVeto("forward", blocked, 4)
+        with patch.object(bridge, "snapshot", side_effect=[
+                status(clear), status(clear), status(blocked), status(blocked),
+                status(opened), status(opened, scan_seen=False), status(opened)]), \
+                patch.object(bridge, "apply_navigation_course", side_effect=veto), \
+                patch.object(bridge, "continuous_reverse_escape", return_value={
+                    "ok": True, "reason": "reverse_clearance_gain_reached", "elapsed_s": 0.5}) as reverse, \
+                patch.object(bridge, "pose_copy", return_value={"yaw": 0.0}), \
+                patch.object(bridge, "stop_burst") as stop, \
+                patch.object(bridge.time, "sleep"):
+            result = bridge.lidar_walk(max_duration=5, save=False)
+        self.assertEqual(result["reason"], "scan_stale_or_missing")
+        self.assertEqual(result["trace"][0]["why"], "app_packet_collision_veto")
+        self.assertEqual(result["trace"][1]["action"], "back")
+        reverse.assert_called_once()
+        self.assertGreaterEqual(stop.call_count, 1)
+
+    def test_packet_guard_preserves_rear_side_and_turn_envelope(self):
+        clear = {"front": 0.3, "front_left": 0.2, "front_right": 0.2,
+                 "left": 0.7, "right": 0.7, "rear": 0.9}
+        status = {"scan_seen": True, "scan_age_s": 0.01,
+                  "scan_count": 6, "sectors": clear, "slam": {"usable": True}}
+        lease = bridge.begin_motion("test", max_duration=5)
+        try:
+            with patch.object(bridge, "snapshot", return_value=status):
+                bridge.app_packet_guard("back", lease, lease.deadline)
+                with self.assertRaises(bridge.AppPacketCollisionVeto):
+                    bridge.app_packet_guard("turnleft", lease, lease.deadline)
+            # A close front is not a reverse veto, but a rear breach is.
+            with patch.object(bridge, "snapshot", return_value=dict(status,
+                    sectors=dict(clear, rear=0.44))):
+                with self.assertRaises(bridge.AppPacketCollisionVeto):
+                    bridge.app_packet_guard("back", lease, lease.deadline)
+        finally:
+            bridge.end_motion(lease)
+
+    def test_prewrite_packet_veto_preserves_lease_but_partial_write_cancels(self):
+        clear = {"front": 0.62, "front_left": 0.8, "front_right": 0.8,
+                 "left": 0.7, "right": 0.7, "rear": 0.9}
+        packet = bridge.pkt(0x11, [0, 100])
+        lease = bridge.begin_motion("test", max_duration=5)
+        try:
+            with patch.object(bridge, "app_packet_guard", side_effect=
+                    bridge.AppPacketCollisionVeto("forward", clear, 7)):
+                with self.assertRaises(bridge.AppPacketCollisionVeto):
+                    bridge.app_transaction("forward", [(packet, 0)])
+            self.assertFalse(lease.cancel_event.is_set())
+            socket = MagicMock()
+            socket.__enter__.return_value = socket
+            socket.recv.return_value = b""
+            socket.send.return_value = len(packet)
+            veto = bridge.AppPacketCollisionVeto("forward", clear, 8)
+            with patch.object(bridge.socket, "create_connection", return_value=socket), \
+                    patch.object(bridge, "app_packet_guard", side_effect=[None, None, None, None, veto]):
+                with self.assertRaises(bridge.AppPacketCollisionVeto) as caught:
+                    bridge.app_transaction("forward", [(packet, 0)])
+            self.assertEqual(caught.exception.sent_bytes, len(packet))
+            self.assertTrue(lease.cancel_event.is_set())
+            socket.send.assert_called_once_with(packet)
+        finally:
+            bridge.end_motion(lease)
 
     def test_legacy_forward_endpoint_delegates_to_six_sector_guard(self):
         guarded = {"ok": False, "reason": "footprint_clearance_rejected_before_start"}
