@@ -413,6 +413,42 @@ class CollisionSafetyTests(unittest.TestCase):
         self.assertIsNone(bridge.turn_after_stopped_backoff(
             {"ok": False, "reason": "scan_stale_during_lidar_walk"}, status))
 
+    def test_multiple_stopped_backoff_handoffs_and_forward_reset(self):
+        for actions, expected_counts in (
+                (["back", "stop", "back", "stop", "stop"], [1, 2]),
+                (["back", "stop", "forward", "back", "stop", "stop"], [1, 1])):
+            with self.subTest(actions=actions):
+                sector = {"front": 0.456, "front_left": 0.456, "front_right": 0.456,
+                          "left": 0.6, "right": 0.8, "rear": 0.9}
+                def status():
+                    return {"moving": False, "scan_seen": True, "scan_age_s": .01,
+                            "sectors": dict(sector), "pose": {"yaw": 0.0},
+                            "slam": {"usable": True, "pose_valid": True,
+                                     "pose_age_s": .01, "map_age_s": .01}}
+                def turn(**kwargs):
+                    sector["front"] += .1
+                    sector["front_left"] += .1
+                    sector["front_right"] += .1
+                    return {"ok": True, "reason": "target_reached:20deg", "elapsed_s": 1.0}
+                decisions = [(a, 1.0, "test") if a != "stop" else
+                             ("stop", 0.0, "test_done") for a in actions]
+                with patch.object(bridge, "snapshot", side_effect=status), \
+                        patch.object(bridge, "choose_explore_action", side_effect=decisions), \
+                        patch.object(bridge, "continuous_reverse_escape", return_value={
+                            "ok": False, "reason": "front_clearance_worsening_during_backoff",
+                            "elapsed_s": .4}), \
+                        patch.object(bridge, "guarded_slam_turn", side_effect=turn), \
+                        patch.object(bridge, "apply_navigation_course", return_value=("forward", True)), \
+                        patch.object(bridge, "supervise_lidar_forward", return_value={
+                            "ok": True, "reason": "window_complete", "elapsed_s": .5}), \
+                        patch.object(bridge, "pose_copy", return_value={"yaw": 0.0}), \
+                        patch.object(bridge, "stop_burst"), patch.object(bridge.time, "sleep"):
+                    result = bridge.lidar_walk(max_duration=5, save=False)
+                handoffs = [x["consecutive_handoffs"] for x in result["trace"]
+                            if x.get("next_turn")]
+                self.assertEqual(handoffs, expected_counts)
+                self.assertEqual(result["reason"], "test_done")
+
     def test_backward_supervisor_tolerates_sub_eight_cm_triplet_change(self):
         baseline = dict(FRONT_BLOCKED_REAR_CLEAR, front=0.87, front_left=0.412, front_right=0.719)
         worsened = dict(baseline, front=0.84, front_left=0.40, front_right=0.719)

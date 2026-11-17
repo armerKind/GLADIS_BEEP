@@ -167,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.7-packet-veto-reassess",
+    "version": "0.22.8-consecutive-backoff-turns",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1906,7 +1906,7 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
     last_escape_action = None
     consecutive_escape_actions = 0
     forced_turn_action = None
-    backoff_turn_recoveries = 0
+    consecutive_backoff_turn_handoffs = 0
     m = ensure_room_map(name=name, reset=reset_map)
     active_explore = {"active": True, "started_at": started, "name": name}
     reason = "max_duration"
@@ -2010,18 +2010,21 @@ def explore_room(name="room", max_duration=30.0, reset_map=False, save=True, rot
                               "progress": progress, "supervisor_reason": supervised["reason"],
                               "recovery_attempts": supervised.get("attempts")})
                 if not supervised["ok"]:
-                    if action in ("back", "backward") and backoff_turn_recoveries < 1:
+                    if action in ("back", "backward") and consecutive_backoff_turn_handoffs < 2:
                         forced_turn_action = turn_after_stopped_backoff(supervised, snapshot())
                         if forced_turn_action is not None:
-                            backoff_turn_recoveries += 1
+                            consecutive_backoff_turn_handoffs += 1
                             trace.append({"action": "stop_reassess", "why": supervised["reason"],
-                                          "next_turn": forced_turn_action})
+                                          "next_turn": forced_turn_action,
+                                          "consecutive_handoffs": consecutive_backoff_turn_handoffs})
                             continue
                     reason = str(supervised["reason"])
                     break
                 if not progress:
                     reason = "escape_no_progress"
                     break
+                if action == "forward":
+                    consecutive_backoff_turn_handoffs = 0
                 time.sleep(0.05)
                 update_map_from_scan(m, scan_match=False)
         except Exception as e:
@@ -2330,7 +2333,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     total_escape_actions = 0
     packet_veto_retries = 0
     forced_turn_action = None
-    backoff_turn_recoveries = 0
+    consecutive_backoff_turn_handoffs = 0
     coverage_samples = deque()
     initial_known_cells = None
     final_known_cells = None
@@ -2429,6 +2432,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         reason = str(supervised["reason"])
                         break
                     packet_veto_retries = 0
+                    consecutive_backoff_turn_handoffs = 0
                     continue
                 total_escape_actions += 1
                 if total_escape_actions > 4:
@@ -2490,12 +2494,13 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     "recovery_attempts": supervised.get("attempts"),
                 })
                 if not supervised["ok"]:
-                    if action in ("back", "backward") and backoff_turn_recoveries < 1:
+                    if action in ("back", "backward") and consecutive_backoff_turn_handoffs < 2:
                         forced_turn_action = turn_after_stopped_backoff(supervised, snapshot())
                         if forced_turn_action is not None:
-                            backoff_turn_recoveries += 1
+                            consecutive_backoff_turn_handoffs += 1
                             trace.append({"action": "stop_reassess", "why": supervised["reason"],
-                                          "next_turn": forced_turn_action})
+                                          "next_turn": forced_turn_action,
+                                          "consecutive_handoffs": consecutive_backoff_turn_handoffs})
                             continue
                     reason = str(supervised["reason"])
                     break
