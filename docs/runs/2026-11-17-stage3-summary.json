@@ -1,0 +1,46 @@
+{
+  "actual_mission_duration_s": 28.17,
+  "bridge_version": "0.22.7-packet-veto-reassess",
+  "completed_turns": 1,
+  "final_reported_state": {
+    "lease": null,
+    "map_revision_status": "verified",
+    "mission_state": "failed",
+    "moving": false,
+    "scan_count": 998,
+    "slam_usable": true
+  },
+  "mission_state": "failed",
+  "moving_eyes": {
+    "bias_hints_accepted": 1,
+    "captured_frames": 83,
+    "coordinator_actions": {
+      "continue_local": 2,
+      "goal_revision_changed": 2
+    },
+    "gemini_inference_attempts": 8,
+    "gemini_inference_errors": 0,
+    "journal_perception_windows": 4,
+    "motor_dispatch_performed": false
+  },
+  "operator_observation": "Stopped normally; no contact or fall",
+  "packet_veto_reassess_events": 0,
+  "post_reverse_turn_handoffs": 1,
+  "raw_artifacts_local_only": "captures/eyes/moving/20261117T200149-moving-af8e95c5",
+  "requested_duration_s": 90,
+  "reverse_escapes": 2,
+  "reverse_reasons": [
+    "reverse_clearance_gain_not_reached",
+    "front_clearance_worsening_during_backoff"
+  ],
+  "source_commit": "f8aeb10",
+  "termination_reason": "front_clearance_worsening_during_backoff",
+  "trace_actions": {
+    "back": 2,
+    "curveright": 16,
+    "forward": 27,
+    "stop_reassess": 9,
+    "turnright": 1
+  },
+  "trace_entries": 55
+}
