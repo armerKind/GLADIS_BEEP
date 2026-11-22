@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -18,6 +19,7 @@ import struct
 import subprocess
 import sys
 import time
+from typing import Sequence
 import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,7 +34,7 @@ from beep_audio.voice_loop import VoiceLoop
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--memory-file', type=Path, required=True)
+    p.add_argument('--memory-file', type=Path, help='Required for demo/live, not local mic calibration')
     p.add_argument('--offline-demo', action='store_true')
     p.add_argument('--consent', action='store_true', help='Explicit consent for mic capture and cloud ASR/reply/TTS')
     p.add_argument('--person-id', help='Operator-verified speaker ID; do not infer identity from voice')
@@ -43,7 +45,114 @@ def parse_args():
     p.add_argument('--onset-rms', type=float, default=850.0, help='Bench placeholder; calibrate before live use')
     p.add_argument('--offset-rms', type=float, default=400.0)
     p.add_argument('--mic-name', default='USB PnP Sound Device')
-    return p.parse_args()
+    p.add_argument('--speaker-gain', type=float, default=4.0,
+                   help='Digital playback gain, clamped to 1.0..8.0 with limiter')
+    p.add_argument('--calibrate-mic', action='store_true',
+                   help='Local-only, three seconds silence then three seconds speech; no cloud or recording file')
+    args = p.parse_args()
+    if args.calibrate_mic and args.offline_demo:
+        p.error('--calibrate-mic and --offline-demo are exclusive')
+    if not args.calibrate_mic and args.memory_file is None:
+        p.error('--memory-file is required except for --calibrate-mic')
+    if not math.isfinite(args.speaker_gain):
+        p.error('--speaker-gain must be finite')
+    args.speaker_gain = max(1.0, min(8.0, args.speaker_gain))
+    return args
+
+
+def speaker_filter(gain: float) -> str:
+    """Constrain untrusted CLI gain before interpolating into ffmpeg options."""
+    if not math.isfinite(gain):
+        raise ValueError('speaker gain must be finite')
+    return f'volume={max(1.0, min(8.0, gain)):.3f},alimiter=limit=0.95:level=0'
+
+
+def usb_mic_device(sd, name: str) -> int:
+    matches = [i for i, d in enumerate(sd.query_devices())
+               if name.casefold() in d['name'].casefold() and d['max_input_channels'] >= 1]
+    if len(matches) != 1:
+        raise RuntimeError('expected exactly one USB mic by name; inspect sounddevice devices')
+    return matches[0]
+
+
+def speaker_card(listing: str) -> str:
+    cards = re.findall(r'^card (\d+): .*Headphones.*$', listing, re.I | re.M)
+    if len(cards) != 1:
+        raise RuntimeError('expected exactly one Headphones analog output in aplay -l')
+    return cards[0]
+
+
+def set_speaker_mixer(card: str) -> None:
+    subprocess.run(['amixer', '-c', card, 'set', 'Headphone', '100%', 'unmute'],
+                   capture_output=True, timeout=5, check=True)
+
+
+def percentile(values: Sequence[float], fraction: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError('no microphone frames captured')
+    return ordered[math.ceil((len(ordered) - 1) * fraction)]
+
+
+def suggest_vad(noise: Sequence[float], speech: Sequence[float]) -> dict:
+    """Conservative frame-RMS separation; refuse a threshold if speech is indistinct."""
+    noise_floor = percentile(noise, .5)
+    noise_p95 = percentile(noise, .95)
+    speech_p75 = percentile(speech, .75)
+    result = {'noise_floor_rms': round(noise_floor, 1),
+              'noise_p95_rms': round(noise_p95, 1),
+              'speech_rms': round(math.sqrt(sum(x*x for x in speech) / len(speech)), 1),
+              'speech_p75_rms': round(speech_p75, 1)}
+    if speech_p75 <= noise_p95 * 1.5 or speech_p75 <= noise_p95 + 2:
+        return {**result, 'onset_rms': None, 'offset_rms': None,
+                'warning': 'speech/noise separation too weak; adjust gain or mic placement and repeat'}
+    gap = speech_p75 - noise_p95
+    return {**result, 'onset_rms': round(noise_p95 + gap * .5, 1),
+            'offset_rms': round(noise_p95 + gap * .25, 1), 'warning': None}
+
+
+def capture_rms(sd, device: int, seconds: int = 3) -> list[float]:
+    """Measure 20 ms PCM frames in memory; never retain raw speech on disk."""
+    values = []
+    with sd.RawInputStream(device=device, samplerate=16000, channels=1,
+                           dtype='int16', blocksize=320) as stream:
+        for _ in range(seconds * 50):
+            data, overflowed = stream.read(320)
+            if overflowed:
+                raise RuntimeError('microphone capture overflow; calibration invalid')
+            samples = struct.unpack('<320h', data)
+            values.append(math.sqrt(sum(sample * sample for sample in samples) / 320))
+    return values
+
+
+def calibration_cue(card: str) -> None:
+    """A short speaker cue before—not during—each recording phase."""
+    sample_rate = 16000
+    pcm = bytes().join(struct.pack('<h', int(3000 * math.sin(2 * math.pi * 660 * n / sample_rate)
+                                        * min(1.0, n / 800, (3200 - n) / 800)))
+                         for n in range(3200))
+    buf = BytesIO()
+    with wave.open(buf, 'wb') as out:
+        out.setnchannels(1); out.setsampwidth(2); out.setframerate(sample_rate)
+        out.writeframes(pcm)
+    subprocess.run(['aplay', '-q', '-D', f'plughw:{card},0'], input=buf.getvalue(),
+                   capture_output=True, timeout=5, check=True)
+
+
+def calibrate_mic(args, *, sd=None, cue=calibration_cue, capture=capture_rms) -> dict:
+    if sd is None:
+        import sounddevice as sd
+    device = usb_mic_device(sd, args.mic_name)
+    card = speaker_card(subprocess.run(['aplay', '-l'], text=True, capture_output=True,
+                                       check=True, timeout=5).stdout)
+    print('After the first tone, keep quiet for 3 seconds. After the second, speak normally from 1 m for 3 seconds.', flush=True)
+    cue(card)
+    noise = capture(sd, device)
+    cue(card)
+    speech = capture(sd, device)
+    result = suggest_vad(noise, speech)
+    print(json.dumps({'mode': 'local_mic_calibration', **result}), flush=True)
+    return result
 
 
 def make_loop(bank, *, asr, reply, tts, play, clock, authority, person_id=None):
@@ -113,16 +222,11 @@ def live(bank: SemanticMemory, args) -> None:
         raise SystemExit('install sounddevice/PortAudio on the audio host before live mode') from exc
     import requests
 
-    devices = sd.query_devices()
-    matches = [i for i, d in enumerate(devices)
-               if args.mic_name.casefold() in d['name'].casefold() and d['max_input_channels'] >= 1]
-    if len(matches) != 1:
-        raise SystemExit('expected exactly one USB mic by name; inspect sounddevice devices')
+    mic = usb_mic_device(sd, args.mic_name)
     listing = subprocess.run(['aplay', '-l'], text=True, capture_output=True, check=True, timeout=5).stdout
-    cards = re.findall(r'^card (\d+): .*Headphones.*$', listing, re.I | re.M)
-    if len(cards) != 1:
-        raise SystemExit('expected exactly one Headphones analog output in aplay -l')
-    speaker = f'plughw:{cards[0]},0'
+    card = speaker_card(listing)
+    set_speaker_mixer(card)
+    speaker = f'plughw:{card},0'
     headers = {'Authorization': 'Bearer ' + key}
 
     def asr(request):
@@ -169,7 +273,7 @@ def live(bank: SemanticMemory, args) -> None:
 
     def play(audio):
         converted = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error',
-             '-i', 'pipe:0', '-filter:a', 'volume=3.0', '-f', 'wav', 'pipe:1'],
+             '-i', 'pipe:0', '-filter:a', speaker_filter(args.speaker_gain), '-f', 'wav', 'pipe:1'],
              input=audio, capture_output=True, timeout=15, check=True)
         result = subprocess.run(['aplay', '-q', '-D', speaker], input=converted.stdout,
                                 capture_output=True, timeout=20)
@@ -190,7 +294,7 @@ def live(bank: SemanticMemory, args) -> None:
         except queue.Full:
             pass
 
-    with sd.RawInputStream(device=matches[0], samplerate=16000, channels=1,
+    with sd.RawInputStream(device=mic, samplerate=16000, channels=1,
                            dtype='int16', blocksize=320, callback=capture) as stream:
         loop = VoiceLoop(BargeInGate(FrameAlignedEcho('social-session', 'social-boot',
             delay_s=0, echo_gain=0), HysteresisVad(onset_rms=args.onset_rms,
@@ -234,6 +338,9 @@ def live(bank: SemanticMemory, args) -> None:
 
 def main():
     args = parse_args()
+    if args.calibrate_mic:
+        calibrate_mic(args)
+        return
     bank = SemanticMemory(args.memory_file)
     if args.offline_demo:
         offline_demo(bank)
