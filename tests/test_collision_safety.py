@@ -281,12 +281,45 @@ class CollisionSafetyTests(unittest.TestCase):
                 with patch.object(bridge, "snapshot", return_value=status):
                     bridge.app_packet_guard(action, lease, lease.deadline)
             check("right", sec)
-            for breached in (dict(sec, left=0.239), dict(sec, front_left=0.279),
-                             dict(sec, right=0.359), dict(sec, rear=0.279)):
+            check("right", dict(sec, left=0.200, right=0.50))
+            check("right", dict(sec, left=0.279, right=0.50))
+            check("right", dict(sec, left=0.279, right=0.24))
+            for breached in (dict(sec, left=0.199), dict(sec, front_left=0.279),
+                             dict(sec, right=0.239), dict(sec, rear=0.279)):
                 with self.assertRaises(bridge.AppPacketCollisionVeto):
                     check("right", breached)
+            # The opposite shift uses the exact symmetric destination/away floors.
+            check("left", dict(sec, left=0.24, right=0.20))
+            for breached in (dict(sec, left=0.239), dict(sec, left=0.50, right=0.199)):
+                with self.assertRaises(bridge.AppPacketCollisionVeto):
+                    check("left", breached)
             with self.assertRaises(bridge.AppPacketCollisionVeto):
                 check("turnright", sec)
+        finally:
+            bridge.end_motion(lease)
+
+    def test_planner_actions_share_packet_admission_on_same_scan(self):
+        clear = {"front": 0.60, "front_left": 0.50, "front_right": 0.55,
+                 "left": 0.60, "right": 0.70, "rear": 0.90}
+        cases = [clear,
+                 dict(clear, front=0.37), dict(clear, front=0.44),
+                 dict(clear, front_left=0.29, left=0.205, right=0.50),
+                 dict(clear, front_left=0.27),
+                 dict(clear, right=0.279),
+                 dict(clear, right=0.23),
+                 dict(clear, rear=0.27)]
+        lease = bridge.begin_motion("test", max_duration=5)
+        try:
+            for sec in cases:
+                action, _, _ = bridge.choose_explore_action(sec)
+                if action == "stop":
+                    continue
+                with self.subTest(action=action, sec=sec), patch.object(
+                        bridge, "snapshot", return_value={
+                            "scan_seen": True, "scan_age_s": 0.01,
+                            "sectors": sec, "slam": {"usable": True}}):
+                    self.assertTrue(bridge.motion_clearance_ok(action, sec))
+                    bridge.app_packet_guard(action, lease, lease.deadline)
         finally:
             bridge.end_motion(lease)
 

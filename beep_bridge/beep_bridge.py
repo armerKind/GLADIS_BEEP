@@ -166,7 +166,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.9.1-room-scale-lateral-fence",
+    "version": "0.22.10-directional-lateral-fence",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -373,6 +373,38 @@ def pkt(cmd: int, payload=()):
     return ("$" + "".join(f"{v & 255:02X}" for v in vals) + "#").encode()
 
 
+def motion_clearance_ok(action, sec):
+    """Common same-scan admission envelope for the planner and app packets.
+
+    Continuous supervision may additionally stop for changes in pose or range.
+    A lateral translation needs room on the destination side; the opposite
+    side retains the hard floor, not the in-place turn sweep.
+    """
+    if action == "forward":
+        return (sec["front"] >= FORWARD_CORRIDOR_M and
+                min(sec["front_left"], sec["front_right"]) >= FOOTPRINT_DIAGONAL_M and
+                min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+    if action in ("back", "backward"):
+        return (sec["rear"] >= FOOTPRINT_REAR_M and
+                min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+    if action in ("left", "right"):
+        destination, opposite = ("right", "left") if action == "right" else ("left", "right")
+        return (sec["front"] >= FOOTPRINT_FRONT_M and
+                min(sec["front_left"], sec["front_right"]) >= TURN_SWEEP_M and
+                sec[destination] >= FOOTPRINT_SIDE_M and
+                sec[opposite] >= HARD_CLEARANCE_M and
+                sec["rear"] >= FOOTPRINT_REAR_M)
+    if action in ("turnleft", "turnright"):
+        return min(sec.values()) >= TURN_SWEEP_M and sec["rear"] >= FOOTPRINT_REAR_M
+    if action in ("curveleft", "curveright"):
+        return (motion_clearance_ok("forward", sec) and
+                min(sec.values()) >= TURN_SWEEP_M and
+                sec["rear"] >= FOOTPRINT_REAR_M)
+    if action in ("arcbackleft", "arcbackright"):
+        return (motion_clearance_ok("back", sec) and min(sec.values()) >= TURN_SWEEP_M)
+    return False
+
+
 def app_packet_guard(action, lease, deadline, stop_seq=None):
     """Host-side fence, not a guarantee that TCP bytes can be revoked.
 
@@ -403,23 +435,9 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
     sec = validated_sector_values(status.get("sectors") or {})
     if not scan_ok(status) or sec is None:
         raise MotionCancelled("app packet local sensors invalid")
-    if action == "forward":
-        safe = (sec["front"] >= FORWARD_CORRIDOR_M
-                and min(sec["front_left"], sec["front_right"]) >= FOOTPRINT_DIAGONAL_M
-                and min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
-    elif action in ("back", "backward"):
-        safe = (slam_ok(status) and sec["rear"] >= FOOTPRINT_REAR_M
-                and min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
-    elif action == "right":
-        # A lateral right-shift uses its own swept envelope, not an in-place
-        # turn's all-sector floor. Keep the supervisor and packet fence equal.
-        safe = (sec["front"] >= FOOTPRINT_FRONT_M and
-                min(sec["front_left"], sec["front_right"]) >= TURN_SWEEP_M and
-                sec["left"] >= FOOTPRINT_SIDE_M and sec["right"] >= SIDE_STEER_M and
-                sec["rear"] >= FOOTPRINT_REAR_M)
-    else:
-        safe = (min(sec.values()) >= max(TURN_SWEEP_M, FOOTPRINT_SIDE_M)
-                and sec["rear"] >= FOOTPRINT_REAR_M)
+    safe = motion_clearance_ok(action, sec)
+    if action in ("back", "backward"):
+        safe = safe and slam_ok(status)
     if not safe:
         remember("app_packet_collision_veto", action=action, scan_count=status.get("scan_count"),
                  sectors=sec)
@@ -1360,9 +1378,9 @@ def run_supervised_calibration(action: str, duration: float):
         return {"ok": False, "reason": "forward_corridor_blocked", "action": action, "status": before}
     if action == "backward" and (sectors["rear"] < FOOTPRINT_REAR_M or min(sectors["left"], sectors["right"]) < FOOTPRINT_SIDE_M):
         return {"ok": False, "reason": "reverse_envelope_blocked", "action": action, "status": before}
-    if action in ("left", "right") and min(sectors.values()) < TURN_SWEEP_M:
+    if action in ("left", "right") and not motion_clearance_ok(action, sectors):
         return {"ok": False, "reason": "lateral_envelope_blocked", "action": action, "status": before}
-    if action in ("turnleft", "turnright") and min(sectors.values()) < TURN_SWEEP_M:
+    if action in ("turnleft", "turnright") and not motion_clearance_ok(action, sectors):
         return {"ok": False, "reason": "turn_envelope_blocked", "action": action, "status": before}
     if action in ("arcbackleft", "arcbackright") and (
             min(sectors.values()) < TURN_SWEEP_M or sectors["rear"] < FOOTPRINT_REAR_M or
@@ -1820,8 +1838,7 @@ def choose_explore_action(sectors):
             return "turnright", 0.30, "front_breach_sweep_right"
         if sweep_min >= TURN_SWEEP_M:
             return "stop", 0.0, "turn_start_margin_not_met"
-        if (front >= FOOTPRINT_FRONT_M and min(fl, fr) >= TURN_SWEEP_M and
-                left >= FOOTPRINT_SIDE_M and right >= SIDE_STEER_M and rear >= FOOTPRINT_REAR_M):
+        if motion_clearance_ok("right", values):
             return "right", 0.35, "bounded_lateral_turn_setup"
         if rear_escape_clear:
             return "back", REVERSE_ESCAPE_MAX_S, "front_footprint_breach_backoff"
@@ -1883,7 +1900,7 @@ def escape_made_progress(action, before, after, before_pose=None, after_pose=Non
         before_front = sum(before_values[name] for name in ("front", "front_left", "front_right")) / 3.0
         after_front = sum(after_values[name] for name in ("front", "front_left", "front_right")) / 3.0
         return (after_values["left"] - before_values["left"] >= 0.008 and
-                after_values["right"] >= SIDE_STEER_M and after_front >= before_front - 0.02)
+                motion_clearance_ok("right", after_values) and after_front >= before_front - 0.02)
     return False
 
 
@@ -2200,10 +2217,8 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
                 return {"ok": True, "reason": "reverse_clearance_gain_reached",
                         "elapsed_s": time.time() - started,
                         "front_clearance_gain_m": current_front - baseline_front}
-        elif action == "right":
-            if (sec["front"] < FOOTPRINT_FRONT_M or min(sec["front_left"], sec["front_right"]) < TURN_SWEEP_M or
-                    sec["left"] < FOOTPRINT_SIDE_M or sec["right"] < SIDE_STEER_M or
-                    sec["rear"] < FOOTPRINT_REAR_M):
+        elif action in ("right", "left"):
+            if not motion_clearance_ok(action, sec):
                 return {"ok": False, "reason": "lateral_setup_clearance_breach",
                         "elapsed_s": time.time() - started}
             current_front = sum(sec[name] for name in ("front", "front_left", "front_right")) / 3.0
@@ -2221,10 +2236,10 @@ def supervise_lidar_motion(action, duration, poll_s=0.08, baseline_sectors=None,
                     return {"ok": False, "reason": "heading_drift_during_lateral_setup",
                             "elapsed_s": time.time() - started}
         elif action in ("turnleft", "turnright"):
-            if min(sec.values()) < TURN_SWEEP_M:
+            if not motion_clearance_ok(action, sec):
                 return {"ok": False, "reason": "turn_sweep_clearance_breach", "elapsed_s": time.time() - started}
         elif action in ("curveleft", "curveright"):
-            if min(sec.values()) < TURN_SWEEP_M or min(sec["left"], sec["right"]) < FOOTPRINT_SIDE_M:
+            if not motion_clearance_ok(action, sec):
                 return {"ok": False, "reason": "fluent_curve_envelope_breach", "elapsed_s": time.time() - started}
         else:
             return {"ok": False, "reason": "unsupported_reactive_motion", "elapsed_s": time.time() - started}
@@ -2319,10 +2334,7 @@ def can_continue_in_gait_curve(action, current_action, sectors):
     sec = validated_sector_values(sectors)
     return bool(sec is not None and action == "forward" and
                 current_action in ("curveleft", "curveright") and
-                sec["front"] >= FORWARD_CORRIDOR_M and
-                min(sec["front_left"], sec["front_right"]) >= FOOTPRINT_DIAGONAL_M and
-                min(sec.values()) >= TURN_SWEEP_M and
-                min(sec["left"], sec["right"]) >= FOOTPRINT_SIDE_M)
+                motion_clearance_ok(current_action, sec))
 
 
 def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=60.0,
@@ -2772,7 +2784,7 @@ def choose_fluent_steering(sectors, current_action=None, bias=None, yaw=None):
             and values["front"] >= FORWARD_CORRIDOR_M
             and min(values["front_left"], values["front_right"]) >= FOOTPRINT_DIAGONAL_M
             and min(values["left"], values["right"]) >= FOOTPRINT_SIDE_M
-            and values["rear"] >= FOOTPRINT_REAR_M):
+            and motion_clearance_ok("curveleft", values)):
         direction = bias.get("preferred_direction")
         bearing = bias.get("preferred_bearing_rad")
         if bearing is not None and yaw is not None and math.isfinite(float(yaw)):
@@ -2784,8 +2796,7 @@ def choose_fluent_steering(sectors, current_action=None, bias=None, yaw=None):
             return "forward"
     # A clear forward corridor does not need a turn just because one side is
     # more open. A curve also needs a viable full sweep, including the rear.
-    if (values["front"] >= 1.25 or min(values.values()) < TURN_SWEEP_M or
-            values["rear"] < FOOTPRINT_REAR_M):
+    if (values["front"] >= 1.25 or not motion_clearance_ok("curveleft", values)):
         return "forward"
     # Forward is the default.  The previous thresholds reacted to ordinary
     # LiDAR asymmetry every 0.5 s and made exploration look like nervous
