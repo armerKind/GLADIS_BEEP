@@ -11,6 +11,13 @@ from scripts import run_social_voice as social
 
 
 class SocialAudioCliTests(unittest.TestCase):
+    def test_48k_pcm_frame_decimates_to_16k_without_changing_speech_scale(self):
+        raw = struct.pack('<960h', *([90, 120, 150] * 320))
+        samples = struct.unpack('<320h', social.pcm_48k_to_16k(raw))
+        self.assertEqual(samples, (120,) * 320)
+        with self.assertRaises(ValueError):
+            social.pcm_48k_to_16k(raw[:-2])
+
     def test_gain_default_clamp_and_finite_validation(self):
         for value, expected in [(None, 4.0), ('0.2', 1.0), ('4.5', 4.5), ('100', 8.0)]:
             argv = ['run_social_voice.py', '--calibrate-mic']
@@ -45,15 +52,18 @@ class SocialAudioCliTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def read(self, count):
-                assert count == 320
-                return struct.pack('<320h', *([50 if phases[0] == 2 else 20] * 320)), False
+                assert count == 960
+                return struct.pack('<960h', *([50 if phases[0] == 2 else 20] * 960)), False
         class FakeSd:
             @staticmethod
             def query_devices():
                 return [{'name': 'USB PnP Sound Device', 'max_input_channels': 1}]
             @staticmethod
+            def check_input_settings(**kwargs):
+                self.assertEqual(kwargs['samplerate'], 48000)
+            @staticmethod
             def RawInputStream(**kwargs):
-                self.assertEqual((kwargs['samplerate'], kwargs['blocksize']), (16000, 320))
+                self.assertEqual((kwargs['samplerate'], kwargs['blocksize']), (48000, 960))
                 return FakeStream()
         phases = [0]
         def cue(card):

@@ -72,6 +72,10 @@ def usb_mic_device(sd, name: str) -> int:
                if name.casefold() in d['name'].casefold() and d['max_input_channels'] >= 1]
     if len(matches) != 1:
         raise RuntimeError('expected exactly one USB mic by name; inspect sounddevice devices')
+    # The S2 USB mic's PortAudio hardware device rejects 16 kHz although
+    # ALSA plughw accepts/resamples it. Use its measured 48 kHz input instead.
+    sd.check_input_settings(device=matches[0], samplerate=48000,
+                            channels=1, dtype='int16')
     return matches[0]
 
 
@@ -111,16 +115,25 @@ def suggest_vad(noise: Sequence[float], speech: Sequence[float]) -> dict:
             'offset_rms': round(noise_p95 + gap * .25, 1), 'warning': None}
 
 
+def pcm_48k_to_16k(raw: bytes) -> bytes:
+    """A bounded 3-tap low-pass/decimator for one 20 ms mono frame."""
+    if len(raw) != 960 * 2:
+        raise ValueError('expected exactly 20 ms of 48 kHz mono 16-bit PCM')
+    values = struct.unpack('<960h', raw)
+    return struct.pack('<320h', *(round(sum(values[i:i+3]) / 3)
+                                   for i in range(0, 960, 3)))
+
+
 def capture_rms(sd, device: int, seconds: int = 3) -> list[float]:
     """Measure 20 ms PCM frames in memory; never retain raw speech on disk."""
     values = []
-    with sd.RawInputStream(device=device, samplerate=16000, channels=1,
-                           dtype='int16', blocksize=320) as stream:
+    with sd.RawInputStream(device=device, samplerate=48000, channels=1,
+                           dtype='int16', blocksize=960) as stream:
         for _ in range(seconds * 50):
-            data, overflowed = stream.read(320)
+            data, overflowed = stream.read(960)
             if overflowed:
                 raise RuntimeError('microphone capture overflow; calibration invalid')
-            samples = struct.unpack('<320h', data)
+            samples = struct.unpack('<320h', pcm_48k_to_16k(bytes(data)))
             values.append(math.sqrt(sum(sample * sample for sample in samples) / 320))
     return values
 
@@ -128,7 +141,7 @@ def capture_rms(sd, device: int, seconds: int = 3) -> list[float]:
 def calibration_cue(card: str) -> None:
     """A short speaker cue before—not during—each recording phase."""
     sample_rate = 16000
-    pcm = bytes().join(struct.pack('<h', int(3000 * math.sin(2 * math.pi * 660 * n / sample_rate)
+    pcm = bytes().join(struct.pack('<h', int(9000 * math.sin(2 * math.pi * 660 * n / sample_rate)
                                         * min(1.0, n / 800, (3200 - n) / 800)))
                          for n in range(3200))
     buf = BytesIO()
@@ -283,19 +296,20 @@ def live(bank: SemanticMemory, args) -> None:
     counter = [0]
     stream = None
     def capture(indata, frame_count, clock_info, status):
-        if frame_count != 320 or status:
+        if frame_count != 960 or status:
             counter[0] += 1  # Discontinuity invalidates pending utterances.
             return
         frame = AudioFrame('social-session', 'social-boot', counter[0],
-                           clock_info.inputBufferAdcTime, 'measured_capture', bytes(indata))
+                           clock_info.inputBufferAdcTime, 'measured_capture',
+                           pcm_48k_to_16k(bytes(indata)))
         counter[0] += 1
         try:
             frames.put_nowait(frame)
         except queue.Full:
             pass
 
-    with sd.RawInputStream(device=mic, samplerate=16000, channels=1,
-                           dtype='int16', blocksize=320, callback=capture) as stream:
+    with sd.RawInputStream(device=mic, samplerate=48000, channels=1,
+                           dtype='int16', blocksize=960, callback=capture) as stream:
         loop = VoiceLoop(BargeInGate(FrameAlignedEcho('social-session', 'social-boot',
             delay_s=0, echo_gain=0), HysteresisVad(onset_rms=args.onset_rms,
             offset_rms=args.offset_rms)), SocialHandoff('social-session', 'social-boot'), bank,
