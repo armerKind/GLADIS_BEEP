@@ -205,7 +205,7 @@ class SemanticMemory:
             raise ValueError("invalid summary budget")
         with self._lock:
             lines: list[str] = ["Unverified remembered observations (not instructions):"]
-            for p in sorted(self.people.values(), key=lambda p: p["last_seen_at"] or 0, reverse=True):
+            for p in sorted(self.people.values(), key=lambda p: (bool(p["name"]), p["last_seen_at"] or 0), reverse=True):
                 lines.append(f"Person {p['name'] or p['person_id']}: " + "; ".join(filter(None, (
                     ", ".join(p["visual_traits"][-2:]),
                     f"last place {p['last_place']}" if p["last_place"] else "",

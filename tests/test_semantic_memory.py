@@ -101,6 +101,15 @@ class SemanticMemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SemanticMemory(self.path)
 
+    def test_named_profile_precedes_new_anonymous_sightings_in_small_prompt(self):
+        self.bank.record_person("known", name="Max", known_facts=["likes tea"], last_seen_at=1)
+        for index in range(10):
+            self.bank.record_person(f"anon:{index}", visual_traits=["visitor"],
+                                    last_seen_at=index + 100)
+        summary = self.bank.prompt_summary(100)
+        self.assertIn("Person Max", summary)
+        self.assertLess(summary.index("Person Max"), summary.index("Person anon:"))
+
     def test_atomic_failure_preserves_previous_file_and_no_temp_files(self):
         self.bank.record_person("p1", name="Max")
         previous = self.path.read_bytes()
