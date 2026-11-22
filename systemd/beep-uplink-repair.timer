@@ -2,8 +2,8 @@
 Description=Check BEEP hotspot uplink after boot and periodically
 
 [Timer]
-OnBootSec=35s
-OnUnitInactiveSec=60s
+OnBootSec=15s
+OnUnitInactiveSec=20s
 Unit=beep-uplink-repair.service
 Persistent=true
 
