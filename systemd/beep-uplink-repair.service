@@ -1,0 +1,9 @@
+[Unit]
+Description=Recover BEEP's USB hotspot uplink while preserving its control AP
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beep-uplink-repair
+TimeoutStartSec=45

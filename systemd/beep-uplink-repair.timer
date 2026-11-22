@@ -1,0 +1,11 @@
+[Unit]
+Description=Check BEEP hotspot uplink after boot and periodically
+
+[Timer]
+OnBootSec=35s
+OnUnitInactiveSec=60s
+Unit=beep-uplink-repair.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
