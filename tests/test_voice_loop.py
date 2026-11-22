@@ -43,8 +43,8 @@ class VoiceLoopTests(unittest.TestCase):
         self.calls.append(('asr', len(req.pcm_s16le)))
         return self.next_text
 
-    def _reply(self, transcript, memory):
-        self.calls.append(('reply', transcript.text, memory))
+    def _reply(self, transcript, context):
+        self.calls.append(('reply', None if transcript is None else transcript.text, context))
         return 'Noted. Your persistence is now measurable.'
 
     def _tts(self, text):
@@ -78,7 +78,7 @@ class VoiceLoopTests(unittest.TestCase):
         self.assertIn('I like chamomile tea', fresh.people['owner-max']['known_facts'])
         self.assertEqual([c['topics'][0] for c in fresh.conversations],
                          ['introduction', 'place', 'facts'])
-        self.assertIn('Max', self.calls[-3][2])  # Memory entered reply context.
+        self.assertIn('Max', self.calls[-3][2].memory_summary)  # Memory entered reply context.
         self.assertEqual(len(fresh.conversations), 3)
 
     def test_no_consent_never_calls_cloud_or_writes(self):
@@ -126,6 +126,112 @@ class VoiceLoopTests(unittest.TestCase):
         self.loop.transcribe = slow
         self.assertEqual(self.speak(0).state, 'stale_or_unconsented')
         self.assertFalse(self.path.exists())
+
+    def test_proactive_greeting_gaps_visual_context_and_cooldown(self):
+        first = self.loop.initiate_turn(visual_context='A person is near the sofa.')
+        self.assertEqual(first.state, 'initiated')
+        self.assertFalse(first.memory_written)
+        self.assertFalse(self.path.exists())
+        context = self.calls[0][2]
+        self.assertIsNone(self.calls[0][1])
+        self.assertEqual(context.trigger, 'session_start')
+        self.assertEqual(context.visual_context, 'A person is near the sofa.')
+        self.assertIn('speaker_name_unknown', context.gaps)
+        self.assertIn('room_label_unknown', context.gaps)
+        self.assertEqual(self.loop.history, ({'role': 'assistant', 'content': first.reply},))
+        self.assertEqual(self.loop.initiate_turn('person_noticed').state, 'cooldown')
+        self.assertEqual(len(self.calls), 3)
+        self.clock[0] += 31
+        self.assertEqual(self.loop.initiate_turn('person_noticed').state, 'initiated')
+        self.assertEqual(self.calls[3][2].history[0]['content'], first.reply)
+
+    def test_no_consent_or_changed_owner_blocks_proactive_audio_and_history(self):
+        self.owner[2] = False
+        self.assertEqual(self.loop.initiate_turn().state, 'no_consent')
+        self.assertEqual(self.calls, [])
+        self.owner[2] = True
+        def changed(_transcript, _context):
+            self.owner[0], self.owner[1] = 'another', 'lease'
+            return 'Hello.'
+        self.loop.compose_reply = changed
+        self.assertEqual(self.loop.initiate_turn().state, 'owner_changed_before_tts')
+        self.assertEqual(self.loop.history, ())
+        self.assertFalse(self.path.exists())
+
+    def test_unconfirmed_proactive_playback_does_not_start_cooldown(self):
+        self.loop.play = lambda _audio: False
+        self.assertEqual(self.loop.initiate_turn().state, 'playback_unconfirmed')
+        self.assertEqual(self.loop.history, ())
+        self.loop.play = lambda _audio: True
+        self.assertEqual(self.loop.initiate_turn().state, 'initiated')
+
+    def test_previously_known_place_does_not_claim_current_room(self):
+        self.bank.record_place('old-kitchen', label='kitchen')
+        self.loop.initiate_turn()
+        self.assertIn('room_label_unknown', self.calls[0][2].gaps)
+
+    def test_speech_turns_keep_only_last_eight_role_messages(self):
+        greeting = self.loop.initiate_turn()
+        self.assertEqual(greeting.state, 'initiated')
+        for n in range(6):
+            self.clock[0] = 1.20 + n * .1
+            self.next_text = f'Hello again {n}.'
+            self.assertEqual(self.speak(n * 4).state, 'replied')
+        self.assertEqual(len(self.loop.history), 8)
+        self.assertEqual([item['role'] for item in self.loop.history],
+                         ['user', 'assistant'] * 4)
+        self.assertEqual(self.loop.history[-2]['content'], 'Hello again 5.')
+        contexts = [call[2] for call in self.calls if call[0] == 'reply']
+        self.assertEqual(len(contexts[-1].history), 8)
+        self.assertEqual(contexts[-1].history[-2]['content'], 'Hello again 4.')
+
+    def test_structured_natural_memory_and_follow_up_gaps(self):
+        responses = iter((
+            {'reply': 'Nico. Where are we?', 'memory_updates': {'name': 'Nico', 'topics': ['introductions']}},
+            {'reply': 'Kitchen noted.', 'memory_updates': {'room': 'kitchen', 'topics': ['kitchen']}},
+            {'reply': 'Coffee. Excellent choice.', 'memory_updates': {'facts': ['drinking coffee'], 'topics': ['coffee']}}
+        ))
+        self.loop.compose_reply = lambda transcript, context: responses.__next__()
+        for index, text in enumerate(("Hey, I'm Nico.", "We're in the kitchen.",
+                                      'Just drinking coffee.')):
+            self.next_text = text
+            self.clock[0] = 1.10 + index * .1
+            self.assertEqual(self.speak(index * 4).state, 'replied')
+        self.assertEqual(self.bank.people['owner-max']['name'], 'Nico')
+        self.assertIn('kitchen', self.bank.places)
+        self.assertIn('drinking coffee', self.bank.people['owner-max']['known_facts'])
+        self.assertEqual(self.bank.people['owner-max']['recent_topics'][-1], 'coffee')
+        self.clock[0] += 31
+        self.loop.compose_reply = self._reply
+        self.loop.initiate_turn('person_noticed')
+        context = self.calls[-3][2]
+        self.assertIn('follow_up_topic:coffee', context.gaps)
+        self.assertNotIn('speaker_name_unknown', context.gaps)
+        self.assertNotIn('room_label_unknown', context.gaps)
+
+    def test_unsupported_structured_claim_falls_back_to_speech_regex(self):
+        self.next_text = "Hey, I'm Nico."
+        self.loop.compose_reply = lambda transcript, context: {
+            'reply': 'Hello.', 'memory_updates': {'name': 'SomeoneElse', 'facts': ['owns a yacht']}}
+        self.assertEqual(self.speak(0).state, 'replied')
+        self.assertEqual(self.bank.people['owner-max']['name'], 'Nico')
+        self.assertEqual(self.bank.people['owner-max']['known_facts'], [])
+
+    def test_im_drinking_is_not_a_person_name(self):
+        self.next_text = "I'm drinking coffee."
+        self.assertEqual(self.speak(0).state, 'replied')
+        self.assertIsNone(self.bank.people['owner-max']['name'])
+
+    def test_extraction_callback_override_and_invalid_visual_bound(self):
+        self.next_text = 'Just drinking coffee.'
+        self.loop.extract_memory = lambda transcript, context: {
+            'facts': ['drinking coffee'], 'topics': ['coffee']}
+        self.assertEqual(self.speak(0).state, 'replied')
+        self.assertIn('drinking coffee', self.bank.people['owner-max']['known_facts'])
+        from beep_audio.capture import AudioContractError
+        self.clock[0] += 31
+        with self.assertRaises(AudioContractError):
+            self.loop.initiate_turn(visual_context='x' * 241)
 
 
 if __name__ == '__main__':
