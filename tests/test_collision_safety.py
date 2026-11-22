@@ -206,6 +206,7 @@ class CollisionSafetyTests(unittest.TestCase):
         state = {
             "scan_seen": True,
             "scan_age_s": 0.01,
+            "moving": False,
             "sectors": {
                 "front": 0.43, "front_left": 0.65, "front_right": 0.46,
                 "left": 0.58, "right": 0.50, "rear": 1.0,
@@ -229,6 +230,45 @@ class CollisionSafetyTests(unittest.TestCase):
             self.assertGreaterEqual(kwargs["max_duration"], 1.0)
             self.assertLessEqual(kwargs["max_duration"], 1.2)
         motor.assert_not_called()
+
+    def test_failed_turn_stops_then_reassesses_opposite_and_walks_forward(self):
+        sectors = {"front": .43, "front_left": .60, "front_right": .55,
+                   "left": .65, "right": .60, "rear": .80}
+        def status():
+            return {"scan_seen": True, "scan_age_s": .01, "moving": False,
+                    "fall_suspected": False, "sectors": dict(sectors),
+                    "pose": {"yaw": 0.0},
+                    "slam": {"usable": True, "pose_valid": True,
+                             "pose_age_s": .01, "map_age_s": .01}}
+        outcomes = [{"ok": False, "reason": "wrong_direction:-16.0deg", "elapsed_s": .4},
+                    {"ok": True, "reason": "target_reached:20.0deg", "elapsed_s": .7}]
+        def guarded(**kwargs):
+            result = outcomes.pop(0)
+            if result["ok"]:
+                sectors["front"] = .60
+                sectors["front_left"] = .67
+                sectors["front_right"] = .68
+            return result
+        decisions = [("turnleft", .3, "test_turn"),
+                     ("turnleft", .3, "planner_repeats"),
+                     ("forward", .5, "corridor_clear"),
+                     ("stop", 0., "test_done")]
+        with patch.object(bridge, "snapshot", side_effect=status), \
+                patch.object(bridge, "choose_explore_action", side_effect=decisions), \
+                patch.object(bridge, "guarded_slam_turn", side_effect=guarded) as turn, \
+                patch.object(bridge, "pose_copy", return_value={"yaw": 0.0}), \
+                patch.object(bridge, "apply_navigation_course", return_value=("forward", True)), \
+                patch.object(bridge, "supervise_lidar_forward", return_value={
+                    "ok": True, "reason": "window_complete", "elapsed_s": .5}), \
+                patch.object(bridge, "stop_burst") as stop, \
+                patch.object(bridge.time, "sleep", return_value=None):
+            result = bridge.lidar_walk(max_duration=5, save=False)
+        self.assertEqual(result["reason"], "test_done")
+        self.assertEqual([c.kwargs["turn"] for c in turn.call_args_list], ["left", "right"])
+        self.assertEqual([x["action"] for x in result["trace"]],
+                         ["turnleft", "stop_reassess", "turnright", "forward", "stop"])
+        self.assertEqual(result["trace"][1]["consecutive_turn_recoveries"], 1)
+        self.assertGreaterEqual(stop.call_count, 1)
 
     def test_curve_continuation_does_not_override_guarded_turn(self):
         clear = {"front": 0.8, "front_left": 0.7, "front_right": 0.7,

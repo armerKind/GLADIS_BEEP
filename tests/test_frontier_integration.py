@@ -805,6 +805,37 @@ class FrontierIntegrationTests(unittest.TestCase):
         self.assertEqual(app_send.call_count, 2)
         self.assertEqual(sdk_send.call_count, 2)
 
+    def test_frontier_failed_turn_stops_blacklists_route_and_replans(self):
+        grid = OccupancyGrid(15, 15, 0.10, 0.0, 0.0, [0] * 225)
+        status = {"scan_seen": True, "scan_age_s": .01, "moving": False,
+                  "fall_suspected": False,
+                  "slam": {"usable": True, "pose_valid": True,
+                           "pose_age_s": .01, "map_age_s": .01},
+                  "pose": {"yaw": 0.0},
+                  "sectors": {"front": .65, "front_left": .65, "front_right": .65,
+                              "left": .7, "right": .7, "rear": .7}}
+        pose = {"x": .7, "y": .7, "yaw": 0.0}
+        plan = {"target_world": (1.15, .7), "cluster_size": 3,
+                "frontier_clusters": 1, "reachable_frontiers": 1, "score": 1.0,
+                "path": [(7, 7), (8, 7)], "target_cell": (11, 7)}
+        decision = {"action": "turnleft", "step": 30, "duration": .3,
+                    "reason": "test_plan", "heading_error": .5}
+        failed = {"ok": False, "reason": "wrong_direction:-16.0deg", "elapsed_s": .4}
+        with patch.object(bridge, "slam_grid_copy", return_value=grid), \
+                patch.object(bridge, "snapshot", return_value=status), \
+                patch.object(bridge, "pose_copy", return_value=pose), \
+                patch.object(bridge, "find_frontier_plan", side_effect=[plan, None]) as planner, \
+                patch.object(bridge, "choose_natural_motion", return_value=decision), \
+                patch.object(bridge, "guarded_slam_turn", return_value=failed) as turn, \
+                patch.object(bridge, "stop_burst") as stop:
+            result = bridge.frontier_explore(max_duration=3, save=False)
+        self.assertEqual(result["reason"], "coverage_complete_or_no_reachable_frontiers")
+        self.assertEqual(planner.call_count, 2)
+        turn.assert_called_once()
+        self.assertTrue(any(x.get("event") == "turn_stop_reassess" and
+                            x.get("suggested_opposite") == "turnright" for x in result["trace_tail"]))
+        self.assertGreaterEqual(stop.call_count, 1)
+
     def test_bounded_frontier_loop_plans_motion_and_finishes_stopped(self):
         width = height = 15
         data = [-1] * (width * height)

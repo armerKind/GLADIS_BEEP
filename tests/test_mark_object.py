@@ -151,7 +151,7 @@ class MarkObjectPlanTests(unittest.TestCase):
 
 
     def test_guarded_slam_turn_rejects_wrong_direction(self):
-        yaws = iter([0.0, -0.25, -0.25])
+        yaws = iter([0.0, -0.30, -0.30])
         commands = []
         stops = []
 
@@ -188,6 +188,46 @@ class MarkObjectPlanTests(unittest.TestCase):
         self.assertTrue(result["reason"].startswith("wrong_direction"))
         self.assertEqual(commands, [("turnleft", 30)])
         self.assertEqual(stops, [3])
+
+    def test_guarded_turn_tolerates_seven_degree_opposite_yaw_then_reaches_target(self):
+        yaws = iter([0.0, -math.radians(7), 0.08, 0.24, 0.36, 0.36])
+        status = {"scan_seen": True, "scan_age_s": 0.01,
+                  "sectors": {name: 0.8 for name in
+                              ("front", "front_left", "front_right", "left", "right", "rear")},
+                  "slam": {"active": True, "pose_valid": True, "usable": True}}
+        commands = []
+        stops = []
+        def sample():
+            return dict(status, pose={"yaw": next(yaws, 0.36)})
+        with patch.object(bridge, "snapshot", side_effect=sample), \
+                patch.object(bridge, "motor_send", side_effect=lambda a, step=None: commands.append(a)), \
+                patch.object(bridge, "stop_burst", side_effect=lambda n=3: stops.append(n)), \
+                patch.object(bridge.time, "sleep", return_value=None):
+            result = bridge.guarded_slam_turn(turn="left", degrees=20, max_duration=2)
+        self.assertTrue(result["ok"], result["reason"])
+        self.assertTrue(any(-8 < point["progress_degrees"] < -6 for point in result["trace_tail"]))
+        self.assertEqual(commands, ["turnleft"])
+        self.assertEqual(stops, [3])
+
+    def test_turn_failure_reassessment_requires_stationary_fresh_safe_sweep(self):
+        clear = {"front": .6, "front_left": .6, "front_right": .6,
+                 "left": .5, "right": .5, "rear": .5}
+        status = {"moving": False, "scan_seen": True, "scan_age_s": .01,
+                  "sectors": clear, "slam": {"usable": True}, "fall_suspected": False}
+        for reason in ("wrong_direction:-16.0deg", "turn_no_progress_in_window:0.0deg",
+                       "settled_turn_below_minimum:3.0deg", "max_duration", "turn_no_progress"):
+            with self.subTest(reason=reason):
+                self.assertEqual(bridge.turn_failure_reassessment(
+                    "turnleft", {"reason": reason}, status), "turnright")
+        for reason in ("clearance_too_close:0.2", "slam_invalid_during_turn",
+                       "motion_cancelled", "exception:RuntimeError()"):
+            self.assertIsNone(bridge.turn_failure_reassessment(
+                "turnleft", {"reason": reason}, status))
+        for blocked in (dict(status, moving=True), dict(status, fall_suspected=True),
+                        dict(status, scan_age_s=5), dict(status, sectors=dict(clear, left=.279)),
+                        dict(status, slam={"usable": False})):
+            self.assertIsNone(bridge.turn_failure_reassessment(
+                "turnleft", {"reason": "wrong_direction:-16.0deg"}, blocked))
 
     def test_guarded_slam_turn_rejects_missing_sector_before_motor_command(self):
         status = {

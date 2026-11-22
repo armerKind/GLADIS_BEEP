@@ -87,6 +87,7 @@ REVERSE_ESCAPE_MAX_S = min(1.2, max(
 ROBOT_FOOTPRINT_RADIUS_M = max(0.22, float(os.environ.get("BEEP_ROBOT_FOOTPRINT_RADIUS_M", "0.28")))
 TURN_PROGRESS_WINDOW_S = max(0.50, float(os.environ.get("BEEP_TURN_PROGRESS_WINDOW_S", "0.75")))
 TURN_PROGRESS_MIN_RAD = math.radians(max(5.0, float(os.environ.get("BEEP_TURN_PROGRESS_MIN_DEG", "10.0"))))
+TURN_WRONG_DIRECTION_ABORT_RAD = math.radians(15.0)
 TURN_SETTLE_SAMPLES = 3
 TURN_SETTLE_YAW_TOLERANCE_RAD = math.radians(2.0)
 TURN_SETTLE_MAX_S = 0.35
@@ -166,7 +167,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.10-directional-lateral-fence",
+    "version": "0.22.11-turn-reassess",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -1909,6 +1910,27 @@ def turn_window_stalled(elapsed_s, progress_delta_rad):
             float(progress_delta_rad) < TURN_PROGRESS_MIN_RAD)
 
 
+def turn_failure_reassessment(action, turn_result, status):
+    """Offer an opposite turn only after a stopped, fresh, fully clear scan.
+
+    Never reinterpret cancellation, sensor loss, fall, or clearance breach as
+    ordinary gait slip. The caller owns the consecutive-recovery budget.
+    """
+    reason = str(turn_result.get("reason", ""))
+    recoverable = (reason == "max_duration" or reason == "turn_no_progress" or
+                   reason.startswith(("wrong_direction:", "turn_no_progress_in_window:",
+                                      "settled_turn_below_minimum:")))
+    if not recoverable or action not in ("turnleft", "turnright"):
+        return None
+    if (motion_is_cancelled() or status.get("moving") is not False or
+            status.get("fall_suspected") or not scan_ok(status) or not slam_ok(status)):
+        return None
+    sec = validated_sector_values(status.get("sectors") or {})
+    if sec is None or min(sec.values()) < TURN_START_CLEARANCE_M:
+        return None
+    return "turnright" if action == "turnleft" else "turnleft"
+
+
 def explore_step_for(action):
     if action == "forward":
         return 20
@@ -2355,6 +2377,7 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
     packet_veto_retries = 0
     forced_turn_action = None
     consecutive_backoff_turn_handoffs = 0
+    consecutive_turn_recoveries = 0
     coverage_samples = deque()
     initial_known_cells = None
     final_known_cells = None
@@ -2395,7 +2418,14 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 sec = st.get("sectors") or {}
                 action, duration, why = choose_explore_action(sec)
                 remaining = max_duration - (time.time() - started)
-                if forced_turn_action and min(sec.values()) >= TURN_START_CLEARANCE_M:
+                if action == "forward":
+                    # Fresh full-corridor progress is preferable to another
+                    # recovery pivot; the forward packet fence still applies.
+                    forced_turn_action = None
+                if (forced_turn_action and scan_ok(st) and slam_ok(st) and
+                        validated_sector_values(sec) is not None and
+                        min(sec.values()) >= TURN_START_CLEARANCE_M and
+                        not st.get("fall_suspected") and st.get("moving") is False):
                     action, duration, why = forced_turn_action, 2.5, "alternate_after_ineffective_turn"
                     forced_turn_action = None
                 if can_continue_in_gait_curve(action, current_action, sec):
@@ -2409,7 +2439,6 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                 if action == "forward":
                     last_escape_action = None
                     consecutive_escape_actions = 0
-                    total_escape_actions = 0
                     desired_action = choose_fluent_steering(
                         sec, current_action=current_action, bias=active_mission_bias(),
                         yaw=(st.get("pose") or {}).get("yaw"))
@@ -2454,6 +2483,8 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                         break
                     packet_veto_retries = 0
                     consecutive_backoff_turn_handoffs = 0
+                    consecutive_turn_recoveries = 0
+                    total_escape_actions = 0
                     continue
                 total_escape_actions += 1
                 if total_escape_actions > 4:
@@ -2515,6 +2546,20 @@ def lidar_walk(max_duration=60.0, save=True, coverage_goal=False, min_duration=6
                     "recovery_attempts": supervised.get("attempts"),
                 })
                 if not supervised["ok"]:
+                    if action in ("turnleft", "turnright"):
+                        # The turn itself stopped; repeat stop before consulting
+                        # a fresh post-stop scan for a bounded opposite turn.
+                        stop_burst(2)
+                        after_stop = snapshot()
+                        alternative = turn_failure_reassessment(action, supervised, after_stop)
+                        if alternative and consecutive_turn_recoveries < 2:
+                            consecutive_turn_recoveries += 1
+                            forced_turn_action = alternative
+                            trace.append({"action": "stop_reassess", "why": supervised["reason"],
+                                          "next_turn": alternative,
+                                          "consecutive_turn_recoveries": consecutive_turn_recoveries,
+                                          "sectors": after_stop.get("sectors") or {}})
+                            continue
                     if action in ("back", "backward") and consecutive_backoff_turn_handoffs < 2:
                         forced_turn_action = turn_after_stopped_backoff(supervised, snapshot())
                         if forced_turn_action is not None:
@@ -2853,6 +2898,7 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
     selected_meta = None
     stall_count = 0
     packet_veto_retries = 0
+    consecutive_turn_recoveries = 0
     gait_action = None
     reason = "max_duration"
     active_explore = {"active": True, "mode": "frontier_explore", "started_at": started, "name": name, "chaos": chaos, "seed": actual_seed}
@@ -3053,19 +3099,30 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                 })
 
                 if decision["action"] in ("turnleft", "turnright"):
-                    if not motion_window.get("ok"):
-                        stop_burst(2)
-                        gait_action = None
-                        reason = str(motion_window.get("reason", "turn_failed"))
-                        break
-                    turn_progress = (
-                        abs(norm_angle(after_pose[2] - before_pose[2])) >= math.radians(10.0)
-                    )
+                    turn_progress = (bool(motion_window.get("ok")) and
+                                     abs(norm_angle(after_pose[2] - before_pose[2])) >= math.radians(10.0))
                     trace[-1]["turn_progress"] = turn_progress
-                    if not turn_progress:
+                    if not motion_window.get("ok") or not turn_progress:
                         stop_burst(2)
                         gait_action = None
-                        reason = "turn_no_progress"
+                        turn_reason = (str(motion_window.get("reason", "turn_failed")) if
+                                       not motion_window.get("ok") else "turn_no_progress")
+                        after_stop = snapshot()
+                        next_turn = turn_failure_reassessment(
+                            decision["action"], {"reason": turn_reason}, after_stop)
+                        if next_turn and consecutive_turn_recoveries < 2:
+                            consecutive_turn_recoveries += 1
+                            trace.append({"event": "turn_stop_reassess", "reason": turn_reason,
+                                          "suggested_opposite": next_turn,
+                                          "consecutive_turn_recoveries": consecutive_turn_recoveries,
+                                          "sectors": after_stop.get("sectors") or {}})
+                            if selected_target_world is not None:
+                                excluded_world.append(selected_target_world)
+                            selected_target_world = None
+                            selected_meta = None
+                            stall_count = 0
+                            continue
+                        reason = turn_reason
                         break
 
                 if not motion_window["ok"]:
@@ -3073,6 +3130,9 @@ def frontier_explore(name="dog_frontier", max_duration=60.0, chaos=0.45, seed=No
                         continue
                     reason = motion_window["reason"]
                     break
+
+                if decision["action"] == "forward" and translated >= 0.008:
+                    consecutive_turn_recoveries = 0
 
                 if stall_count >= 3 and selected_target_world is not None:
                     if gait_action is not None:
@@ -3315,7 +3375,7 @@ def guarded_slam_turn(turn="left", degrees=90.0, max_duration=MARK_TURN_TIMEOUT_
                 if progress >= required_progress:
                     reason = f"target_reached:{math.degrees(progress):.1f}deg"
                     break
-                if progress < -math.radians(5.0):
+                if progress <= -TURN_WRONG_DIRECTION_ABORT_RAD:
                     reason = f"wrong_direction:{math.degrees(progress):.1f}deg"
                     break
                 if elapsed - window_started >= TURN_PROGRESS_WINDOW_S:
@@ -3541,7 +3601,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "turn_settle_yaw_tolerance_deg": math.degrees(TURN_SETTLE_YAW_TOLERANCE_RAD),
                                     "turn_settle_max_s": TURN_SETTLE_MAX_S,
                                     "turn_progress_window_s": TURN_PROGRESS_WINDOW_S,
-                                    "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD)},
+                                    "turn_progress_min_deg": math.degrees(TURN_PROGRESS_MIN_RAD),
+                                    "turn_wrong_direction_abort_deg": math.degrees(TURN_WRONG_DIRECTION_ABORT_RAD),
+                                    "turn_recovery_limit": 2},
                                 "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "maps": {"authoritative_slam_grid": "/slam_map", "bridge_trace": "/map?full=1", "robot_frame_scan": "/local_map"},
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
