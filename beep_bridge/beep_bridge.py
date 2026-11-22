@@ -135,6 +135,17 @@ TRICK_ACTIONS = {
     "swing": {"id": 16, "label": "Swing", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["shake", "wobble"]},
     "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["prey", "beg", "begging", "request_food"]},
 }
+# SDK action mappings are vendor-source-derived, NOT commissioned on this S2.
+# Keep overrides explicit; do not invent app protocol bytes for postures.
+POSTURE_ACTIONS = {
+    "sit": int(os.environ.get("BEEP_SIT_ACTION_ID", "12")),
+    "stand": int(os.environ.get("BEEP_STAND_ACTION_ID", "255")),
+}
+if any(not 1 <= value <= 255 for value in POSTURE_ACTIONS.values()):
+    raise ValueError("posture SDK action IDs must be in 1..255")
+if POSTURE_ACTIONS["sit"] == POSTURE_ACTIONS["stand"]:
+    raise ValueError("sit and stand must use distinct SDK actions")
+POSTURE_ACTION_IDS = frozenset({12, 255, *POSTURE_ACTIONS.values()})
 TRICK_ALIASES = {}
 for _trick_name, _trick_meta in TRICK_ACTIONS.items():
     TRICK_ALIASES[_trick_name] = _trick_name
@@ -167,7 +178,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.11-turn-reassess",
+    "version": "0.22.12-stationary-social-posture",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -178,6 +189,8 @@ state = {
     "scan_count": 0,
     "sectors": {},
     "moving": False,
+    "posture": "standing",
+    "posture_action_acknowledged": False,
     "motion_cancelled": False,
     "motion_lease_id": None,
     "motion_lease_source": None,
@@ -265,12 +278,17 @@ def motion_lease_watchdog(lease):
         return
 
 
-def begin_motion(source="api", max_duration=600.0):
+def begin_motion(source="api", max_duration=600.0, *, allow_posture=False):
     """Acquire exclusive motion ownership immediately; never queue behind another run."""
     global _active_motion_lease, _motion_lease_sequence
     now = time.monotonic()
     max_duration = max(0.1, min(float(max_duration), 600.0))
     with motion_owner_lock:
+        if allow_posture and source != "posture":
+            raise ValueError("posture lease reserved for posture endpoint")
+        with state_lock:
+            if state["posture"] != "standing" and not allow_posture:
+                raise MotionBusy("locomotion refused while sitting")
         if _active_motion_lease is not None:
             current = _active_motion_lease
             raise MotionBusy(f"motion busy: lease {current.lease_id} from {current.source}")
@@ -342,6 +360,8 @@ def _reset_motion_state_for_tests():
         state["motion_cancelled"] = False
         state["motion_lease_id"] = None
         state["motion_lease_source"] = None
+        state["posture"] = "standing"
+        state["posture_action_acknowledged"] = False
 
 
 def _reset_mission_state_for_tests():
@@ -421,6 +441,8 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
         raise MotionCancelled("app packet has no owning lease")
     if action == "stop":
         return
+    if state["posture"] != "standing":
+        raise MotionBusy("locomotion refused while sitting")
     if stop_seq is not None and stop_seq != _last_stop_seq:
         raise MotionCancelled("app transaction predates stop")
     if time.monotonic() >= deadline:
@@ -625,6 +647,44 @@ def configure_stationary_posture(body_height=None, shoulder_yaw=None, imu: objec
     return {"ok": True, "profile": result}
 
 
+def change_posture(posture):
+    """Exclusive, stationary SDK gesture; conservatively latch sitting on failure."""
+    if type(posture) is not str or posture not in ("sit", "stand"):
+        raise ValueError("posture must be 'sit' or 'stand'")
+    with mission_lock, motion_owner_lock:
+        with state_lock:
+            if _active_mission is not None or _active_motion_lease is not None or state["moving"]:
+                raise MotionBusy("posture requires stationary, unowned robot with no active mission")
+            previous = state["posture"]
+            if posture == "sit" and previous == "sitting" and not state["posture_action_acknowledged"]:
+                raise MotionBusy("posture uncertain after failed action; stand first")
+            if state["posture_action_acknowledged"] and ((posture == "sit" and previous == "sitting") or
+                                                         (posture == "stand" and previous == "standing")):
+                return {"ok": True, "posture": previous, "unchanged": True, "status": snapshot()}
+        duration = float(os.environ.get("BEEP_SIT_SETTLE_S" if posture == "sit" else
+                                        "BEEP_STAND_SETTLE_S", "4.0" if posture == "sit" else "2.0"))
+        if not math.isfinite(duration) or not 0.5 <= duration <= 8.0:
+            raise ValueError("posture settle duration must be 0.5..8 seconds")
+        lease = begin_motion("posture", max_duration=duration + 2.0, allow_posture=True)
+    try:
+        gesture = sdk_trick(action_id=POSTURE_ACTIONS[posture], settle_s=duration)
+        completed = gesture.get("ok") is True and not lease.cancel_event.is_set()
+        with state_lock:
+            state["posture"] = "standing" if completed and posture == "stand" else "sitting"
+            state["posture_action_acknowledged"] = completed
+    except Exception:
+        with state_lock:
+            state["posture"] = "sitting"  # Partial SDK action may have moved the body.
+            state["posture_action_acknowledged"] = False
+        raise
+    finally:
+        end_motion(lease)
+    remember("posture_changed", requested=posture, completed=completed,
+             sdk_action_id=POSTURE_ACTIONS[posture])
+    return {"ok": completed, "posture": state["posture"], "gesture": gesture,
+            "status": snapshot()}
+
+
 def sdk_mark_profile_dirty():
     global sdk_profile_key
     sdk_profile_key = None
@@ -680,6 +740,8 @@ def sdk_init():
 
 def sdk_send(action: str, step=None):
     action = str(action).lower()
+    if action != "stop" and state["posture"] != "standing":
+        raise MotionBusy("locomotion refused while sitting")
     step = SDK_STEP_DEFAULT if step is None else int(step)
     g = sdk_init()
     aliases = {"backward": "back", "turn_left": "turnleft", "turn_right": "turnright", "rotate_left": "turnleft", "rotate_right": "turnright"}
@@ -726,6 +788,8 @@ def sdk_send(action: str, step=None):
 
 def sdk_curve(direction, forward_step=20, yaw_step=30):
     """Combine independent VX and VYAW registers for a fluent walking arc."""
+    if state["posture"] != "standing":
+        raise MotionBusy("locomotion refused while sitting")
     direction = str(direction).lower()
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
@@ -748,6 +812,8 @@ def sdk_curve(direction, forward_step=20, yaw_step=30):
 
 def sdk_straighten():
     """Clear yaw velocity while preserving the active forward gait."""
+    if state["posture"] != "standing":
+        raise MotionBusy("locomotion refused while sitting")
     g = sdk_init()
     with sdk_io_lock:
         if motion_is_cancelled():
@@ -817,6 +883,10 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
     if dry_run:
         remember("sdk_trick_dry_run", trick=trick)
         return {"ok": True, "dry_run": True, "trick": trick}
+    if state["posture"] != "standing" and getattr(motion_context, "lease", None) is not _active_motion_lease:
+        raise MotionBusy("gesture refused while sitting; use /posture stand")
+    if state["posture"] != "standing" and getattr(_active_motion_lease, "source", None) != "posture":
+        raise MotionBusy("gesture refused while sitting; use /posture stand")
     with motion_lock:
         g = sdk_init()
         completed = False
@@ -851,6 +921,8 @@ def sdk_trick(name=None, action_id=None, dry_run=False, settle_s=None):
 
 
 def app_curve(direction, forward_step=10):
+    if state["posture"] != "standing":
+        raise MotionBusy("locomotion refused while sitting")
     direction = str(direction).lower()
     if direction not in ("left", "right"):
         raise ValueError("curve direction must be left or right")
@@ -865,6 +937,8 @@ def app_curve(direction, forward_step=10):
 
 def app_straighten(forward_step=10):
     """Release retained app registers, then restart straight translation."""
+    if state["posture"] != "standing":
+        raise MotionBusy("locomotion refused while sitting")
     with app_transition_lock:
         app_send("stop")
         if motion_is_cancelled():
@@ -2754,7 +2828,12 @@ def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
     if mode not in ("coverage", "local", "frontier"):
         raise ValueError("mission mode must be coverage, local, or frontier")
     duration_s = min(max(float(duration_s), 5.0), 600.0 if mode == "coverage" else 180.0)
+    with motion_owner_lock:
+        if _active_motion_lease is not None and _active_motion_lease.source == "posture":
+            return {"ok": False, "busy": True, "reason": "posture_transition_active"}
     initial = snapshot()
+    if state["posture"] != "standing":
+        return {"ok": False, "busy": True, "reason": "posture_sitting", "status": initial}
     if not scan_ok(initial):
         return {"ok": False, "reason": "scan_stale_or_missing_before_start", "status": initial}
     if mode in ("coverage", "frontier") and not slam_ok(initial):
@@ -3607,6 +3686,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "scan_stale_s": SCAN_STALE_S, "sdk_error": sdk_error, "map_dir": str(MAP_DIR), "map_resolution_m": MAP_RES_M, "map_size_m": MAP_SIZE_M, "explore_safe_front_m": EXPLORE_SAFE_FRONT_M, "explore_safe_side_m": EXPLORE_SAFE_SIDE_M, "pose_mode": "guarded_cartographer_slam", "local_map": True,
                                 "maps": {"authoritative_slam_grid": "/slam_map", "bridge_trace": "/map?full=1", "robot_frame_scan": "/local_map"},
                                 "tricks": {"count": len(TRICK_ACTIONS), "endpoint": "/actions", "settle_s_default": TRICK_SETTLE_S},
+                                "posture_control": {"endpoint": "POST /posture", "sit_action_id": POSTURE_ACTIONS["sit"],
+                                                    "stand_action_id": POSTURE_ACTIONS["stand"], "hardware_verified": False},
                                 "motion_ownership": "exclusive_per_run_nonqueueing", "busy_status": 409,
                                 "autonomous_mission": {"start": "POST /mission/start", "status": "GET /mission", "cancel": "POST /mission/cancel", "bias": "POST /mission/bias", "modes": ["coverage", "local", "frontier"]},
                                 "slam_usable_requires": ["fresh_guarded_pose", "fresh_nonempty_occupancy_map"]})
@@ -3669,6 +3750,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "asynchronous gestures are disabled; use a synchronous owned motion lease"}, 400)
                 elif dry:
                     self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=True, settle_s=settle))
+                elif resolve_trick(name=name, action_id=action_id)["id"] in POSTURE_ACTION_IDS:
+                    self.send_json({"ok": False, "error": "use POST /posture for sit/stand"}, 400)
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
                     self.send_json(run_owned_motion("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle), max_duration=settle_limit + 2.0))
@@ -3774,6 +3857,12 @@ class Handler(BaseHTTPRequestHandler):
                     body_height=body.get("body_height"), shoulder_yaw=body.get("shoulder_yaw"),
                     imu=body.get("imu"), apply=body.get("apply", True))
                 self.send_json(result)
+            elif p.path == "/posture":
+                if type(body) is not dict or set(body) != {"posture"} or body["posture"] not in ("sit", "stand"):
+                    self.send_json({"ok": False, "error": "expected exactly {'posture': 'sit'|'stand'}"}, 400)
+                else:
+                    result = change_posture(body["posture"])
+                    self.send_json(result, 200 if result["ok"] else 409)
             elif p.path == "/move":
                 action = body.get("action", "stop")
                 duration = float(body.get("duration", 0.2))
@@ -3789,6 +3878,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": "asynchronous gestures are disabled; use a synchronous owned motion lease"}, 400)
                 elif dry:
                     self.send_json(callback())
+                elif resolve_trick(name=body.get("name", body.get("action", body.get("trick"))),
+                                   action_id=body.get("id", body.get("action_id")))["id"] in POSTURE_ACTION_IDS:
+                    self.send_json({"ok": False, "error": "use POST /posture for sit/stand"}, 400)
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
                     self.send_json(run_owned_motion("http_post_trick", callback, max_duration=settle_limit + 2.0))

@@ -3,10 +3,10 @@
 Current bridge line:
 
 ```text
-0.22.2-stack2-greeting-optional (repository source and Pi deployment)
+0.22.12-stationary-social-posture (repository source only; not deployed)
 ```
 
-Stationary Stage 1 passed on `0.22.1-stack2-live-observe` (November 15, 2026). The `0.22.2` optional-greeting build was deployed/read back on the Pi and given two explicitly supervised reverse trials, both aborted on front-triplet LiDAR loss before travel was observed; this is not successful motion commissioning.
+Last deployed/read-back bridge: `0.22.11-turn-reassess`. The new posture route and helper have only host-side mock coverage; the SDK sit/reset action IDs and physical camera pitch still need supervised commissioning. Stationary Stage 1 passed on `0.22.1-stack2-live-observe` (November 15, 2026). The historical `0.22.2` optional-greeting build was deployed/read back on the Pi and given two explicitly supervised reverse trials, both aborted on front-triplet LiDAR loss before travel was observed.
 
 Base URLs:
 
@@ -28,12 +28,13 @@ Autonomous navigation and positive-duration primitive endpoints are synchronous:
 | `GET /config` | Runtime configuration and motor backend |
 | `GET /motion/profile` | Current firmware-gait, pace, body-height, shoulder-yaw and IMU profile |
 | `POST /motion/profile` | Apply a posture profile while stationary; HTTP 409 during motion |
+| `POST /posture` | Exclusive stationary sit/stand SDK preset, HTTP 409 on motion/mission/lease |
 | `GET /events` | Recent rolling event log |
 | `GET /pose` | Current accepted pose |
 
 Important status fields:
 
-- `moving` and `last_command`
+- `moving`, `posture` (`standing`/`sitting`) and `last_command`
 - `scan_age_s` and `sectors`
 - `pose.source`, initially a dead-reckoning fallback and normally `guarded_cartographer_slam` after accepted ROS callbacks
 - `slam.raw_pose`
@@ -106,6 +107,10 @@ forward  back  left  right  turnleft  turnright  stop
 Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions require a positive duration; `duration=0` is rejected. A primitive issues one bounded movement command, waits continuously, then attempts `stop_burst()`. `/move` performs no LiDAR freshness or clearance check. Autonomous recovery is different: reverse uses the captured full-scale app joystick packet `0x11 [0x00, 0x9C]`, supervised continuously against fresh six-sector LiDAR and usable SLAM, stopping at 0.08 m frontal-clearance gain or aborting on any front-triplet sector <0.38 m or two distinct worsening scans exceeding 0.12 m mean frontal loss, 20-degree yaw drift, rear/side breach, stale data, cancellation, or 1.2 seconds. A failed reverse is not repeated automatically; a stopped mission can select up to two consecutive fully guarded turns after backoff reassessment, resetting on completed forward progress. In-place turns likewise hold one yaw command and poll sensors/SLAM until the requested angle is reached (with at least 10 degrees required for reported success) or a guard stops motion.
 
 ## Vendor preset actions
+
+`POST /posture` accepts exactly `{"posture":"sit"}` or `{"posture":"stand"}`. It uses the repository's named SDK presets (sit action 12; reset/neutral action 255) with explicit environment overrides `BEEP_SIT_ACTION_ID` and `BEEP_STAND_ACTION_ID` (1..255), plus bounded settle durations `BEEP_SIT_SETTLE_S` (4.0 default) and `BEEP_STAND_SETTLE_S` (2.0 default). **These IDs come from source mapping, not a physical BEEP posture validation.** A successful SDK receipt is not proof of stable stance or face-level framing; verify with a nearby human before live use. Failure or cancellation latches the software state to `sitting`, sets `posture_action_acknowledged=false`, and blocks locomotion and repeat sit until an explicit successful stand. This receipt bit is **not physical pose verification**. Reboot initializes software to `standing` without measuring actual pose; physical preflight is still required. Direct `/action` sit/reset requests are refused in favor of this route. Neither endpoint can acquire a posture lease during an active mission, another motion lease, or `moving=true`; locomotion and mission admission refuse `sitting`. A lost posture response cannot establish that an action succeeded.
+
+`beep_eyes.social_view.upward_social_turn(..., opt_in=True)` is a separate **host-side** helper: sit, read a bounded `/frame.jpg` JPEG, invoke an injected qualitative captioner, pass the caption to `VoiceLoop.initiate_turn('person_noticed')`, then request stand and verify readback in `finally`. It is not wired to an automatic camera/person trigger or live voice runner. It requires voice consent and explicit opt-in; choose an image provider only under its own household privacy policy. If cleanup loses the connection or fails, actual posture is unknown and a local human must check BEEP; a failed sit request does not blindly issue stand over a possibly active mission.
 
 | Endpoint | Purpose |
 |---|---|
