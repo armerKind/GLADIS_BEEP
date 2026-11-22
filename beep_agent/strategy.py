@@ -96,12 +96,15 @@ class StrategicOwner:
         world["hazards"] = world["hazards"][:8]
         world["changes"] = world["changes"][:8]
         world["scene_summary"] = world["scene_summary"][:512]
-        return {"charter": LIFETIME_CHARTER, "session_id": self.session.session_id,
+        context = {"charter": LIFETIME_CHARTER, "session_id": self.session.session_id,
                 "boot_id": self.session.boot_id,
                 "goal_revision": self.session.strategy["goal_revision"],
                 "current_goal": None if self.session.selection is None
                                 else asdict(self.session.selection.goal),
                 "world": world, "episodes": list(episodes)[-8:], "places": list(places)[-8:]}
+        if self.session.memory is not None:
+            context["semantic_memory"] = self.session.memory.prompt_summary()
+        return context
 
     def submit(self, proposal: GoalProposal, *, now_robot: float, map_epoch: int,
                map_revision: int | None, known_event_ids: frozenset[str] = frozenset()) -> GoalSelection:

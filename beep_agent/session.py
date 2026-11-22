@@ -15,6 +15,7 @@ from typing import Any
 from .drives import GoalArbiter, GoalSelection
 from .executive import EmbodiedExecutive, EmbodiedGoal, ExecutiveDecision
 from .fsutil import fsync_directory
+from .memory import SemanticMemory
 from .world_model import WorldModel
 from .skills import skill
 
@@ -31,7 +32,7 @@ class AgentSession:
     def __init__(self, *, robot_id: str, mission_id: str | None,
                  fixed_goal: EmbodiedGoal | None = None, world: WorldModel | None = None,
                  session_id: str | None = None, created_at: float | None = None,
-                 boot_id: str | None = None) -> None:
+                 boot_id: str | None = None, memory: SemanticMemory | None = None) -> None:
         self.robot_id = str(robot_id)
         self.boot_id = None if boot_id is None else str(boot_id)
         self.mission_id = None if mission_id is None else str(mission_id)
@@ -39,6 +40,8 @@ class AgentSession:
         self.created_at = time.time() if created_at is None else float(created_at)
         self.updated_at = self.created_at
         self.world = world or WorldModel()
+        # Deliberately outside the boot-scoped session checkpoint.
+        self.memory = memory
         self.arbiter = GoalArbiter()
         self.fixed_goal = fixed_goal
         self.selection: GoalSelection | None = None
@@ -223,7 +226,8 @@ class AgentSession:
     def from_dict(cls, value: dict[str, Any], *, expected_robot_id: str | None = None,
                   expected_mission_id: str | None = None, max_age_s: float | None = None,
                   now: float | None = None,
-                  expected_boot_id: str | None = None) -> "AgentSession":
+                  expected_boot_id: str | None = None,
+                  memory: SemanticMemory | None = None) -> "AgentSession":
         if int(value.get("schema_version", 0)) not in {1, cls.SCHEMA_VERSION}:
             raise SessionIdentityError("unsupported agent session schema")
         robot_id = str(value["robot_id"])
@@ -243,7 +247,7 @@ class AgentSession:
                       fixed_goal=None if fixed is None else EmbodiedGoal(**fixed),
                       world=WorldModel.from_dict(value["world"]),
                       session_id=value["session_id"], created_at=float(value["created_at"]),
-                      boot_id=boot_id)
+                      boot_id=boot_id, memory=memory)
         selected = value.get("selection")
         if selected is not None:
             session.selection = GoalSelection(EmbodiedGoal(**selected["goal"]), selected["drive"], selected["rationale"])

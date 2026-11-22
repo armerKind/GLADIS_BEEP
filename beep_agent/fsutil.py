@@ -8,7 +8,9 @@ the callers' in-process locks apply, and directory fsync is skipped.
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
+import tempfile
 
 try:
     import fcntl
@@ -39,3 +41,23 @@ def fsync_directory(path: Path) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def atomic_write_json(path: Path, value: object) -> None:
+    """Write one complete JSON snapshot; never leave a partial target file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

@@ -21,7 +21,7 @@ import uuid
 # The companion launcher invokes this file directly, not with ``python -m``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from beep_agent import AgentSession, BodyDispatchError, BridgeBodyAdapter, EmbodiedGoal
+from beep_agent import AgentSession, BodyDispatchError, BridgeBodyAdapter, EmbodiedGoal, SemanticMemory
 from beep_agent.live_bridge_observer import LiveBridgeObserver, LiveEvidenceUnavailable
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
@@ -45,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-no-mission", action="store_true", help="Permit stationary/bench capture")
     parser.add_argument("--max-inferences", type=int, default=0, help="Zero means until duration or mission end")
     parser.add_argument("--output-root", type=Path, default=Path("captures/eyes/moving"))
+    parser.add_argument("--memory-file", type=Path,
+                        help="Opt-in cross-boot semantic JSON bank (outside per-run captures)")
+    parser.add_argument("--place-label", help="Operator-confirmed place label for memory; never infer a room from model prose")
     parser.add_argument("--goal", help="Bind one semantic goal to the whole moving mission")
     parser.add_argument("--target", default="scene", help="Target query for --goal")
     parser.add_argument("--mark", action="store_true")
@@ -158,6 +161,11 @@ def main() -> int:
         raise SystemExit("legacy session-only resume lacks journal/lease identity; use --resume-checkpoint")
     if bias_mission_enabled and args.allow_no_mission:
         raise SystemExit("--bias-mission requires a live autonomous mission")
+    memory_path = getattr(args, "memory_file", None)
+    place_label = getattr(args, "place_label", None)
+    if place_label and not memory_path:
+        raise SystemExit("--place-label requires --memory-file")
+    memory = SemanticMemory(memory_path) if memory_path is not None else None
 
     initial_mission = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
     if not args.allow_no_mission and (
@@ -186,7 +194,8 @@ def main() -> int:
                                       timeout_s=min(args.timeout, 8.0))
     mission_id = initial_mission.get("id") if isinstance(initial_mission, dict) else None
     fixed_goal = EmbodiedGoal(args.goal, args.target, args.mark) if args.goal else None
-    session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal)
+    session = AgentSession(robot_id="BEEP", mission_id=mission_id, fixed_goal=fixed_goal,
+                           memory=memory)
     observer = None
     advisor = BridgeBodyAdapter(args.base_url, args.timeout) if bias_mission_enabled else None
     bias_accepted = 0
@@ -221,6 +230,7 @@ def main() -> int:
             packet["vision_context"] = {
                 "previous_scene_summary": session.world.last_scene_summary,
                 "previous_changes": session.world.last_changes[-4:],
+                **({"semantic_memory": memory.prompt_summary()} if memory is not None else {}),
                 "execution_outcome": session.execution["last_outcome"],
                 "current_frame_diversity": [
                     {"frame_id": frame.frame_id,
@@ -287,6 +297,7 @@ def main() -> int:
                             resume_checkpoint=getattr(args, "resume_checkpoint", None),
                             fixed_goal=fixed_goal)
                         session = observer.session
+                        session.memory = memory
                     stack2 = observer.observe(frame_id=f"{run_id}-{requested_latest}",
                         before=before, after=after, current=current,
                         mission=mission, slam_map=current_map, perception=response)
@@ -307,6 +318,15 @@ def main() -> int:
                 stack2 = {"status": "bench_only", "motor_authority": False}
                 session.update(response, observed_at=frames[-1].captured_at,
                                packet_id=f"{run_id}-{inference_count:04d}")
+            # Only accepted observations become durable notes. Anonymous
+            # packet IDs are session-scoped, never promoted to named people.
+            if memory is not None:
+                try:
+                    memory.record_observation(response, session_id=session.session_id,
+                        observed_at=frames[-1].captured_at, place_label=place_label)
+                except (OSError, ValueError) as exc:
+                    print(json.dumps({"memory_error": type(exc).__name__,
+                                      "window": inference_count}), flush=True)
             decision = session.decide(rollout_mode="shadow").to_dict()
             assert session.selection is not None
             bias = {"attempted": False, "accepted": False, "reason": "disabled"}

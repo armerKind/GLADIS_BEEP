@@ -11,6 +11,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PIL import Image
+from beep_agent.memory import SemanticMemory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,9 @@ def jpeg():
 
 
 class MovingEyesRunnerTests(unittest.TestCase):
+    def test_opt_in_memory_persists_outside_run_and_informs_next_window(self):
+        self._exercise_moving_mission(memory_enabled=True)
+
     def test_mock_moving_mission_builds_panel_and_semantic_plan_without_dispatch(self):
         self._exercise_moving_mission()
 
@@ -80,7 +84,8 @@ class MovingEyesRunnerTests(unittest.TestCase):
     def _exercise_moving_mission(self, *, bias_mission=False, response_override=None,
                                  expected_direction=None, replace_owner_on_bias_read=False,
                                  skipped_reason=None, expected_directions=None,
-                                 expected_actions=None, expected_revisions=None):
+                                 expected_actions=None, expected_revisions=None,
+                                 memory_enabled=False):
         frame = jpeg()
         seen_posts = []
         map_counter = [0]
@@ -180,6 +185,10 @@ class MovingEyesRunnerTests(unittest.TestCase):
                     "--max-inferences", "2", "--mock-response", str(response_path),
                     "--output-root", str(output_root),
                 ]
+                memory_path = Path(directory) / "persistent" / "memory_bank.json"
+                if memory_enabled:
+                    command.extend(("--memory-file", str(memory_path),
+                                    "--place-label", "living_room"))
                 if bias_mission:
                     command.append("--bias-mission")
                 environment = dict(os.environ, PYTHONPATH=str(ROOT))
@@ -197,6 +206,15 @@ class MovingEyesRunnerTests(unittest.TestCase):
                 self.assertFalse(summary["dispatch_performed"])
                 self.assertEqual(len(windows), 2)
                 packet = json.loads((windows[0] / "observation_packet.json").read_text())
+                if memory_enabled:
+                    bank = SemanticMemory(memory_path)
+                    self.assertEqual(len(bank.people), 1)
+                    self.assertEqual(bank.places["living_room"]["label"], "living_room")
+                    later = json.loads((sorted(windows)[1] / "observation_packet.json").read_text())
+                    self.assertIn("living_room", later["vision_context"]["semantic_memory"])
+                    self.assertIn("Person", later["vision_context"]["semantic_memory"])
+                else:
+                    self.assertNotIn("semantic_memory", packet["vision_context"])
                 semantics = [json.loads((window / "semantic_decision.json").read_text())
                              for window in sorted(windows)]
                 self.assertEqual(packet["capture_mode"], "moving_temporal_ring")

@@ -4,6 +4,10 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from math import isfinite
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from beep_agent.memory import SemanticMemory
 
 from .capture import AudioContractError, AudioFrame, _identity, _pcm
 from .echo import BargeDecision
@@ -54,6 +58,16 @@ class SocialTranscript:
     mission_id: str | None
     lease_id: str | None
     motor_authority: bool = False
+
+    def remember_exchange(self, memory: SemanticMemory, *, spoken_reply: str,
+                          person_id: str | None = None, place_label: str | None = None,
+                          topics: tuple[str, ...] = (), timestamp: float | None = None) -> dict:
+        """Opt-in hook after a consented transcript AND actual spoken reply."""
+        if not isinstance(spoken_reply, str) or not spoken_reply.strip():
+            raise ValueError("an actual spoken reply is required for an exchange")
+        return memory.record_conversation(person_id=person_id, place_label=place_label,
+            heard_text=self.text, spoken_reply=spoken_reply, topics=topics,
+            timestamp=timestamp)
 
 
 @dataclass(frozen=True)

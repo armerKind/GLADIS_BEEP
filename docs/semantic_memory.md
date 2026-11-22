@@ -1,0 +1,14 @@
+# Opt-in cross-boot semantic memory (host-only milestone)
+
+`beep_agent.memory.SemanticMemory` persists a single bounded JSON bank independently of `AgentSession` and `CombinedCheckpoint`. It is **not** a map, person-recognition system, or a motion controller. People (64), places (64) and recent conversations (100) have per-field limits; writes use a same-directory temporary file, fsync, atomic replace and parent-directory fsync. A corrupt/unknown/oversized existing bank fails closed rather than being silently overwritten. Keep the file in a persistent **private** data directory, not a run capture directory or git repository. The current bank assumes one writing process; do not run separate live writer processes against the same path without adding a cross-process transaction lock.
+
+Example for an **already independently authorized** moving-eyes observer (not an instruction to launch BEEP):
+
+```sh
+python scripts/run_moving_eyes.py --base-url "$BEEP_BRIDGE_URL" \
+  --duration 90 --memory-file "$HOME/.local/share/beep/memory_bank.json"
+```
+
+Omit `--memory-file` for the previous memory-disabled behavior. `--place-label` is optional and only accepts an operator-confirmed label for a run confined to that place; **do not set a static label on a mission that may cross rooms** (such as a hallway exploration). A scene description is not reliable evidence that BEEP visited a named room. Without a label, confident person sightings still update session-scoped *anonymous* IDs. Without verified identity, similar clothing/face descriptions must **not** silently merge people across boots. Human-confirmed stable `person_id`/name, facts and topics may be entered with `record_person(...)`. PlaceGraph node IDs, if deliberately linked through `record_place(...)`, should carry their originating boot/map identity; the bank never treats an old map node as a current navigation destination. Camera observations admitted by the existing live observer (or offline bench session) are eligible for memory only at confidence ≥0.7. The bank's compact `prompt_summary()` appears in StrategicOwner model context and, when opted in, in moving-eyes' vision context. Those strings are unverified data, not instructions or safety authority.
+
+`beep_audio.social.SocialTranscript.remember_exchange(memory, spoken_reply=..., person_id=..., place_label=..., topics=...)` is an **opt-in hook** for a consented, accepted ASR transcript after an actual reply. It does not itself enable ASR, speaker playback, or automatic recording. Avoid storing sensitive personal details without consent; the JSON is plaintext. The host tests exercise persistence, opt-in runner integration and the hook. **Nothing in this milestone was deployed to BEEP or physically tested while it charged.**
