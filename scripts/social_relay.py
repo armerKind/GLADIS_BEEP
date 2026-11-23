@@ -144,7 +144,7 @@ def main():
     p.add_argument('--reply')
     p.add_argument('--memory-updates-json')
     p.add_argument('--person-id')
-    p.add_argument('--speaker-gain', type=float, default=4.0)
+    p.add_argument('--speaker-gain', type=float, default=3.0)
     args = p.parse_args()
     print(json.dumps(relay(args), ensure_ascii=False))
 

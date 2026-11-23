@@ -19,7 +19,7 @@ A separate **uncommissioned** live path in the same script contains optional Por
 
 For local-only calibration, run `python scripts/run_social_voice.py --calibrate-mic` on the Pi with its repository dependencies installed. The first quiet tone cues ~3 s of room silence; the second cues ~3 s of normal speech from the intended distance. No raw audio is saved and no cloud/key is used. The result prints median/p95 noise frame RMS and aggregate/p75 speech frame RMS and, **only when the distributions separate sufficiently**, suggested `--onset-rms` and `--offset-rms`. Speech RMS is not ASR intelligibility. The default live onset/offset (850/400) remain bench placeholders: pass measured thresholds explicitly for the first live trial. Inspect USB capture gain with `amixer -c <detected-mic-card> scontents` before calibrating, and set the gain conservatively if below 80%, without assuming the mic card number across boots. Calibrating the USB microphone does not modify bridge/motor authority.
 
-For live playback, the `Headphones` mixer is explicitly unmuted and set to 100% at startup after device discovery. `--speaker-gain` defaults to 4.0 and clamps finite input to 1.0..8.0; ffmpeg applies `volume=<gain>,alimiter=limit=0.95:level=0` (no automatic make-up gain) before ALSA playback. Confirm speech volume with the nearby person; this is not permission to overpower a connected speaker.
+For live playback, the `Headphones` mixer is explicitly unmuted and set to 100% at startup after device discovery. `--speaker-gain` defaults to 3.0 after the first physically audible 4.0 test sounded mildly overdriven on the small analog speaker, and clamps finite input to 1.0..8.0; ffmpeg applies `volume=<gain>,alimiter=limit=0.95:level=0` (no automatic make-up gain) before ALSA playback. The 3.0 setting needs a fresh human audibility check before calling it commissioned. Confirm speech volume with the nearby person; this is not permission to overpower a connected speaker.
 
 For later consented stationary commissioning, provide `--memory-file`, `--consent` and measured VAD flags to `scripts/run_social_voice.py`, optionally `--person-id` for an operator-verified single speaker, `--greet-trigger person_noticed` and `--visual-context 'a short description'`. The CLI does **not** detect a person or capture a camera frame; these options only pass a caller's unverified string into the prompt. The live adapters must first be checked on the actual Pi/audio path and no motion should be initiated by this script. If voice identity is uncertain, omit `--person-id`: a spoken name is saved as a **claimed** introduction, not merged with a previously known person. Voice text is sent to cloud APIs only with opt-in. The bank is plaintext; protect and retain it accordingly.
 
@@ -32,7 +32,7 @@ optionally supplies strictly transcript-grounded `name`, `room`, `facts`, and
 `topics` updates, and synthesizes **en-GB-SoniaNeural** using the host's
 keyless Edge TTS. The host transfers only this bounded audio to BEEP via
 Jupyter. The Pi runs `--speak`, discovers the current Headphones card by name,
-sets its mixer to 100%, applies `volume=4.0,alimiter=limit=0.95:level=0`,
+sets its mixer to 100%, applies `volume=3.0,alimiter=limit=0.95:level=0`,
 plays on `plughw:<Headphones-card>,0`, and commits the conversation to
 `/home/pi/beep_social/memory_bank.json` **only after a successful `aplay`**.
 It never starts mic capture, obtains motor authority, or issues motion.

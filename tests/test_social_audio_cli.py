@@ -19,7 +19,7 @@ class SocialAudioCliTests(unittest.TestCase):
             social.pcm_48k_to_16k(raw[:-2])
 
     def test_gain_default_clamp_and_finite_validation(self):
-        for value, expected in [(None, 4.0), ('0.2', 1.0), ('4.5', 4.5), ('100', 8.0)]:
+        for value, expected in [(None, 3.0), ('0.2', 1.0), ('4.5', 4.5), ('100', 8.0)]:
             argv = ['run_social_voice.py', '--calibrate-mic']
             if value is not None:
                 argv += ['--speaker-gain', value]

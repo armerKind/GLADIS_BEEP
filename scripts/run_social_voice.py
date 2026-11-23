@@ -57,7 +57,7 @@ def parse_args(argv=None):
     p.add_argument('--onset-rms', type=float, default=850.0, help='Bench placeholder; calibrate before live use')
     p.add_argument('--offset-rms', type=float, default=400.0)
     p.add_argument('--mic-name', default='USB PnP Sound Device')
-    p.add_argument('--speaker-gain', type=float, default=4.0,
+    p.add_argument('--speaker-gain', type=float, default=3.0,
                    help='Digital playback gain, clamped to 1.0..8.0 with limiter')
     p.add_argument('--calibrate-mic', action='store_true',
                    help='Local-only, three seconds silence then three seconds speech; no cloud or recording file')
