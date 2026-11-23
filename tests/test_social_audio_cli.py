@@ -27,7 +27,7 @@ class SocialAudioCliTests(unittest.TestCase):
                 args = social.parse_args()
             self.assertEqual(args.speaker_gain, expected)
             self.assertEqual(social.speaker_filter(args.speaker_gain),
-                             f'volume={expected:.3f},alimiter=limit=0.95:level=0')
+                             f'highpass=f=300,volume={expected:.3f},alimiter=limit=0.95:level=0')
         for invalid in ('nan', 'inf', '-inf'):
             with patch.object(sys, 'argv', ['run_social_voice.py', '--calibrate-mic',
                                             f'--speaker-gain={invalid}']), redirect_stdout(io.StringIO()):

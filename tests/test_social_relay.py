@@ -103,7 +103,7 @@ class RelayTests(unittest.TestCase):
         with patch.object(social.subprocess, 'run', return_value=Result()) as run:
             self.assertTrue(social.analog_playback(b'mp3', 4.5))
         self.assertEqual(run.call_args_list[1].args[0][1:4], ['-c', '2', 'set'])
-        self.assertIn('volume=4.500,alimiter=limit=0.95:level=0', run.call_args_list[2].args[0])
+        self.assertIn('highpass=f=300,volume=4.500,alimiter=limit=0.95:level=0', run.call_args_list[2].args[0])
         self.assertEqual(run.call_args_list[3].args[0][-1], 'plughw:2,0')
 
     def test_host_relays_audio_and_verifies_cleanup_without_chat_api(self):

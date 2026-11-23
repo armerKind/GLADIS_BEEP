@@ -81,7 +81,7 @@ def speaker_filter(gain: float) -> str:
     """Constrain untrusted CLI gain before interpolating into ffmpeg options."""
     if not math.isfinite(gain):
         raise ValueError('speaker gain must be finite')
-    return f'volume={max(1.0, min(8.0, gain)):.3f},alimiter=limit=0.95:level=0'
+    return f'highpass=f=300,volume={max(1.0, min(8.0, gain)):.3f},alimiter=limit=0.95:level=0'
 
 def stationary_authority() -> tuple[str | None, str | None, bool]:
     """No bridge, uncertain state, active mission or posture => no speaking."""
