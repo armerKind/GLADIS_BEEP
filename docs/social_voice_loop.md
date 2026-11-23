@@ -22,3 +22,44 @@ For local-only calibration, run `python scripts/run_social_voice.py --calibrate-
 For live playback, the `Headphones` mixer is explicitly unmuted and set to 100% at startup after device discovery. `--speaker-gain` defaults to 4.0 and clamps finite input to 1.0..8.0; ffmpeg applies `volume=<gain>,alimiter=limit=0.95:level=0` (no automatic make-up gain) before ALSA playback. Confirm speech volume with the nearby person; this is not permission to overpower a connected speaker.
 
 For later consented stationary commissioning, provide `--memory-file`, `--consent` and measured VAD flags to `scripts/run_social_voice.py`, optionally `--person-id` for an operator-verified single speaker, `--greet-trigger person_noticed` and `--visual-context 'a short description'`. The CLI does **not** detect a person or capture a camera frame; these options only pass a caller's unverified string into the prompt. The live adapters must first be checked on the actual Pi/audio path and no motion should be initiated by this script. If voice identity is uncertain, omit `--person-id`: a spoken name is saved as a **claimed** introduction, not merged with a previously known person. Voice text is sent to cloud APIs only with opt-in. The bank is plaintext; protect and retain it accordingly.
+
+# Telegram-to-BEEP stationary social relay (no USB mic)
+
+While the USB microphone is unplugged, use a **real Telegram voice message**
+received by GLADIS as the transcript source. GLADIS reads the Pi's existing
+DialogueContext, composes a short reply itself (not via a second chat API),
+optionally supplies strictly transcript-grounded `name`, `room`, `facts`, and
+`topics` updates, and synthesizes **en-GB-SoniaNeural** using the host's
+keyless Edge TTS. The host transfers only this bounded audio to BEEP via
+Jupyter. The Pi runs `--speak`, discovers the current Headphones card by name,
+sets its mixer to 100%, applies `volume=4.0,alimiter=limit=0.95:level=0`,
+plays on `plughw:<Headphones-card>,0`, and commits the conversation to
+`/home/pi/beep_social/memory_bank.json` **only after a successful `aplay`**.
+It never starts mic capture, obtains motor authority, or issues motion.
+
+Deploy only stationary files: `python -m scripts.deploy_social_relay`
+(with `BEEP_HOST` set to the reachable Pi address). The host relay prefers
+Tailscale; when explicitly using the DOGZILLA_WIFI backup set
+`BEEP_HOST=192.168.8.88` and `NO_PROXY=192.168.8.88,127.0.0.1,localhost`.
+On the host, use `python -m scripts.social_relay --read-context --person-id max`
+before composing each reply. For the actual turn, use
+`python -m scripts.social_relay --speak --heard-text '...' --reply '...' \
+  --person-id max --memory-updates-json '{"facts":[],"topics":[]}'`.
+Only use a person ID if independently verified by the operator; a Telegram
+sender is not a voice biometric. The host relay uploads a uniquely named MP3,
+checks its hash by reading it back, invokes Pi `--speak --tts-audio-file ...`,
+reads back the *exact* latest conversation from the Pi memory file, and deletes
+the temporary MP3. **Do not retry automatically** after a transport timeout:
+playback might have happened even if its acknowledgement was lost. Inspect
+memory and ask the nearby human before replaying. A spoken turn requires the
+bridge's fresh `/mission` readback to show standing, stopped, unowned, and no
+active mission; if the bridge is unavailable the CLI fails closed. Starting
+any inactive bridge service is a separate supervised physical-safety action.
+
+For local Pi TTS when available, `python scripts/run_social_voice.py --speak
+--heard-text '...' --reply '...' --memory-file /home/pi/beep_social/memory_bank.json`
+uses keyless Edge Sonia. The Pi currently has **no** `edge_tts`, piper, or
+espeak installed; the tested route is host Edge synthesis and Pi playback.
+`--read-context` is read-only and reports remembered observations and gaps,
+not a verified current room. Existing direct microphone/cloud live mode remains
+separate and uncommissioned. No separate OpenAI chat API key is used here.

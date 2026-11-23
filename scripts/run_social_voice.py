@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Opt-in stationary social turns. Never imports BEEP's motor/bridge code.
 
---offline-demo is executable without hardware/network. Live mode needs an
-installed PortAudio sounddevice binding, an OpenAI API key, ALSA/ffmpeg and
-explicit microphone/cloud consent; it is NOT commissioned on BEEP yet.
+--speak accepts a consented Telegram transcript and an externally composed
+reply; no USB microphone, ASR, chat API key or separate chat client is used.
+--offline-demo needs no hardware. Legacy live microphone mode is not commissioned.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
+from dataclasses import asdict
 from io import BytesIO
 import json
 import math
@@ -21,6 +23,7 @@ import sys
 import time
 from typing import Sequence
 import wave
+from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,10 +35,19 @@ from beep_audio.vad import HysteresisVad
 from beep_audio.voice_loop import VoiceLoop
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--memory-file', type=Path, help='Required for demo/live, not local mic calibration')
     p.add_argument('--offline-demo', action='store_true')
+    p.add_argument('--read-context', action='store_true', help='Print DialogueContext JSON; no network or audio')
+    p.add_argument('--speak', action='store_true', help='Play one consented Telegram turn; no mic/ASR/chat API')
+    p.add_argument('--heard-text', help='Telegram voice-message transcript, <=500 characters')
+    p.add_argument('--reply', help='GLADIS reply to be spoken, <=240 characters')
+    p.add_argument('--memory-updates-json', help='Transcript-grounded name/room/facts/topics JSON object')
+    p.add_argument('--tts-audio-file', type=Path,
+                   help='Optional audio generated for --reply by host Hermes/Edge Sonia TTS')
+    p.add_argument('--tts-voice', default='en-GB-SoniaNeural',
+                   help='Edge TTS voice if no host-provided audio file is used')
     p.add_argument('--consent', action='store_true', help='Explicit consent for mic capture and cloud ASR/reply/TTS')
     p.add_argument('--person-id', help='Operator-verified speaker ID; do not infer identity from voice')
     p.add_argument('--greet-trigger', choices=('session_start', 'person_noticed'),
@@ -49,9 +61,14 @@ def parse_args():
                    help='Digital playback gain, clamped to 1.0..8.0 with limiter')
     p.add_argument('--calibrate-mic', action='store_true',
                    help='Local-only, three seconds silence then three seconds speech; no cloud or recording file')
-    args = p.parse_args()
-    if args.calibrate_mic and args.offline_demo:
-        p.error('--calibrate-mic and --offline-demo are exclusive')
+    args = p.parse_args(argv)
+    if sum((args.calibrate_mic, args.offline_demo, args.speak, args.read_context)) > 1:
+        p.error('choose only one mode')
+    if args.speak and (not args.heard_text or not args.reply):
+        p.error('--speak requires --heard-text and --reply')
+    if not args.speak and any((args.heard_text, args.reply, args.memory_updates_json,
+                               args.tts_audio_file)):
+        p.error('turn fields require --speak')
     if not args.calibrate_mic and args.memory_file is None:
         p.error('--memory-file is required except for --calibrate-mic')
     if not math.isfinite(args.speaker_gain):
@@ -65,6 +82,75 @@ def speaker_filter(gain: float) -> str:
     if not math.isfinite(gain):
         raise ValueError('speaker gain must be finite')
     return f'volume={max(1.0, min(8.0, gain)):.3f},alimiter=limit=0.95:level=0'
+
+def stationary_authority() -> tuple[str | None, str | None, bool]:
+    """No bridge, uncertain state, active mission or posture => no speaking."""
+    try:
+        with urlopen('http://127.0.0.1:8766/mission', timeout=3) as response:
+            data = json.load(response)
+        state = data['status']
+        mission = data.get('mission')
+        active = mission is not None and mission.get('state') not in (
+            'completed', 'cancelled', 'failed', 'stopped')
+        safe = (state.get('moving') is False and
+                state.get('motion_lease_id') is None and
+                state.get('posture') == 'standing' and not active)
+        return (None, None, safe)
+    except (OSError, ValueError, KeyError, TypeError):
+        return (None, None, False)
+
+def edge_sonia(text: str, voice: str) -> bytes:
+    """Keyless Edge TTS; bounded in-memory MP3, no retained speech file."""
+    import edge_tts
+    async def collect():
+        audio = bytearray()
+        async for chunk in edge_tts.Communicate(text, voice=voice).stream():
+            if chunk['type'] == 'audio':
+                audio.extend(chunk.get('data', b''))
+                if len(audio) > 2_000_000:
+                    raise ValueError('TTS audio exceeds 2 MB')
+        return bytes(audio)
+    return asyncio.run(collect())
+
+def supplied_audio(path: Path) -> bytes:
+    if not path.is_file() or not 0 < path.stat().st_size <= 2_000_000:
+        raise ValueError('expected a bounded, nonempty local TTS audio file')
+    return path.read_bytes()
+
+def analog_playback(audio: bytes, gain: float) -> bool:
+    listing = subprocess.run(['aplay', '-l'], text=True, capture_output=True,
+                             check=True, timeout=5).stdout
+    card = speaker_card(listing)
+    set_speaker_mixer(card)
+    converted = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error',
+         '-i', 'pipe:0', '-filter:a', speaker_filter(gain), '-f', 'wav', 'pipe:1'],
+         input=audio, capture_output=True, timeout=15, check=True)
+    result = subprocess.run(['aplay', '-q', '-D', f'plughw:{card},0'],
+                            input=converted.stdout, capture_output=True, timeout=30)
+    return result.returncode == 0
+
+def relay_loop(bank: SemanticMemory, *, synthesize, play, authority,
+               person_id=None) -> VoiceLoop:
+    return make_loop(bank, asr=lambda _: None, reply=lambda *_: None,
+        tts=synthesize, play=play, clock=time.monotonic, authority=authority,
+        person_id=person_id)
+
+def speak_turn(bank: SemanticMemory, args, *, synthesize=None, play=None,
+               authority=stationary_authority):
+    updates = (json.loads(args.memory_updates_json) if args.memory_updates_json else None)
+    if synthesize is None:
+        synthesize = ((lambda _: supplied_audio(args.tts_audio_file)) if args.tts_audio_file
+                      else lambda text: edge_sonia(text, args.tts_voice))
+    if play is None:
+        play = lambda audio: analog_playback(audio, args.speaker_gain)
+    loop = relay_loop(bank, synthesize=synthesize, play=play,
+                      authority=authority, person_id=args.person_id)
+    result = loop.deliver_text_turn(args.heard_text, args.reply, updates)
+    print(json.dumps({'state': result.state, 'memory_written': result.memory_written,
+                      'motor_authority': result.motor_authority}), flush=True)
+    if result.state != 'replied' or not result.memory_written:
+        raise SystemExit('speaker delivery was not confirmed; semantic turn not committed')
+    return result
 
 
 def usb_mic_device(sd, name: str) -> int:
@@ -356,7 +442,13 @@ def main():
         calibrate_mic(args)
         return
     bank = SemanticMemory(args.memory_file)
-    if args.offline_demo:
+    if args.read_context:
+        loop = relay_loop(bank, synthesize=lambda _: b'', play=lambda _: False,
+                          authority=lambda: (None, None, False), person_id=args.person_id)
+        print(json.dumps(asdict(loop.read_context()), ensure_ascii=False))
+    elif args.speak:
+        speak_turn(bank, args)
+    elif args.offline_demo:
         offline_demo(bank)
     else:
         live(bank, args)

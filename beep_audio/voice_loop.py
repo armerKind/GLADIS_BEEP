@@ -146,6 +146,36 @@ class VoiceLoop:
         return DialogueContext(self.memory.prompt_summary(), tuple(gaps),
                                self.history, _visual(visual_context), trigger)
 
+    def read_context(self) -> DialogueContext:
+        """Return the current bounded context without capture, TTS or writes."""
+        return self._context()
+
+    def deliver_text_turn(self, heard_text: str, reply: str,
+                          memory_updates: dict | None = None) -> VoiceOutcome:
+        """Consent-bound Telegram transcript -> speech -> durable exchange.
+
+        No microphone/ASR/model/motor calls. A failed playback never persists
+        a conversation; ungrounded suggestions fail closed before speaking.
+        """
+        heard = _short(heard_text, 500)
+        spoken = _short(reply, 240)
+        updates = _memory_updates(memory_updates, heard)
+        if any(topic.casefold() not in heard.casefold() for topic in updates['topics']):
+            raise AudioContractError('relay topic is not present in transcript')
+        authority = self.read_authority()
+        if not authority[2] or authority[0] is not None or authority[1] is not None:
+            return VoiceOutcome("no_consent")
+        outcome, _ = self._speak(spoken, authority)
+        if outcome.state != "replied":
+            return VoiceOutcome(outcome.state, heard, outcome.reply)
+        transcript = SocialTranscript('telegram-relay', heard, self.handoff.session_id,
+                                      self.handoff.boot_id, None, None)
+        self._remember(transcript, spoken, updates)
+        self._history.extend(({'role': 'user', 'content': heard[:240]},
+                              {'role': 'assistant', 'content': spoken}))
+        self._history = self._history[-8:]
+        return VoiceOutcome('replied', heard, spoken, True)
+
     def _speak(self, response: str | dict, authority: tuple) -> tuple[VoiceOutcome, dict | None]:
         updates = None
         if isinstance(response, dict):
