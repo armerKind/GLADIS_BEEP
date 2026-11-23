@@ -9,19 +9,76 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
+import time
 import uuid
+from contextlib import redirect_stdout
+from pathlib import Path
 
 import websockets
 # Tailscale is the normal route; explicitly set BEEP_HOST=192.168.8.88
 # only for the DOGZILLA_WIFI backup when the host tailnet is unavailable.
 os.environ.setdefault('BEEP_HOST', '100.100.141.33')
 from scripts.jupyter_deploy_bridge import BASE, HOST, login
-from scripts.run_social_voice import edge_sonia
+from beep_agent.memory import SemanticMemory
+from scripts.run_social_voice import edge_sonia, parse_args as social_args, speak_turn
 
 PI_SCRIPT = '/home/pi/beep_social/scripts/run_social_voice.py'
 PI_MEMORY = '/home/pi/beep_social/memory_bank.json'
+HOST_MEMORY = Path.home() / '.hermes/profiles/sol/beep_memory_bank.json'
+
+def direct_turn(session, xsrf, args) -> dict:
+    """Audio uses bridge HTTP; Jupyter carries only the small memory snapshot."""
+    if not args.heard_text or not args.reply:
+        raise ValueError('--heard-text and --reply required for --speak')
+    url = BASE + '/api/contents/beep_social/memory_bank.json?content=1'
+    prior = session.get(url, timeout=9)
+    if prior.status_code != 200:
+        prior.raise_for_status()
+    original = prior.json()['content'].encode('utf-8')
+    baseline = hashlib.sha256(original).digest()
+    if HOST_MEMORY.exists() and hashlib.sha256(HOST_MEMORY.read_bytes()).digest() != baseline:
+        raise RuntimeError('host/Pi semantic memory differs; reconcile before playback')
+    HOST_MEMORY.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(HOST_MEMORY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'wb') as out:
+        out.write(original)
+    cli = ['--speak', '--memory-file', str(HOST_MEMORY), '--bridge-url', args.bridge_url,
+           '--heard-text', args.heard_text, '--reply', args.reply,
+           '--speaker-gain', str(args.speaker_gain)]
+    if args.person_id:
+        cli += ['--person-id', args.person_id]
+    if args.memory_updates_json:
+        cli += ['--memory-updates-json', args.memory_updates_json]
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        speak_turn(SemanticMemory(HOST_MEMORY), social_args(cli))
+    receipt = json.loads(capture.getvalue())
+    # This is the commit to Pi, not audio transport. Never overwrite a bank
+    # that changed independently while BEEP spoke.
+    current = session.get(url, timeout=9)
+    current.raise_for_status()
+    if hashlib.sha256(current.json()['content'].encode()).digest() != baseline:
+        raise RuntimeError('Pi semantic memory changed during speech; host copy retained')
+    fresh = HOST_MEMORY.read_text(encoding='utf-8')
+    started = time.perf_counter()
+    target = BASE + '/api/contents/beep_social/memory_bank.json'
+    headers = {'X-XSRFToken': xsrf, 'Content-Type': 'application/json'}
+    uploaded = session.put(target, headers=headers,
+        json={'type': 'file', 'format': 'text', 'content': fresh}, timeout=10)
+    uploaded.raise_for_status()
+    check = session.get(url, timeout=9)
+    check.raise_for_status()
+    if hashlib.sha256(check.json()['content'].encode()).digest() != hashlib.sha256(fresh.encode()).digest():
+        raise RuntimeError('Pi semantic memory upload readback differs')
+    conversations = json.loads(check.json()['content'])['conversations']
+    if not conversations or conversations[-1]['heard_text'] != args.heard_text or conversations[-1]['spoken_reply'] != args.reply:
+        raise RuntimeError('Pi final conversation differs from delivered turn')
+    receipt['memory_sync_s'] = round(time.perf_counter() - started, 3)
+    receipt['verified_conversation_count'] = len(conversations)
+    return receipt
 
 async def execute(session, xsrf, code: str, *, timeout=55) -> dict:
     headers = {'X-XSRFToken': xsrf, 'Content-Type': 'application/json'}
@@ -61,6 +118,8 @@ async def execute(session, xsrf, code: str, *, timeout=55) -> dict:
 
 def relay(args) -> dict:
     session, xsrf = login()
+    if getattr(args, 'bridge_url', None) and not args.read_context:
+        return direct_turn(session, xsrf, args)
     if args.read_context:
         payload = {'mode': 'read', 'person_id': args.person_id}
         return asyncio.run(execute(session, xsrf, remote_code(payload)))
@@ -145,6 +204,7 @@ def main():
     p.add_argument('--memory-updates-json')
     p.add_argument('--person-id')
     p.add_argument('--speaker-gain', type=float, default=3.0)
+    p.add_argument('--bridge-url', help='Direct bridge audio over HTTP; Jupyter syncs semantic memory only')
     args = p.parse_args()
     print(json.dumps(relay(args), ensure_ascii=False))
 

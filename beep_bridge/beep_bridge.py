@@ -16,7 +16,9 @@ import json
 import math
 import os
 import random
+import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -163,6 +165,7 @@ _submap_versions = {}
 _map_snapshot_sequence = 0
 
 state_lock = threading.RLock()
+audio_playback_lock = threading.Lock()  # independent of all motion/SLAM locks
 motion_lock = threading.RLock()
 motion_owner_lock = threading.RLock()
 sdk_io_lock = threading.RLock()
@@ -178,7 +181,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.12-stationary-social-posture",
+    "version": "0.22.13-direct-audio",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -3610,11 +3613,79 @@ def handler_failure_requires_stop(path: str, error: BaseException) -> bool:
     """Keep observation and response-transport failures out of motor control."""
     if isinstance(error, (BrokenPipeError, ConnectionResetError)):
         return False
-    return path not in {"/frame.jpg", "/camera.jpg", "/mission/bias"}
+    return path not in {"/frame.jpg", "/camera.jpg", "/mission/bias", "/audio/play"}
+
+
+MAX_AUDIO_BYTES = 2_000_000
+DEFAULT_AUDIO_GAIN = 3.0
+
+
+def play_bridge_audio(audio: bytes, gain: float) -> None:
+    """No motor/SDK access. Fail unless both converter and ALSA confirm completion."""
+    listing = subprocess.run(['aplay', '-l'], capture_output=True, text=True,
+                             check=True, timeout=5).stdout
+    cards = re.findall(r'^card (\d+): .*Headphones.*$', listing, re.I | re.M)
+    if len(cards) != 1:
+        raise RuntimeError('analog Headphones card unavailable or ambiguous')
+    card = cards[0]
+    subprocess.run(['amixer', '-c', card, 'set', 'Headphone', '100%', 'unmute'],
+                   capture_output=True, check=True, timeout=5)
+    filter_chain = f'highpass=f=300,volume={gain:.3f},alimiter=limit=0.95:level=0'
+    wav = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error',
+                          '-i', 'pipe:0', '-filter:a', filter_chain, '-t', '30',
+                          '-ar', '24000', '-ac', '1', '-f', 'wav', 'pipe:1'],
+                         input=audio, capture_output=True, check=True, timeout=15).stdout
+    if not 44 <= len(wav) <= 2_000_000:
+        raise RuntimeError('converted audio missing or too large')
+    subprocess.run(['aplay', '-q', '-D', f'plughw:{card},0'], input=wav,
+                   capture_output=True, check=True, timeout=36)
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "BEEPBridge/0.5"
+
+    def handle_audio_play(self, parsed):
+        if not audio_playback_lock.acquire(blocking=False):
+            self.send_json({"ok": False, "error": "audio playback busy"}, 409)
+            return
+        started = time.monotonic()
+        try:
+            mime = self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+            if mime not in ('audio/wav', 'audio/mpeg') or self.headers.get('Transfer-Encoding'):
+                self.send_json({"ok": False, "error": "expected fixed-length audio/wav or audio/mpeg"}, 415)
+                return
+            length = self.headers.get('Content-Length', '')
+            if not length.isascii() or not length.isdecimal() or not int(length):
+                self.send_json({"ok": False, "error": "positive Content-Length required"}, 400)
+                return
+            if int(length) > MAX_AUDIO_BYTES:
+                self.send_json({"ok": False, "error": "audio body exceeds 2000000 bytes"}, 413)
+                return
+            values = parse_qs(parsed.query, keep_blank_values=True)
+            if set(values) - {'gain'} or len(values.get('gain', [])) > 1:
+                self.send_json({"ok": False, "error": "only one gain parameter is supported"}, 400)
+                return
+            try:
+                gain = float(values['gain'][0]) if 'gain' in values else DEFAULT_AUDIO_GAIN
+            except ValueError:
+                gain = float('nan')
+            if not math.isfinite(gain):
+                self.send_json({"ok": False, "error": "gain must be finite"}, 400)
+                return
+            gain = max(0.5, min(6.0, gain))
+            self.connection.settimeout(8)
+            audio = self.rfile.read(int(length))
+            if len(audio) != int(length):
+                self.send_json({"ok": False, "error": "incomplete audio body"}, 400)
+                return
+            play_bridge_audio(audio, gain)
+            self.send_json({"ok": True, "elapsed_s": round(time.monotonic() - started, 3)})
+        except (subprocess.TimeoutExpired, socket.timeout):
+            self.send_json({"ok": False, "error": "audio playback timed out"}, 504)
+        except (subprocess.CalledProcessError, OSError, RuntimeError):
+            self.send_json({"ok": False, "error": "audio conversion or playback failed"}, 502)
+        finally:
+            audio_playback_lock.release()
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
@@ -3654,6 +3725,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"mission": mission_snapshot(), "status": snapshot()})
             elif p.path == "/config":
                 self.send_json({"version": state["version"], "semantic_execution_enabled": False,
+                                "audio_playback": {"endpoint": "POST /audio/play"},
                                 "clearance_profile": CLEARANCE_PROFILE,
                                 "motor_backend": MOTOR_BACKEND, "sdk_step_default": SDK_STEP_DEFAULT, "sdk_gait": SDK_GAIT, "sdk_pace": SDK_PACE,
                                 "sdk_body_height": SDK_BODY_HEIGHT, "sdk_shoulder_yaw": SDK_SHOULDER_YAW, "sdk_imu": SDK_IMU,
@@ -3829,6 +3901,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = urlparse(self.path)
+        if p.path == "/audio/play":
+            self.handle_audio_play(p)
+            return
         try:
             body = self.read_json()
             if p.path == "/stop":

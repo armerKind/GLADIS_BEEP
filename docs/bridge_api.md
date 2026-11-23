@@ -112,6 +112,12 @@ Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions r
 
 `beep_eyes.social_view.upward_social_turn(..., opt_in=True)` is a separate **host-side** helper: sit, read a bounded `/frame.jpg` JPEG, invoke an injected qualitative captioner, pass the caption to `VoiceLoop.initiate_turn('person_noticed')`, then request stand and verify readback in `finally`. It is not wired to an automatic camera/person trigger or live voice runner. It requires voice consent and explicit opt-in; choose an image provider only under its own household privacy policy. If cleanup loses the connection or fails, actual posture is unknown and a local human must check BEEP; a failed sit request does not blindly issue stand over a possibly active mission.
 
+### Direct audio (0.22.13)
+
+`POST /audio/play?gain=3.0` accepts a fixed-length raw `audio/mpeg` or `audio/wav` body of 1..2,000,000 bytes. Gain defaults to 3.0 and clamps to 0.5..6.0. This endpoint is independent of motor ownership and the SLAM/LiDAR threads: a dedicated nonqueueing audio lock rejects simultaneous playback with 409. It discovers the analog `Headphones` ALSA card by name, unmutes its mixer, converts through `highpass=f=300,volume=<gain>,alimiter=limit=0.95:level=0` with bounded ffmpeg duration/output, and returns `{"ok":true,"elapsed_s":...}` only when `aplay` exits successfully. Bad content type returns 415, missing/invalid length or gain returns 400, oversized body 413, conversion/playback failure 502, and timeout 504. A lost response is **not** evidence that audio did not play: inspect memory and ask the nearby operator before retrying. This endpoint is not authenticated independently of the existing bridge listener; restrict reachability to the trusted LAN/tailnet and do not expose port 8766 to the public internet.
+
+`scripts/run_social_voice.py --speak --bridge-url http://<BEEP-tailnet-IP>:8766 --memory-file <host-bank> ...` synthesizes Sonia on the host, POSTs audio directly over HTTP, and commits the host memory only after HTTP 200 plus `ok:true`. `scripts/social_relay.py --speak --bridge-url ...` first checks the Pi bank, uses this direct audio path, then synchronizes the confirmed memory record back to Pi via Jupyter; *audio is not sent through Jupyter*. A failed memory sync leaves the host bank for reconciliation and must not trigger automatic replay. The older Jupyter audio-transfer route remains an explicit fallback.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /actions` or `/tricks` | List known named actions |

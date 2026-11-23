@@ -25,6 +25,20 @@ For later consented stationary commissioning, provide `--memory-file`, `--consen
 
 # Telegram-to-BEEP stationary social relay (no USB mic)
 
+**Direct-audio variant (bridge `0.22.13`):** On a host with its Tailscale peer
+connected, run `python -m scripts.social_relay --speak --bridge-url http://100.100.141.33:8766 --heard-text '...' --reply '...'`. The host
+synthesizes Sonia and posts the in-memory MP3 directly to `POST /audio/play`.
+The bridge discovers `Headphones`, applies the 300 Hz high-pass/gain/limiter,
+and confirms `aplay`. The host then commits its bounded semantic memory copy
+and synchronizes the confirmed JSON snapshot to BEEP through Jupyter (no audio
+file transfer); both the HTTP playback receipt and exact Pi memory readback
+are required before claiming a complete turn. The host keeps a private
+`~/.hermes/profiles/sol/beep_memory_bank.json` for reconciliation if Pi memory
+sync fails. No automatic replay on ambiguous HTTP or memory-sync failure.
+`scripts/run_social_voice.py --speak --bridge-url ... --memory-file <local-bank>`
+is the lower-level direct-audio CLI; its memory file is **local to the process**,
+not automatically Pi's bank. See `docs/bridge_api.md` for endpoint bounds.
+
 While the USB microphone is unplugged, use a **real Telegram voice message**
 received by GLADIS as the transcript source. GLADIS reads the Pi's existing
 DialogueContext, composes a short reply itself (not via a second chat API),

@@ -24,6 +24,8 @@ import time
 from typing import Sequence
 import wave
 from urllib.request import urlopen
+from urllib.parse import urlsplit
+from urllib.request import Request, build_opener, ProxyHandler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -48,6 +50,7 @@ def parse_args(argv=None):
                    help='Optional audio generated for --reply by host Hermes/Edge Sonia TTS')
     p.add_argument('--tts-voice', default='en-GB-SoniaNeural',
                    help='Edge TTS voice if no host-provided audio file is used')
+    p.add_argument('--bridge-url', help='Direct HTTP speaker bridge origin; host uses its local memory file')
     p.add_argument('--consent', action='store_true', help='Explicit consent for mic capture and cloud ASR/reply/TTS')
     p.add_argument('--person-id', help='Operator-verified speaker ID; do not infer identity from voice')
     p.add_argument('--greet-trigger', choices=('session_start', 'person_noticed'),
@@ -67,7 +70,7 @@ def parse_args(argv=None):
     if args.speak and (not args.heard_text or not args.reply):
         p.error('--speak requires --heard-text and --reply')
     if not args.speak and any((args.heard_text, args.reply, args.memory_updates_json,
-                               args.tts_audio_file)):
+                               args.tts_audio_file, args.bridge_url)):
         p.error('turn fields require --speak')
     if not args.calibrate_mic and args.memory_file is None:
         p.error('--memory-file is required except for --calibrate-mic')
@@ -83,10 +86,17 @@ def speaker_filter(gain: float) -> str:
         raise ValueError('speaker gain must be finite')
     return f'highpass=f=300,volume={max(1.0, min(8.0, gain)):.3f},alimiter=limit=0.95:level=0'
 
-def stationary_authority() -> tuple[str | None, str | None, bool]:
+def bridge_origin(value: str) -> str:
+    p = urlsplit(value)
+    if (p.scheme != 'http' or not p.hostname or p.username or p.password
+            or p.path not in ('', '/') or p.query or p.fragment):
+        raise ValueError('bridge URL must be a plain HTTP origin')
+    return value.rstrip('/')
+
+def stationary_authority(bridge_url: str = 'http://127.0.0.1:8766') -> tuple[str | None, str | None, bool]:
     """No bridge, uncertain state, active mission or posture => no speaking."""
     try:
-        with urlopen('http://127.0.0.1:8766/mission', timeout=3) as response:
+        with build_opener(ProxyHandler({})).open(bridge_origin(bridge_url) + '/mission', timeout=3) as response:
             data = json.load(response)
         state = data['status']
         mission = data.get('mission')
@@ -101,6 +111,16 @@ def stationary_authority() -> tuple[str | None, str | None, bool]:
         return (None, None, safe)
     except (OSError, ValueError, KeyError, TypeError):
         return (None, None, False)
+
+def bridge_playback(audio: bytes, gain: float, bridge_url: str) -> bool:
+    if not isinstance(audio, bytes) or not 0 < len(audio) <= 2_000_000:
+        raise ValueError('bounded audio bytes required')
+    content_type = 'audio/wav' if audio.startswith(b'RIFF') and audio[8:12] == b'WAVE' else 'audio/mpeg'
+    req = Request(bridge_origin(bridge_url) + f'/audio/play?gain={gain:.3f}',
+                  data=audio, headers={'Content-Type': content_type}, method='POST')
+    with build_opener(ProxyHandler({})).open(req, timeout=58) as response:
+        result = json.load(response)
+        return response.status == 200 and result.get('ok') is True
 
 def edge_sonia(text: str, voice: str) -> bytes:
     """Keyless Edge TTS; bounded in-memory MP3, no retained speech file."""
@@ -145,12 +165,30 @@ def speak_turn(bank: SemanticMemory, args, *, synthesize=None, play=None,
         synthesize = ((lambda _: supplied_audio(args.tts_audio_file)) if args.tts_audio_file
                       else lambda text: edge_sonia(text, args.tts_voice))
     if play is None:
-        play = lambda audio: analog_playback(audio, args.speaker_gain)
-    loop = relay_loop(bank, synthesize=synthesize, play=play,
+        play = (lambda audio: bridge_playback(audio, args.speaker_gain, args.bridge_url)
+                if args.bridge_url else analog_playback(audio, args.speaker_gain))
+    if args.bridge_url and authority is stationary_authority:
+        authority = lambda: stationary_authority(args.bridge_url)
+    metrics = {}
+    def timed_tts(text):
+        started = time.perf_counter()
+        result = synthesize(text)
+        metrics['tts_s'] = round(time.perf_counter() - started, 3)
+        return result
+    def timed_play(audio):
+        started = time.perf_counter()
+        result = play(audio)
+        metrics['http_playback_s' if args.bridge_url else 'local_playback_s'] = round(time.perf_counter() - started, 3)
+        metrics['_play_end'] = time.perf_counter()
+        return result
+    loop = relay_loop(bank, synthesize=timed_tts, play=timed_play,
                       authority=authority, person_id=args.person_id)
     result = loop.deliver_text_turn(args.heard_text, args.reply, updates)
+    if result.memory_written and '_play_end' in metrics:
+        metrics['memory_commit_s'] = round(time.perf_counter() - metrics.pop('_play_end'), 3)
+    metrics.pop('_play_end', None)
     print(json.dumps({'state': result.state, 'memory_written': result.memory_written,
-                      'motor_authority': result.motor_authority}), flush=True)
+                      'motor_authority': result.motor_authority, **metrics}), flush=True)
     if result.state != 'replied' or not result.memory_written:
         raise SystemExit('speaker delivery was not confirmed; semantic turn not committed')
     return result

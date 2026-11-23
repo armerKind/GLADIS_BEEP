@@ -41,7 +41,7 @@ class RelayTests(unittest.TestCase):
                  'posture_action_acknowledged': True}
         def check():
             payload = io.BytesIO(json.dumps({'status': state, 'mission': None}).encode())
-            with patch.object(social, 'urlopen', return_value=payload):
+            with patch.object(social, 'build_opener', return_value=SimpleNamespace(open=lambda *a, **kw: payload)):
                 return social.stationary_authority()[2]
         self.assertTrue(check())
         state['posture_action_acknowledged'] = False
@@ -155,6 +155,40 @@ class RelayTests(unittest.TestCase):
         self.assertTrue(result['memory_written'])
         self.assertIn('relay-', session.asserted_url)
         self.assertEqual(session.reads, 2)
+
+    def test_direct_host_turn_syncs_only_memory_after_confirmed_receipt(self):
+        bank = SemanticMemory(self.path)
+        bank.save()
+        class Response:
+            status_code = 200
+            def __init__(self, content): self.content = content
+            def raise_for_status(self): pass
+            def json(self): return {'content': self.content}
+        class Session:
+            def __init__(self, content): self.content = content; self.puts = []
+            def get(self, url, timeout): return Response(self.content)
+            def put(self, url, headers, json, timeout):
+                self.puts.append((url, json))
+                self.content = json['content']
+                return Response(self.content)
+        session = Session(self.path.read_text())
+        args = SimpleNamespace(heard_text='The direct path, please.',
+            reply='The Jupyter luggage has been removed.', person_id=None,
+            memory_updates_json=None, speaker_gain=3.0,
+            bridge_url='http://100.100.141.33:8766')
+        def delivered(local_bank, cli):
+            self.assertEqual(cli.bridge_url, args.bridge_url)
+            local_bank.record_conversation(heard_text=args.heard_text,
+                                           spoken_reply=args.reply)
+            print(json.dumps({'state':'replied','memory_written':True,
+                              'tts_s':1.0,'http_playback_s':2.0,'memory_commit_s':0.01}))
+        with (patch.object(host_relay, 'HOST_MEMORY', Path(self.tmp.name)/'host_bank.json'),
+              patch.object(host_relay, 'speak_turn', side_effect=delivered)):
+            result = host_relay.direct_turn(session, 'xsrf', args)
+        self.assertEqual(result['verified_conversation_count'], 1)
+        self.assertEqual(len(session.puts), 1)
+        self.assertIn('memory_bank.json', session.puts[0][0])
+        self.assertNotIn('audio', session.puts[0][0])
 
 
 if __name__ == '__main__':
