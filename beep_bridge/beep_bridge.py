@@ -128,14 +128,28 @@ MARK_TURN_TIMEOUT_S = float(os.environ.get("BEEP_MARK_TURN_TIMEOUT_S", "8.0"))
 MARK_TARGET_FRONT_M = max(FOOTPRINT_FRONT_M, float(os.environ.get("BEEP_MARK_TARGET_FRONT_M", str(FOOTPRINT_FRONT_M))))
 MARK_MIN_FRONT_M = max(FOOTPRINT_FRONT_M, float(os.environ.get("BEEP_MARK_MIN_FRONT_M", str(FOOTPRINT_FRONT_M))))
 TRICK_ACTIONS = {
+    # Yahboom DOGZILLA 7.4 action table, IDs 1..19. Entries describe vendor
+    # presets, not validated S2 physical effects or permission to use them.
+    "lie_down": {"id": 1, "label": "Lie Down", "duration_s": 4.0, "safe_for_fair": False, "aliases": ["lie", "down"]},
+    "stand_up": {"id": 2, "label": "Stand Up (reserved posture)", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["rise"]},
     "reset": {"id": 255, "label": "Reset / neutral pose", "duration_s": 0.5, "safe_for_fair": True, "aliases": ["neutral", "stand", "home"]},
     "crawl": {"id": 3, "label": "Crawl", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["creep"]},
+    "turn_around": {"id": 4, "label": "Turn around", "duration_s": 4.0, "safe_for_fair": False, "aliases": ["spin"]},
+    "mark_time": {"id": 5, "label": "Mark Time", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["march_in_place"]},
+    "squat": {"id": 6, "label": "Squat", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["crouch"]},
+    "turn_roll": {"id": 7, "label": "Turn Roll", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["roll_demo"]},
+    "turn_pitch": {"id": 8, "label": "Turn Pitch", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["pitch_demo"]},
+    "turn_yaw": {"id": 9, "label": "Turn Yaw", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["yaw_demo"]},
     "three_axis": {"id": 10, "label": "3-axis body motion", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["3axis", "axis", "body_demo"]},
-    "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 8.0, "safe_for_fair": True, "aliases": ["leg_lift", "mark", "urinate"]},
+    "pee": {"id": 11, "label": "Lift leg / pee", "duration_s": 8.0, "safe_for_fair": False, "aliases": ["leg_lift", "mark", "urinate"]},
     "sit": {"id": 12, "label": "Sit / upward social view", "duration_s": 4.0, "safe_for_fair": True, "aliases": ["sit_down", "social_sit", "look_up"]},
+    "wave_hand": {"id": 13, "label": "Wave(Hand)", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["wave", "paw_wave"]},
     "stretch": {"id": 14, "label": "Stretch", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["show", "startup_show", "lazy"]},
+    "wave_body": {"id": 15, "label": "Wave(Body)", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["body_wave"]},
     "swing": {"id": 16, "label": "Swing", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["shake", "wobble"]},
     "pray": {"id": 17, "label": "Pray / beg", "duration_s": 3.0, "safe_for_fair": True, "aliases": ["prey", "beg", "begging", "request_food"]},
+    "seek": {"id": 18, "label": "Seek", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["search_pose"]},
+    "handshake": {"id": 19, "label": "Handshake", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["shake_hand", "shake_paw"]},
 }
 # SDK action mappings are vendor-source-derived, NOT commissioned on this S2.
 # Keep overrides explicit; do not invent app protocol bytes for postures.
@@ -147,7 +161,7 @@ if any(not 1 <= value <= 255 for value in POSTURE_ACTIONS.values()):
     raise ValueError("posture SDK action IDs must be in 1..255")
 if POSTURE_ACTIONS["sit"] == POSTURE_ACTIONS["stand"]:
     raise ValueError("sit and stand must use distinct SDK actions")
-POSTURE_ACTION_IDS = frozenset({12, 255, *POSTURE_ACTIONS.values()})
+POSTURE_ACTION_IDS = frozenset({2, 12, 255, *POSTURE_ACTIONS.values()})
 TRICK_ALIASES = {}
 for _trick_name, _trick_meta in TRICK_ACTIONS.items():
     TRICK_ALIASES[_trick_name] = _trick_name
@@ -181,7 +195,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.13-direct-audio",
+    "version": "0.22.14-gesture-repertoire-offline",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -331,6 +345,20 @@ def end_motion(lease):
 
 def run_owned_motion(source, callback, max_duration=600.0):
     lease = begin_motion(source, max_duration=max_duration)
+    try:
+        return callback()
+    finally:
+        end_motion(lease)
+
+
+def run_owned_gesture(source, callback, max_duration):
+    """Atomically admit only stationary, standing, mission-free HTTP actions."""
+    with mission_lock, motion_owner_lock:
+        with state_lock:
+            if (_active_mission is not None or _active_motion_lease is not None
+                    or state["moving"] or state["posture"] != "standing"):
+                raise MotionBusy("gesture requires stationary, standing, unowned robot with no active mission")
+        lease = begin_motion(source, max_duration=max_duration)
     try:
         return callback()
     finally:
@@ -3820,13 +3848,13 @@ class Handler(BaseHTTPRequestHandler):
                 async_requested = truthy((qs.get("async") or ["0"])[0]) or not truthy((qs.get("wait") or ["1"])[0])
                 if async_requested and not dry:
                     self.send_json({"ok": False, "error": "asynchronous gestures are disabled; use a synchronous owned motion lease"}, 400)
-                elif dry:
-                    self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=True, settle_s=settle))
                 elif resolve_trick(name=name, action_id=action_id)["id"] in POSTURE_ACTION_IDS:
                     self.send_json({"ok": False, "error": "use POST /posture for sit/stand"}, 400)
+                elif dry:
+                    self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=True, settle_s=settle))
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
-                    self.send_json(run_owned_motion("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle), max_duration=settle_limit + 2.0))
+                    self.send_json(run_owned_gesture("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle), max_duration=settle_limit + 2.0))
             elif p.path == "/mark_object":
                 dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
                 target_front = float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0])
@@ -3951,14 +3979,14 @@ class Handler(BaseHTTPRequestHandler):
                     action_id=body.get("id", body.get("action_id")), dry_run=dry, settle_s=settle)
                 if async_requested and not dry:
                     self.send_json({"ok": False, "error": "asynchronous gestures are disabled; use a synchronous owned motion lease"}, 400)
-                elif dry:
-                    self.send_json(callback())
                 elif resolve_trick(name=body.get("name", body.get("action", body.get("trick"))),
                                    action_id=body.get("id", body.get("action_id")))["id"] in POSTURE_ACTION_IDS:
                     self.send_json({"ok": False, "error": "use POST /posture for sit/stand"}, 400)
+                elif dry:
+                    self.send_json(callback())
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
-                    self.send_json(run_owned_motion("http_post_trick", callback, max_duration=settle_limit + 2.0))
+                    self.send_json(run_owned_gesture("http_post_trick", callback, max_duration=settle_limit + 2.0))
             elif p.path == "/mark_object":
                 dry = bool(body.get("dry_run", body.get("dry", False)))
                 approach_s = float(body.get("max_duration", 5.0))

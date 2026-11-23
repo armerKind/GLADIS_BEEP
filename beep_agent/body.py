@@ -13,7 +13,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .skills import SkillCall, validate_skill_call
+from .skills import GESTURE_IDS, SkillCall, canonical_gesture, validate_skill_call
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -107,17 +107,43 @@ class BridgeBodyAdapter:
             raise BodyDispatchError("mission bias rejected or bridge acknowledgement invalid")
         return response
 
+    def perform_gesture(self, name: str, *, rollout_mode: str = "shadow") -> DispatchResult:
+        """Suggest by default; supervised dispatch only after a fresh bridge preflight."""
+        canonical = canonical_gesture(name)  # Never accept raw IDs or posture aliases.
+        if rollout_mode not in {"shadow", "stationary", "supervised"}:
+            raise BodyDispatchError("gesture requires a recognized rollout mode")
+        if rollout_mode != "supervised":
+            return DispatchResult(True, "gesture", False, False,
+                                  {"ok": True, "reason": "gesture_not_physically_armed"})
+        preflight = self.mission()
+        status = preflight.get("status", {})
+        if (preflight.get("mission") is not None or not isinstance(status, dict)
+                or status.get("moving") is not False
+                or status.get("motion_lease_id") is not None
+                or status.get("posture") != "standing"):
+            raise BodyDispatchError("gesture requires a fresh stationary standing unowned mission-free readback")
+        response = self._json("/action", {"name": canonical})
+        trick = response.get("trick")
+        if (response.get("ok") is not True or response.get("dry_run") is not False
+                or response.get("http_status") is not None or not isinstance(trick, dict)
+                or trick.get("name") != canonical or trick.get("id") != GESTURE_IDS[canonical]):
+            raise BodyDispatchError("gesture was refused or bridge receipt did not match the request")
+        return DispatchResult(True, "gesture", True, False, response)
+
     def dispatch(self, call: SkillCall, *, rollout_mode: str = "shadow",
                  mission_id: str | None = None, lease_id: str | None = None) -> DispatchResult:
         call = validate_skill_call(call)
         if rollout_mode not in {"shadow", "stationary", "supervised"}:
             raise BodyDispatchError("rollout mode must be shadow, stationary, or supervised")
-        if call.name not in {"explore", "observe", "stop"}:
+        if call.name not in {"explore", "observe", "stop", "gesture"}:
             raise BodyDispatchError(f"no deterministic body adapter for semantic skill {call.name!r}")
         if rollout_mode == "shadow":
             return DispatchResult(True, call.name, False, False, {"ok": True, "reason": "rollout_not_physically_armed"})
         if rollout_mode == "stationary" and call.name not in {"observe", "stop"}:
             return DispatchResult(True, call.name, False, False, {"ok": True, "reason": "stationary_rollout_blocks_motion"})
+
+        if call.name == "gesture":
+            return self.perform_gesture(call.arguments["name"], rollout_mode=rollout_mode)
 
         if call.name == "explore":
             response = self._json(

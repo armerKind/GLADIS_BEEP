@@ -123,15 +123,21 @@ Duration is clamped by `BEEP_MAX_MOVE_S` (default 5 seconds). Non-stop actions r
 | `GET /actions` or `/tricks` | List known named actions |
 | `GET /action?name=stretch&dry_run=1` | Resolve without executing |
 | `GET /action?name=pee` | Execute synchronously |
-| `GET /action?name=pee&wait=0` | Fire-and-forget |
-| `GET /action?id=<1..255>` | Raw vendor action ID |
+| `GET /action?name=pee&wait=0` | Refused: asynchronous gestures disabled |
+| `GET /action?id=<1..255>` | Raw vendor action ID, except posture-reserved IDs |
 | `GET/POST /action` or `/trick` | Named/raw action request |
 
-Known names include:
+The **0.22.14-gesture-repertoire-offline source** table is mapped from [Yahboom DOGZILLA 7.4 Performing actions](https://www.yahboom.net/study/DOGZILLA/7783), IDs 1–19 plus reset 255. The table is a **vendor ID map, not physical validation on this S2**. `GET /actions` lists the metadata and aliases. `POST /action` and the legacy GET alias require a standing, stationary, unowned robot with no active mission; a guarded lease fences each synchronous call. IDs 2 (stand-up), 12 (sit), and 255 (stand/reset) are listed for completeness but refused by `/action`, including raw IDs and dry-run requests; use `POST /posture` for the supported sit/stand transitions. The agent layer accepts named gestures only and defaults to non-dispatching shadow mode; its context suggestions do not trigger hardware.
+
+Known names (vendor order) include:
 
 ```text
-reset  pee  stretch  swing  pray  three_axis  crawl
+lie_down  stand_up*  crawl  turn_around  mark_time  squat  turn_roll
+turn_pitch  turn_yaw  three_axis  pee  sit*  wave_hand  stretch
+wave_body  swing  pray  seek  handshake  reset*
 ```
+
+`*` means reserved for posture, not a callable `/action` gesture. `prey` aliases `pray`; `urinate` aliases `pee`; `wave` aliases `wave_hand`. Other aliases and bounded settle windows are in `/actions`. Vendor entries such as lie-down, crawl, turn-around and squat may change pose or position despite being named “actions”; do not select them automatically without supervised physical commissioning and posture readback. Unknown raw vendor IDs remain available on the lower-level bridge endpoint, **not** through the agent adapter.
 
 `pee` means only preset 11: lift the right leg. It does not perform target detection, approach, turning, LiDAR gating, or `stop_burst()` cleanup.
 
