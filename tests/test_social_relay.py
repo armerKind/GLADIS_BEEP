@@ -36,6 +36,24 @@ class RelayTests(unittest.TestCase):
         self.assertIn('room_label_unknown', context['gaps'])
         self.assertEqual(len(SemanticMemory(self.path).conversations), 0)
 
+    def test_stationary_social_playback_accepts_acknowledged_sit_only(self):
+        state = {'moving': False, 'motion_lease_id': None, 'posture': 'sitting',
+                 'posture_action_acknowledged': True}
+        def check():
+            payload = io.BytesIO(json.dumps({'status': state, 'mission': None}).encode())
+            with patch.object(social, 'urlopen', return_value=payload):
+                return social.stationary_authority()[2]
+        self.assertTrue(check())
+        state['posture_action_acknowledged'] = False
+        self.assertFalse(check())
+        state['posture'] = 'unknown'
+        state['posture_action_acknowledged'] = True
+        self.assertFalse(check())
+        state['posture'] = 'standing'
+        self.assertTrue(check())
+        state['moving'] = True
+        self.assertFalse(check())
+
     def test_spoken_turn_commits_only_after_confirmed_playback(self):
         args = self.args('--speak', '--heard-text', "I'm Max. I like music.",
                          '--reply', 'Music. A promising topic for a creature with speakers.',

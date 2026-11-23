@@ -92,9 +92,12 @@ def stationary_authority() -> tuple[str | None, str | None, bool]:
         mission = data.get('mission')
         active = mission is not None and mission.get('state') not in (
             'completed', 'cancelled', 'failed', 'stopped')
+        posture = state.get('posture')
+        safe_posture = (posture == 'standing' or
+                        (posture == 'sitting' and state.get('posture_action_acknowledged') is True))
         safe = (state.get('moving') is False and
                 state.get('motion_lease_id') is None and
-                state.get('posture') == 'standing' and not active)
+                safe_posture and not active)
         return (None, None, safe)
     except (OSError, ValueError, KeyError, TypeError):
         return (None, None, False)
