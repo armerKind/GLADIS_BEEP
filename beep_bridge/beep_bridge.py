@@ -151,6 +151,7 @@ TRICK_ACTIONS = {
     "seek": {"id": 18, "label": "Seek", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["search_pose"]},
     "handshake": {"id": 19, "label": "Handshake", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["shake_hand", "shake_paw"]},
 }
+POSTURE_UNCERTAIN_ACTION_IDS = frozenset({1, 3, 4, 6})
 # SDK action mappings are vendor-source-derived, NOT commissioned on this S2.
 # Keep overrides explicit; do not invent app protocol bytes for postures.
 POSTURE_ACTIONS = {
@@ -195,7 +196,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.14-gesture-repertoire-offline",
+    "version": "0.22.15-gesture-posture-fence-offline",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -208,6 +209,7 @@ state = {
     "moving": False,
     "posture": "standing",
     "posture_action_acknowledged": False,
+    "posture_uncertain": False,
     "motion_cancelled": False,
     "motion_lease_id": None,
     "motion_lease_source": None,
@@ -304,7 +306,7 @@ def begin_motion(source="api", max_duration=600.0, *, allow_posture=False):
         if allow_posture and source != "posture":
             raise ValueError("posture lease reserved for posture endpoint")
         with state_lock:
-            if state["posture"] != "standing" and not allow_posture:
+            if (state["posture"] != "standing" or state["posture_uncertain"]) and not allow_posture:
                 raise MotionBusy("locomotion refused while sitting")
         if _active_motion_lease is not None:
             current = _active_motion_lease
@@ -351,15 +353,31 @@ def run_owned_motion(source, callback, max_duration=600.0):
         end_motion(lease)
 
 
-def run_owned_gesture(source, callback, max_duration):
+def run_owned_gesture(source, callback, max_duration, *, posture_sensitive=False,
+                      expected_release=None):
     """Atomically admit only stationary, standing, mission-free HTTP actions."""
     with mission_lock, motion_owner_lock:
         with state_lock:
             if (_active_mission is not None or _active_motion_lease is not None
-                    or state["moving"] or state["posture"] != "standing"):
+                    or state["moving"] or state["posture"] != "standing"
+                    or state["posture_uncertain"]):
                 raise MotionBusy("gesture requires stationary, standing, unowned robot with no active mission")
+        if expected_release is not None:
+            latest = _latest_mission
+            if (not isinstance(expected_release, dict) or latest is None
+                    or latest.get("state") not in ("completed", "cancelled", "failed")
+                    or (expected_release.get("boot_id"), expected_release.get("mission_id"),
+                        expected_release.get("lease_id"), expected_release.get("release_id")) !=
+                       (BOOT_ID, latest.get("id"), latest.get("lease_id"), latest.get("release_id"))
+                    or not latest.get("release_id")):
+                raise MotionBusy("gesture release provenance no longer matches latest mission")
         lease = begin_motion(source, max_duration=max_duration)
     try:
+        if posture_sensitive:
+            # Set before SDK I/O: a failed request may already have changed
+            # physical stance; software 'standing' is not a body sensor.
+            with state_lock:
+                state["posture_uncertain"] = True
         return callback()
     finally:
         end_motion(lease)
@@ -393,6 +411,7 @@ def _reset_motion_state_for_tests():
         state["motion_lease_source"] = None
         state["posture"] = "standing"
         state["posture_action_acknowledged"] = False
+        state["posture_uncertain"] = False
 
 
 def _reset_mission_state_for_tests():
@@ -686,11 +705,13 @@ def change_posture(posture):
         with state_lock:
             if _active_mission is not None or _active_motion_lease is not None or state["moving"]:
                 raise MotionBusy("posture requires stationary, unowned robot with no active mission")
+            if state["posture_uncertain"] and posture != "stand":
+                raise MotionBusy("posture uncertain; stand before another pose")
             previous = state["posture"]
             if posture == "sit" and previous == "sitting" and not state["posture_action_acknowledged"]:
                 raise MotionBusy("posture uncertain after failed action; stand first")
-            if state["posture_action_acknowledged"] and ((posture == "sit" and previous == "sitting") or
-                                                         (posture == "stand" and previous == "standing")):
+            if state["posture_action_acknowledged"] and not state["posture_uncertain"] and ((posture == "sit" and previous == "sitting") or
+                                                          (posture == "stand" and previous == "standing")):
                 return {"ok": True, "posture": previous, "unchanged": True, "status": snapshot()}
         duration = float(os.environ.get("BEEP_SIT_SETTLE_S" if posture == "sit" else
                                         "BEEP_STAND_SETTLE_S", "4.0" if posture == "sit" else "2.0"))
@@ -703,10 +724,12 @@ def change_posture(posture):
         with state_lock:
             state["posture"] = "standing" if completed and posture == "stand" else "sitting"
             state["posture_action_acknowledged"] = completed
+            state["posture_uncertain"] = not completed
     except Exception:
         with state_lock:
             state["posture"] = "sitting"  # Partial SDK action may have moved the body.
             state["posture_action_acknowledged"] = False
+            state["posture_uncertain"] = True
         raise
     finally:
         end_motion(lease)
@@ -2847,6 +2870,8 @@ def _autonomous_mission_worker(mission, lease, options):
                 mission["state"] = "completed"
             if _active_mission is mission:
                 _active_mission = None
+            # Mint only after the exact mission lease has ended.
+            mission["release_id"] = uuid.uuid4().hex
             _latest_mission = mission
         remember("autonomous_mission_finished", mission_id=mission["id"], state=mission["state"],
                  reason=(result or {}).get("reason"), error=error)
@@ -2863,7 +2888,7 @@ def start_autonomous_mission(mode="coverage", duration_s=180.0, **options):
         if _active_motion_lease is not None and _active_motion_lease.source == "posture":
             return {"ok": False, "busy": True, "reason": "posture_transition_active"}
     initial = snapshot()
-    if state["posture"] != "standing":
+    if state["posture"] != "standing" or state["posture_uncertain"]:
         return {"ok": False, "busy": True, "reason": "posture_sitting", "status": initial}
     if not scan_ok(initial):
         return {"ok": False, "reason": "scan_stale_or_missing_before_start", "status": initial}
@@ -3854,7 +3879,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(sdk_trick(name=name, action_id=action_id, dry_run=True, settle_s=settle))
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
-                    self.send_json(run_owned_gesture("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle), max_duration=settle_limit + 2.0))
+                    resolved = resolve_trick(name=name, action_id=action_id)
+                    sensitive = resolved["id"] in POSTURE_UNCERTAIN_ACTION_IDS or resolved["name"].startswith("raw_")
+                    self.send_json(run_owned_gesture("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle),
+                        max_duration=settle_limit + 2.0, posture_sensitive=sensitive))
             elif p.path == "/mark_object":
                 dry = (qs.get("dry_run") or qs.get("dry") or ["0"])[0] in ("1", "true", "yes")
                 target_front = float((qs.get("target_front") or [str(MARK_TARGET_FRONT_M)])[0])
@@ -3986,7 +4014,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(callback())
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
-                    self.send_json(run_owned_gesture("http_post_trick", callback, max_duration=settle_limit + 2.0))
+                    resolved = resolve_trick(name=body.get("name", body.get("action", body.get("trick"))),
+                                             action_id=body.get("id", body.get("action_id")))
+                    sensitive = resolved["id"] in POSTURE_UNCERTAIN_ACTION_IDS or resolved["name"].startswith("raw_")
+                    self.send_json(run_owned_gesture("http_post_trick", callback,
+                        max_duration=settle_limit + 2.0, posture_sensitive=sensitive,
+                        expected_release=body.get("release") if "release" in body else None))
             elif p.path == "/mark_object":
                 dry = bool(body.get("dry_run", body.get("dry", False)))
                 approach_s = float(body.get("max_duration", 5.0))

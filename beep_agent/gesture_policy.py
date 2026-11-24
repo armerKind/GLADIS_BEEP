@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import threading
+from .skills import canonical_gesture
 
 INITIAL_AUTO_GESTURES = frozenset({'wave_hand', 'pray', 'stretch'})
 _AUTO_CONTEXTS = {
@@ -103,4 +105,143 @@ class GesturePolicy:
         obj.used, obj.last_at = used, last_at
         obj.seen_events = set(events)
         obj.seen_turns = {tuple(t) for t in turns}
+        return obj
+
+
+class GestureAdmissionError(ValueError):
+    """A proposal has no authority to reach the gesture transport."""
+
+
+@dataclass(frozen=True)
+class GestureIntent:
+    decision_id: str
+    session_id: str
+    boot_id: str
+    name: str
+    event_id: str
+    observed_at_robot: float
+    issued_at_robot: float
+    expires_at_robot: float
+    map_epoch: int
+    map_revision: int
+    released_mission_id: str
+    released_lease_id: str
+    release_id: str
+    rollout_mode: str = 'shadow'
+
+    def __post_init__(self):
+        for field in ('decision_id', 'session_id', 'boot_id', 'event_id',
+                      'released_mission_id', 'released_lease_id', 'release_id'):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not 0 < len(value.strip()) <= 128:
+                raise GestureAdmissionError(f'invalid {field}')
+        if canonical_gesture(self.name) != self.name or self.name not in INITIAL_AUTO_GESTURES:
+            raise GestureAdmissionError('gesture is outside the initial LifeLoop allowlist')
+        if self.rollout_mode not in ('shadow', 'supervised'):
+            raise GestureAdmissionError('invalid gesture rollout mode')
+        times = (self.observed_at_robot, self.issued_at_robot, self.expires_at_robot)
+        if (any(type(t) not in (int, float) or not math.isfinite(t) for t in times)
+                or not 0 <= times[0] <= times[1] < times[2]
+                or times[2] - times[1] > 8 or times[1] - times[0] > 10
+                or type(self.map_epoch) is not int or self.map_epoch < 0
+                or type(self.map_revision) is not int or self.map_revision < 0):
+            raise GestureAdmissionError('invalid gesture evidence time or map identity')
+
+
+class GestureAdmission:
+    """Host-side exact-release fence; still not a bridge or motor dispatcher.
+
+    Physical confirmation must come from a human or independently commissioned
+    posture sensor, not the bridge's generic software 'standing' field.
+    """
+
+    def __init__(self, *, session_id: str, boot_id: str,
+                 released_mission_id: str, released_lease_id: str,
+                 release_id: str):
+        if any(not isinstance(v, str) or not v.strip() for v in (
+                session_id, boot_id, released_mission_id, released_lease_id, release_id)):
+            raise GestureAdmissionError('exact session and release provenance required')
+        self.session_id, self.boot_id = session_id, boot_id
+        self.release = (released_mission_id, released_lease_id, release_id)
+        self.claimed: set[str] = set()
+        self.claimed_events: set[str] = set()
+        self.uncertain_reason: str | None = None
+        self._claim_lock = threading.Lock()
+
+    def check(self, intent: GestureIntent, readback: dict, *,
+              physical_posture_confirmed: bool) -> None:
+        if not isinstance(intent, GestureIntent) or intent.rollout_mode != 'supervised':
+            raise GestureAdmissionError('gesture is not supervised')
+        if (intent.session_id, intent.boot_id) != (self.session_id, self.boot_id):
+            raise GestureAdmissionError('wrong session or boot')
+        if (intent.released_mission_id, intent.released_lease_id,
+                intent.release_id) != self.release:
+            raise GestureAdmissionError('wrong exact release')
+        if self.uncertain_reason is not None or physical_posture_confirmed is not True:
+            raise GestureAdmissionError('physical posture unconfirmed')
+        if intent.decision_id in self.claimed or intent.event_id in self.claimed_events:
+            raise GestureAdmissionError('duplicate gesture intent')
+        latest = readback.get('mission') if isinstance(readback, dict) else None
+        if (not isinstance(latest, dict) or latest.get('state') not in
+                ('completed', 'cancelled', 'failed')
+                or (latest.get('id'), latest.get('lease_id'), latest.get('release_id')) !=
+                   (intent.released_mission_id, intent.released_lease_id, intent.release_id)):
+            raise GestureAdmissionError('exact mission-release readback missing')
+        s = readback.get('status')
+        if not isinstance(s, dict):
+            raise GestureAdmissionError('missing bridge status')
+        slam = s.get('slam') or {}
+        now, age = s.get('robot_monotonic_s'), s.get('scan_age_s')
+        if (s.get('boot_id') != self.boot_id or s.get('moving') is not False
+                or s.get('motion_lease_id') is not None or s.get('posture') != 'standing'
+                or s.get('posture_uncertain') is not False or s.get('fall_suspected') is not False
+                or type(now) not in (int, float) or not math.isfinite(now)
+                or type(age) not in (int, float) or not math.isfinite(age)
+                or not 0 <= age <= .6
+                or not intent.issued_at_robot <= now <= intent.expires_at_robot
+                or now - intent.observed_at_robot > 10
+                or not isinstance(slam, dict)
+                or (slam.get('map_epoch'), slam.get('map_revision'),
+                    slam.get('map_revision_status')) !=
+                   (intent.map_epoch, intent.map_revision, 'verified')):
+            raise GestureAdmissionError('stale or unsafe stationary bridge readback')
+
+    def claim(self, intent: GestureIntent) -> None:
+        with self._claim_lock:
+            if intent.decision_id in self.claimed or intent.event_id in self.claimed_events:
+                raise GestureAdmissionError('gesture intent was already claimed')
+            self.claimed.add(intent.decision_id)
+            self.claimed_events.add(intent.event_id)
+
+    def mark_uncertain(self, reason: str) -> None:
+        self.uncertain_reason = reason or 'unknown_gesture_outcome'
+
+    def to_dict(self) -> dict:
+        return {'schema_version': 1, 'session_id': self.session_id,
+                'boot_id': self.boot_id, 'release': list(self.release),
+                'claimed': sorted(self.claimed),
+                'claimed_events': sorted(self.claimed_events),
+                'uncertain_reason': self.uncertain_reason}
+
+    @classmethod
+    def from_dict(cls, value: dict) -> 'GestureAdmission':
+        if (not isinstance(value, dict) or set(value) != {
+                'schema_version', 'session_id', 'boot_id', 'release',
+                'claimed', 'claimed_events', 'uncertain_reason'}
+                or value['schema_version'] != 1 or not isinstance(value['release'], list)
+                or len(value['release']) != 3 or not isinstance(value['claimed'], list)
+                or not isinstance(value['claimed_events'], list)
+                or len(value['claimed']) != len(set(value['claimed']))
+                or len(value['claimed_events']) != len(set(value['claimed_events']))
+                or len(value['claimed']) != len(value['claimed_events'])
+                or any(not isinstance(v, str) or not v for v in value['claimed']+value['claimed_events'])
+                or (value['uncertain_reason'] is not None and
+                    (not isinstance(value['uncertain_reason'], str) or not value['uncertain_reason']))):
+            raise GestureAdmissionError('invalid admission checkpoint')
+        obj = cls(session_id=value['session_id'], boot_id=value['boot_id'],
+                  released_mission_id=value['release'][0],
+                  released_lease_id=value['release'][1], release_id=value['release'][2])
+        obj.claimed = set(value['claimed'])
+        obj.claimed_events = set(value['claimed_events'])
+        obj.uncertain_reason = value['uncertain_reason']
         return obj

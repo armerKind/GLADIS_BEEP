@@ -142,4 +142,47 @@ class RepertoireTests(unittest.TestCase):
                 self.assertTrue(result.dispatched)
                 self.assertEqual(http.call_args_list[1].args, ('/action', {'name':name}))
 
+    def test_posture_changing_action_latches_uncertain_until_explicit_stand(self):
+        def fake_action(**kw):
+            return {'ok': True, 'dry_run': False,
+                    'trick': bridge.resolve_trick(name=kw.get('name'), action_id=kw.get('action_id'))}
+        with patch.object(bridge, 'sdk_trick', side_effect=fake_action):
+            status, receipt = self.post({'name':'lie_down'})
+            self.assertEqual(status, 200)
+            self.assertTrue(receipt['ok'])
+            self.assertTrue(bridge.snapshot()['posture_uncertain'])
+            self.assertEqual(self.post({'name':'wave'})[0], 409)
+            request = urllib.request.Request(self.origin+'/posture',
+                data=b'{"posture":"stand"}', headers={'Content-Type':'application/json'})
+            with urllib.request.urlopen(request, timeout=4) as response:
+                standing = json.load(response)
+            self.assertTrue(standing['ok'])
+            self.assertFalse(standing.get('unchanged', False))
+            self.assertFalse(bridge.snapshot()['posture_uncertain'])
+
+    def test_exact_release_fence_and_callback_failure_releases_lease(self):
+        with bridge.mission_lock:
+            bridge._latest_mission = {'id':'m1','lease_id':'l1','release_id':'r1',
+                                      'state':'completed'}
+        release = {'boot_id':bridge.BOOT_ID,'mission_id':'m1','lease_id':'l1',
+                   'release_id':'r1'}
+        with patch.object(bridge,'sdk_trick',side_effect=RuntimeError('fake SDK failure')) as sdk:
+            self.assertEqual(self.post({'name':'wave_hand','release':{**release,'release_id':'wrong'}})[0],409)
+            sdk.assert_not_called()
+            status, _ = self.post({'name':'wave_hand','release':release})
+            self.assertEqual(status,500)
+            sdk.assert_called_once()
+        self.assertIsNone(bridge.snapshot()['motion_lease_id'])
+
+    def test_release_race_new_mission_rejected_before_callback(self):
+        with bridge.mission_lock:
+            bridge._latest_mission = {'id':'m1','lease_id':'l1','release_id':'r1',
+                                      'state':'completed'}
+            bridge._active_mission = {'id':'new','state':'running'}
+        with patch.object(bridge,'sdk_trick',side_effect=AssertionError('no SDK')) as sdk:
+            self.assertEqual(self.post({'name':'wave_hand','release':{
+                'boot_id':bridge.BOOT_ID,'mission_id':'m1','lease_id':'l1',
+                'release_id':'r1'}})[0],409)
+            sdk.assert_not_called()
+
 if __name__ == '__main__': unittest.main()

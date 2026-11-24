@@ -2,6 +2,7 @@
 import unittest
 
 from beep_agent.gesture_policy import GesturePolicy, INITIAL_AUTO_GESTURES
+from beep_agent.gesture_policy import GestureIntent, GestureAdmission, GestureAdmissionError
 
 
 class GesturePolicyTests(unittest.TestCase):
@@ -53,6 +54,61 @@ class GesturePolicyTests(unittest.TestCase):
             observed_at=11, now=11, reason='stretch').reason, 'cooldown')
         self.assertTrue(restored.consider('after_rest', event_id='c', entity_id=None,
             observed_at=20, now=20, reason='stretch').allowed)
+
+
+class GestureAdmissionTests(unittest.TestCase):
+    def intent(self, **changes):
+        fields = dict(decision_id='d1', session_id='s1', boot_id='boot1',
+            name='wave_hand', event_id='frame1', observed_at_robot=10.,
+            issued_at_robot=10.5, expires_at_robot=13., map_epoch=1,
+            map_revision=2, released_mission_id='mission1',
+            released_lease_id='lease1', release_id='release1',
+            rollout_mode='supervised')
+        fields.update(changes)
+        return GestureIntent(**fields)
+
+    def readback(self, **changes):
+        status = dict(boot_id='boot1', robot_monotonic_s=11., moving=False,
+            motion_lease_id=None, posture='standing', posture_uncertain=False,
+            fall_suspected=False, scan_age_s=.1,
+            slam={'map_epoch':1, 'map_revision':2, 'map_revision_status':'verified'})
+        status.update(changes)
+        return {'mission':{'id':'mission1','lease_id':'lease1',
+                           'release_id':'release1','state':'completed'}, 'status':status}
+
+    def test_exact_release_and_stale_or_changed_owner(self):
+        a = GestureAdmission(session_id='s1', boot_id='boot1',
+            released_mission_id='mission1', released_lease_id='lease1', release_id='release1')
+        a.check(self.intent(), self.readback(), physical_posture_confirmed=True)
+        for intent, state in (
+            (self.intent(session_id='other'), self.readback()),
+            (self.intent(released_lease_id='other'), self.readback()),
+            (self.intent(), self.readback(motion_lease_id='new-lease')),
+            (self.intent(), self.readback(boot_id='boot2')),
+            (self.intent(), self.readback(slam={'map_epoch':1,'map_revision':3,'map_revision_status':'verified'})),
+            (self.intent(), self.readback(robot_monotonic_s=14)),
+            (self.intent(), self.readback(scan_age_s=2)),
+            (self.intent(), self.readback(posture_uncertain=True)),
+            (self.intent(), self.readback(fall_suspected=True)),
+        ):
+            with self.subTest(intent=intent, state=state):
+                with self.assertRaises(GestureAdmissionError):
+                    a.check(intent, state, physical_posture_confirmed=True)
+        with self.assertRaises(GestureAdmissionError):
+            a.check(self.intent(), self.readback(), physical_posture_confirmed=False)
+
+    def test_claim_once_and_ambiguous_posture_latch(self):
+        a = GestureAdmission(session_id='s1', boot_id='boot1',
+            released_mission_id='mission1', released_lease_id='lease1', release_id='release1')
+        a.check(self.intent(), self.readback(), physical_posture_confirmed=True)
+        a.claim(self.intent())
+        with self.assertRaises(GestureAdmissionError): a.claim(self.intent())
+        a.mark_uncertain('lost_action_receipt')
+        with self.assertRaises(GestureAdmissionError):
+            a.check(self.intent(decision_id='d2'), self.readback(), physical_posture_confirmed=True)
+        restored = GestureAdmission.from_dict(a.to_dict())
+        with self.assertRaises(GestureAdmissionError):
+            restored.check(self.intent(decision_id='d2'), self.readback(), physical_posture_confirmed=True)
 
 
 if __name__ == '__main__':

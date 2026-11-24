@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .skills import GESTURE_IDS, SkillCall, canonical_gesture, validate_skill_call
+from .gesture_policy import GestureAdmission, GestureIntent
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -129,6 +130,61 @@ class BridgeBodyAdapter:
                 or trick.get("name") != canonical or trick.get("id") != GESTURE_IDS[canonical]):
             raise BodyDispatchError("gesture was refused or bridge receipt did not match the request")
         return DispatchResult(True, "gesture", True, False, response)
+
+    def execute_gesture_intent(self, intent: GestureIntent, admission: GestureAdmission,
+                               *, physical_posture_confirmed: bool = False) -> DispatchResult:
+        """Supervised-only path; never turn a shadow proposal into motor authority.
+
+        The bridge rechecks admission under its own locks. This host-side
+        preflight cannot close a network TOCTOU gap, nor infer physical stance
+        from a software status after the action. A lost reply is not retried.
+        """
+        preflight = self.mission()
+        admission.check(intent, preflight,
+                        physical_posture_confirmed=physical_posture_confirmed)
+        admission.claim(intent)  # One-shot before any potentially accepted POST.
+        response = None
+        error = None
+        final = None
+        try:
+            response = self._json('/action', {'name': intent.name, 'release': {
+                'boot_id': intent.boot_id, 'mission_id': intent.released_mission_id,
+                'lease_id': intent.released_lease_id, 'release_id': intent.release_id}})
+        except Exception as exc:
+            error = exc
+        finally:
+            try:
+                final = self.mission()
+            except Exception as exc:
+                error = error or exc
+            # Software 'standing' cannot certify an upright quadruped.
+            admission.mark_uncertain('post_action_physical_posture_unverified'
+                                     if error is None else 'gesture_outcome_uncertain')
+        if error is not None:
+            raise BodyDispatchError('gesture transport or cleanup uncertain') from error
+        trick = response.get('trick') if isinstance(response, dict) else None
+        if (not isinstance(response, dict) or response.get('ok') is not True
+                or response.get('dry_run') is not False
+                or response.get('http_status') is not None
+                or not isinstance(trick, dict) or trick.get('name') != intent.name
+                or trick.get('id') != GESTURE_IDS[intent.name]):
+            raise BodyDispatchError('gesture refused or receipt mismatched; no retry')
+        # A host /stop could cancel a NEW owner's mission after the bridge
+        # action lease ends. Lease cleanup belongs to run_owned_gesture's
+        # finally/watchdog; never issue an unowned global stop here.
+        status = final.get('status') if isinstance(final, dict) else None
+        latest = final.get('mission') if isinstance(final, dict) else None
+        if (not isinstance(status, dict) or not isinstance(latest, dict)
+                or (latest.get('id'), latest.get('lease_id'), latest.get('release_id')) !=
+                   (intent.released_mission_id, intent.released_lease_id, intent.release_id)
+                or status.get('boot_id') != intent.boot_id
+                or status.get('moving') is not False
+                or status.get('motion_lease_id') is not None
+                or status.get('fall_suspected') is not False):
+            raise BodyDispatchError('gesture postflight owner or state unverified')
+        return DispatchResult(True, 'gesture', True, False,
+            {**response, 'bridge_lease_released': True, 'postflight': final,
+             'physical_posture_verified': False})
 
     def dispatch(self, call: SkillCall, *, rollout_mode: str = "shadow",
                  mission_id: str | None = None, lease_id: str | None = None) -> DispatchResult:
