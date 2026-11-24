@@ -3,9 +3,11 @@ Description=Check BEEP hotspot uplink after boot and periodically
 
 [Timer]
 OnBootSec=15s
+# Schedule the first check even if boot-time activation was missed.
+OnActiveSec=20s
+# Reschedule after each completed one-shot run.
 OnUnitInactiveSec=20s
 Unit=beep-uplink-repair.service
-Persistent=true
 
 [Install]
 WantedBy=timers.target
