@@ -211,8 +211,8 @@ def main():
     p.add_argument('--memory-updates-json')
     p.add_argument('--person-id')
     p.add_argument('--speaker-gain', type=float, default=3.0)
-    p.add_argument('--language', choices=('en', 'de'), default='en',
-                   help='Reply language: en/Sonia or de/Tanja (no automatic translation)')
+    p.add_argument('--language', default='en',
+                   help='Reply language code or locale (en, de, es, fr, zh, pt-BR...); no automatic translation')
     p.add_argument('--tts-voice', help='Optional Edge Neural voice in the selected language')
     p.add_argument('--bridge-url', help='Direct bridge audio over HTTP; Jupyter syncs semantic memory only')
     args = p.parse_args()

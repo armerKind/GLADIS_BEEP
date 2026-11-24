@@ -25,13 +25,27 @@ For later consented stationary commissioning, provide `--memory-file`, `--consen
 
 # Telegram-to-BEEP stationary social relay (no USB mic)
 
-**English/German voice switch (host-side):** Pass `--language en` for the
+**Multilingual voice switch (host-side):** Pass `--language en` for the
 existing `en-GB-SoniaNeural`, or `--language de` for the verified available
 `de-DE-TanjaNeural` to either `scripts.social_relay --speak` (legacy and
 `--bridge-url` routes) or `scripts.run_social_voice --speak`. English remains
-the default. This is a TTS voice/language selector, **not a translation
-service**: GLADIS must compose the actual `--reply` in German when speaking
-to Max's children, using their German Telegram transcript as input. An
+the default. Also bundled: Spanish `es-ES-ElviraNeural`, French
+`fr-FR-DeniseNeural`, Mandarin Chinese (simplified) `zh-CN-XiaoxiaoNeural`,
+Italian `it-IT-IsabellaNeural`, and Japanese `ja-JP-NanamiNeural`. Other
+two- or three-letter language codes or locales such as `pt-BR` query Edge's live voice
+catalog and select an available Neural voice for that locale (prefer female); if none
+exists or the catalog fails, the request fails rather than speaking with the
+wrong language. Edge voices are **cloud voices**: they are not installed on
+BEEP or usable offline; on-demand discovery selects a voice, not a local
+voice download. The host requires internet for synthesis.
+
+This is a TTS voice/language selector, **not a translation or standalone
+language-detection service**. GLADIS recognizes the language of a Telegram
+transcript in the existing conversation, writes its reply in that language,
+and passes the matching code with the turn. Short/ambiguous transcripts should
+use the established conversation language or ask, not guess; if nothing is
+indicated, English remains the default. The Pi does not autonomously detect
+the language from its unplugged USB mic. An
 explicit `--tts-voice` must match the selected language; the audio-file
 override is already synthesized and bypasses voice selection. Sample usage:
 
@@ -39,6 +53,10 @@ override is already synthesized and bypasses voice selection. Sample usage:
 python -m scripts.social_relay --speak --bridge-url http://100.100.141.33:8766 \
   --language de --heard-text 'Hallo BEEP!' \
   --reply 'Hallo! Schön, dass ihr da seid. Was habt ihr heute entdeckt?'
+
+# Mandarin Chinese, when the input was actually Chinese:
+python -m scripts.social_relay --speak --bridge-url http://100.100.141.33:8766 \
+  --language zh --heard-text '你好，BEEP！' --reply '你好！今天有什么新发现？'
 ```
 
 The switch was tested on the host; it does not authorize an unsupervised

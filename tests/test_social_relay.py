@@ -139,6 +139,34 @@ class RelayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             social.voice_for_language('en', 'de-DE-TanjaNeural')
 
+    def test_multilingual_voice_selection_and_on_demand_catalog(self):
+        expected = {'es': 'es-ES-ElviraNeural', 'fr': 'fr-FR-DeniseNeural',
+                    'zh': 'zh-CN-XiaoxiaoNeural', 'it': 'it-IT-IsabellaNeural',
+                    'ja': 'ja-JP-NanamiNeural'}
+        for language, voice in expected.items():
+            args = self.args('--speak', '--language', language,
+                             '--heard-text', 'A translated transcript.', '--reply', 'A reply.')
+            self.assertEqual(args.tts_voice, voice)
+        catalog = [{'ShortName': 'pt-BR-AntonioNeural', 'Locale': 'pt-BR', 'Gender': 'Male'},
+                   {'ShortName': 'pt-BR-FranciscaNeural', 'Locale': 'pt-BR', 'Gender': 'Female'}]
+        with patch.object(social, 'edge_voice_catalog', return_value=catalog) as lookup:
+            self.assertEqual(social.voice_for_language('pt-BR'), 'pt-BR-FranciscaNeural')
+            lookup.assert_called_once()
+        with patch.object(social, 'edge_voice_catalog', return_value=catalog):
+            with self.assertRaises(ValueError):
+                social.voice_for_language('xx')
+        with patch.object(social, 'edge_voice_catalog', return_value=[
+                {'ShortName':'fil-PH-AngeloNeural','Locale':'fil-PH','Gender':'Male'},
+                {'ShortName':'fil-PH-BlessicaNeural','Locale':'fil-PH','Gender':'Female'}]):
+            self.assertEqual(social.voice_for_language('fil'), 'fil-PH-BlessicaNeural')
+        with patch.object(social, 'edge_voice_catalog', return_value=[
+                {'ShortName':'pt-BR-AntonioNeural','Locale':'pt-BR','Gender':'Male'}]):
+            self.assertEqual(social.voice_for_language('pt-BR'), 'pt-BR-AntonioNeural')
+        with self.assertRaises(ValueError):
+            social.voice_for_language('zh', 'en-GB-SoniaNeural')
+        with self.assertRaises(ValueError):
+            social.voice_for_language('../zh')
+
     def test_host_direct_relay_passes_language_to_lower_level_cli(self):
         bank = SemanticMemory(self.path)
         bank.save()

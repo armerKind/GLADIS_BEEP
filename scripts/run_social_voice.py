@@ -37,14 +37,40 @@ from beep_audio.vad import HysteresisVad
 from beep_audio.voice_loop import VoiceLoop
 
 
-TTS_VOICES = {'en': 'en-GB-SoniaNeural', 'de': 'de-DE-TanjaNeural'}
+TTS_VOICES = {
+    'en': 'en-GB-SoniaNeural', 'de': 'de-DE-TanjaNeural',
+    'es': 'es-ES-ElviraNeural', 'fr': 'fr-FR-DeniseNeural',
+    'zh': 'zh-CN-XiaoxiaoNeural', 'it': 'it-IT-IsabellaNeural',
+    'ja': 'ja-JP-NanamiNeural',
+}
+
+def edge_voice_catalog() -> list:
+    """Query Edge's available cloud voices; this does not install software."""
+    import edge_tts
+    return asyncio.run(edge_tts.list_voices())
 
 def voice_for_language(language: str, voice: str | None = None) -> str:
-    """Choose an Edge locale without mismatching reply language and voice."""
-    if language not in TTS_VOICES:
-        raise ValueError('language must be en or de')
-    selected = voice or TTS_VOICES[language]
-    if not isinstance(selected, str) or not re.fullmatch(r'[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural', selected):
+    """Select a verified default or discover a new matching Edge voice."""
+    if not isinstance(language, str) or not re.fullmatch(r'[a-z]{2,3}(?:-[A-Z]{2})?', language):
+        raise ValueError('language must be a two/three-letter code or locale such as zh-CN')
+    if voice is None and language in TTS_VOICES:
+        selected = TTS_VOICES[language]
+    elif voice is not None:
+        selected = voice
+    else:
+        try:
+            available = edge_voice_catalog()
+        except Exception as exc:
+            raise ValueError('Edge voice catalog unavailable; cannot select this language') from exc
+        matching = [(item.get('Gender') != 'Female', item['ShortName']) for item in available
+                    if isinstance(item, dict) and isinstance(item.get('ShortName'), str)
+                    and isinstance(item.get('Locale'), str)
+                    and (item['Locale'] == language if '-' in language
+                         else item['Locale'].startswith(language + '-'))]
+        if not matching:
+            raise ValueError(f'no available matching voice for {language}')
+        selected = sorted(matching)[0][1]
+    if not isinstance(selected, str) or not re.fullmatch(r'[a-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural', selected):
         raise ValueError('invalid Edge TTS voice name')
     if not selected.startswith(language + '-'):
         raise ValueError('voice locale must match --language')
@@ -61,8 +87,8 @@ def parse_args(argv=None):
     p.add_argument('--memory-updates-json', help='Transcript-grounded name/room/facts/topics JSON object')
     p.add_argument('--tts-audio-file', type=Path,
                    help='Optional audio generated for --reply by host TTS')
-    p.add_argument('--language', choices=tuple(TTS_VOICES), default='en',
-                   help='Speech language: en (Sonia) or de (Tanja); reply text must already match')
+    p.add_argument('--language', default='en',
+                   help='Speech language code (en, de, es, fr, zh, fil...) or locale (pt-BR); reply text must already match')
     p.add_argument('--tts-voice',
                    help='Optional matching Edge Neural voice; default selected by --language')
     p.add_argument('--bridge-url', help='Direct HTTP speaker bridge origin; host uses its local memory file')
