@@ -37,6 +37,19 @@ from beep_audio.vad import HysteresisVad
 from beep_audio.voice_loop import VoiceLoop
 
 
+TTS_VOICES = {'en': 'en-GB-SoniaNeural', 'de': 'de-DE-TanjaNeural'}
+
+def voice_for_language(language: str, voice: str | None = None) -> str:
+    """Choose an Edge locale without mismatching reply language and voice."""
+    if language not in TTS_VOICES:
+        raise ValueError('language must be en or de')
+    selected = voice or TTS_VOICES[language]
+    if not isinstance(selected, str) or not re.fullmatch(r'[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural', selected):
+        raise ValueError('invalid Edge TTS voice name')
+    if not selected.startswith(language + '-'):
+        raise ValueError('voice locale must match --language')
+    return selected
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--memory-file', type=Path, help='Required for demo/live, not local mic calibration')
@@ -47,9 +60,11 @@ def parse_args(argv=None):
     p.add_argument('--reply', help='GLADIS reply to be spoken, <=240 characters')
     p.add_argument('--memory-updates-json', help='Transcript-grounded name/room/facts/topics JSON object')
     p.add_argument('--tts-audio-file', type=Path,
-                   help='Optional audio generated for --reply by host Hermes/Edge Sonia TTS')
-    p.add_argument('--tts-voice', default='en-GB-SoniaNeural',
-                   help='Edge TTS voice if no host-provided audio file is used')
+                   help='Optional audio generated for --reply by host TTS')
+    p.add_argument('--language', choices=tuple(TTS_VOICES), default='en',
+                   help='Speech language: en (Sonia) or de (Tanja); reply text must already match')
+    p.add_argument('--tts-voice',
+                   help='Optional matching Edge Neural voice; default selected by --language')
     p.add_argument('--bridge-url', help='Direct HTTP speaker bridge origin; host uses its local memory file')
     p.add_argument('--consent', action='store_true', help='Explicit consent for mic capture and cloud ASR/reply/TTS')
     p.add_argument('--person-id', help='Operator-verified speaker ID; do not infer identity from voice')
@@ -76,6 +91,10 @@ def parse_args(argv=None):
         p.error('--memory-file is required except for --calibrate-mic')
     if not math.isfinite(args.speaker_gain):
         p.error('--speaker-gain must be finite')
+    try:
+        args.tts_voice = voice_for_language(args.language, args.tts_voice)
+    except ValueError as exc:
+        p.error(str(exc))
     args.speaker_gain = max(1.0, min(8.0, args.speaker_gain))
     return args
 
@@ -163,7 +182,8 @@ def speak_turn(bank: SemanticMemory, args, *, synthesize=None, play=None,
     updates = (json.loads(args.memory_updates_json) if args.memory_updates_json else None)
     if synthesize is None:
         synthesize = ((lambda _: supplied_audio(args.tts_audio_file)) if args.tts_audio_file
-                      else lambda text: edge_sonia(text, args.tts_voice))
+                      else lambda text: edge_sonia(text, voice_for_language(
+                          getattr(args, 'language', 'en'), getattr(args, 'tts_voice', None))))
     if play is None:
         play = (lambda audio: bridge_playback(audio, args.speaker_gain, args.bridge_url)
                 if args.bridge_url else analog_playback(audio, args.speaker_gain))

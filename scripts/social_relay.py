@@ -23,7 +23,7 @@ import websockets
 os.environ.setdefault('BEEP_HOST', '100.100.141.33')
 from scripts.jupyter_deploy_bridge import BASE, HOST, login
 from beep_agent.memory import SemanticMemory
-from scripts.run_social_voice import edge_sonia, parse_args as social_args, speak_turn
+from scripts.run_social_voice import edge_sonia, parse_args as social_args, speak_turn, voice_for_language
 
 PI_SCRIPT = '/home/pi/beep_social/scripts/run_social_voice.py'
 PI_MEMORY = '/home/pi/beep_social/memory_bank.json'
@@ -33,6 +33,8 @@ def direct_turn(session, xsrf, args) -> dict:
     """Audio uses bridge HTTP; Jupyter carries only the small memory snapshot."""
     if not args.heard_text or not args.reply:
         raise ValueError('--heard-text and --reply required for --speak')
+    language = getattr(args, 'language', 'en')
+    voice = voice_for_language(language, getattr(args, 'tts_voice', None))
     url = BASE + '/api/contents/beep_social/memory_bank.json?content=1'
     prior = session.get(url, timeout=9)
     if prior.status_code != 200:
@@ -47,7 +49,8 @@ def direct_turn(session, xsrf, args) -> dict:
         out.write(original)
     cli = ['--speak', '--memory-file', str(HOST_MEMORY), '--bridge-url', args.bridge_url,
            '--heard-text', args.heard_text, '--reply', args.reply,
-           '--speaker-gain', str(args.speaker_gain)]
+           '--speaker-gain', str(args.speaker_gain), '--language', language,
+           '--tts-voice', voice]
     if args.person_id:
         cli += ['--person-id', args.person_id]
     if args.memory_updates_json:
@@ -78,6 +81,8 @@ def direct_turn(session, xsrf, args) -> dict:
         raise RuntimeError('Pi final conversation differs from delivered turn')
     receipt['memory_sync_s'] = round(time.perf_counter() - started, 3)
     receipt['verified_conversation_count'] = len(conversations)
+    receipt['language'] = language
+    receipt['tts_voice'] = voice
     return receipt
 
 async def execute(session, xsrf, code: str, *, timeout=55) -> dict:
@@ -128,10 +133,12 @@ def relay(args) -> dict:
     if len(args.heard_text) > 500 or len(args.reply) > 240:
         raise ValueError('turn text exceeds bounded memory or speech limits')
     updates = json.loads(args.memory_updates_json) if args.memory_updates_json else None
-    # The local Sonia voice is configured in Hermes; no chat/OpenAI API key.
-    audio = edge_sonia(args.reply, 'en-GB-SoniaNeural')
+    # Keyless Edge TTS on the host; no chat/OpenAI API key.
+    language = getattr(args, 'language', 'en')
+    voice = voice_for_language(language, getattr(args, 'tts_voice', None))
+    audio = edge_sonia(args.reply, voice)
     if not 0 < len(audio) <= 2_000_000:
-        raise RuntimeError('Sonia TTS returned invalid or oversized audio')
+        raise RuntimeError('Edge TTS returned invalid or oversized audio')
     name = 'relay-' + uuid.uuid4().hex + '.mp3'
     url = BASE + '/api/contents/beep_social/' + name
     headers = {'X-XSRFToken': xsrf, 'Content-Type': 'application/json'}
@@ -204,6 +211,9 @@ def main():
     p.add_argument('--memory-updates-json')
     p.add_argument('--person-id')
     p.add_argument('--speaker-gain', type=float, default=3.0)
+    p.add_argument('--language', choices=('en', 'de'), default='en',
+                   help='Reply language: en/Sonia or de/Tanja (no automatic translation)')
+    p.add_argument('--tts-voice', help='Optional Edge Neural voice in the selected language')
     p.add_argument('--bridge-url', help='Direct bridge audio over HTTP; Jupyter syncs semantic memory only')
     args = p.parse_args()
     print(json.dumps(relay(args), ensure_ascii=False))

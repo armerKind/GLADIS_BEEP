@@ -124,6 +124,46 @@ class RelayTests(unittest.TestCase):
         self.assertIn('highpass=f=300,volume=4.500,alimiter=limit=0.95:level=0', run.call_args_list[2].args[0])
         self.assertEqual(run.call_args_list[3].args[0][-1], 'plughw:2,0')
 
+    def test_language_switch_selects_matching_voice_before_synthesis(self):
+        for language, expected in (('en', 'en-GB-SoniaNeural'),
+                                   ('de', 'de-DE-TanjaNeural')):
+            args = self.args('--speak', '--language', language,
+                             '--heard-text', 'Hallo.', '--reply', 'Guten Tag.')
+            with (patch.object(social, 'edge_sonia', return_value=b'mp3') as tts,
+                  redirect_stdout(io.StringIO())):
+                social.speak_turn(SemanticMemory(self.path), args, play=lambda _: True,
+                                  authority=lambda: (None, None, True))
+            tts.assert_called_once_with('Guten Tag.', expected)
+        with self.assertRaises(ValueError):
+            social.voice_for_language('de', 'en-GB-SoniaNeural')
+        with self.assertRaises(ValueError):
+            social.voice_for_language('en', 'de-DE-TanjaNeural')
+
+    def test_host_direct_relay_passes_language_to_lower_level_cli(self):
+        bank = SemanticMemory(self.path)
+        bank.save()
+        class Response:
+            status_code = 200
+            def __init__(self, content): self.content = content
+            def raise_for_status(self): pass
+            def json(self): return {'content': self.content}
+        class Session:
+            def __init__(self, content): self.content = content
+            def get(self, url, timeout): return Response(self.content)
+            def put(self, url, headers, json, timeout):
+                self.content = json['content']; return Response(self.content)
+        session = Session(self.path.read_text())
+        args = SimpleNamespace(heard_text='Hallo', reply='Hallo zurück', person_id=None,
+                               memory_updates_json=None, speaker_gain=3.0, language='de',
+                               bridge_url='http://beep.invalid:8766')
+        def delivered(local_bank, cli):
+            self.assertEqual(cli.language, 'de')
+            local_bank.record_conversation(heard_text=args.heard_text, spoken_reply=args.reply)
+            print(json.dumps({'state':'replied','memory_written':True}))
+        with (patch.object(host_relay, 'HOST_MEMORY', Path(self.tmp.name)/'german_bank.json'),
+              patch.object(host_relay, 'speak_turn', side_effect=delivered)):
+            self.assertEqual(host_relay.direct_turn(session, 'xsrf', args)['verified_conversation_count'], 1)
+
     def test_host_relays_audio_and_verifies_cleanup_without_chat_api(self):
         class Response:
             status_code = 200
@@ -144,14 +184,15 @@ class RelayTests(unittest.TestCase):
             def delete(self, *args, **kwargs):
                 raise AssertionError('unlink should not need delete-to-trash fallback')
         session = Session()
-        args = SimpleNamespace(read_context=False, heard_text='Hello', reply='Hello back',
-            memory_updates_json=None, person_id=None, speaker_gain=4.0)
+        args = SimpleNamespace(read_context=False, heard_text='Hallo', reply='Hallo zurück',
+            memory_updates_json=None, person_id=None, speaker_gain=4.0, language='de')
         outputs = AsyncMock(side_effect=[{'state':'replied','memory_written':True},
                                          {'removed':True}])
         with (patch.object(host_relay, 'login', return_value=(session, 'xsrf')),
-              patch.object(host_relay, 'edge_sonia', return_value=b'fake-mp3'),
+              patch.object(host_relay, 'edge_sonia', return_value=b'fake-mp3') as tts,
               patch.object(host_relay, 'execute', outputs)):
             result = host_relay.relay(args)
+        tts.assert_called_once_with('Hallo zurück', 'de-DE-TanjaNeural')
         self.assertTrue(result['memory_written'])
         self.assertIn('relay-', session.asserted_url)
         self.assertEqual(session.reads, 2)

@@ -25,9 +25,28 @@ For later consented stationary commissioning, provide `--memory-file`, `--consen
 
 # Telegram-to-BEEP stationary social relay (no USB mic)
 
+**English/German voice switch (host-side):** Pass `--language en` for the
+existing `en-GB-SoniaNeural`, or `--language de` for the verified available
+`de-DE-TanjaNeural` to either `scripts.social_relay --speak` (legacy and
+`--bridge-url` routes) or `scripts.run_social_voice --speak`. English remains
+the default. This is a TTS voice/language selector, **not a translation
+service**: GLADIS must compose the actual `--reply` in German when speaking
+to Max's children, using their German Telegram transcript as input. An
+explicit `--tts-voice` must match the selected language; the audio-file
+override is already synthesized and bypasses voice selection. Sample usage:
+
+```bash
+python -m scripts.social_relay --speak --bridge-url http://100.100.141.33:8766 \
+  --language de --heard-text 'Hallo BEEP!' \
+  --reply 'Hallo! Schön, dass ihr da seid. Was habt ihr heute entdeckt?'
+```
+
+The switch was tested on the host; it does not authorize an unsupervised
+physical gesture, microphone capture, or live speaker playback.
+
 **Direct-audio variant (bridge `0.22.13`):** On a host with its Tailscale peer
 connected, run `python -m scripts.social_relay --speak --bridge-url http://100.100.141.33:8766 --heard-text '...' --reply '...'`. The host
-synthesizes Sonia and posts the in-memory MP3 directly to `POST /audio/play`.
+synthesizes the selected English/German voice and posts the in-memory MP3 directly to `POST /audio/play`.
 The bridge discovers `Headphones`, applies the 300 Hz high-pass/gain/limiter,
 and confirms `aplay`. The host then commits its bounded semantic memory copy
 and synchronizes the confirmed JSON snapshot to BEEP through Jupyter (no audio
