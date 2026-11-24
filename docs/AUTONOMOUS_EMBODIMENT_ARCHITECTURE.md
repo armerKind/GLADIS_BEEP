@@ -2,6 +2,8 @@
 
 **Status:** design contract, not a deployed controller. Revised November 8, 2026 after review of the original implementation plan and Gemini's proposed refinements, including five implementation traps. This tracked document is the canonical architecture; the earlier local plan is not required to read it. No part of this document authorizes physical motion.
 
+**Offline implementation checkpoint (November 24):** `GesturePolicy` is a bounded, persistent proposal filter with initial wave_hand/pray/stretch allowlist. `GestureIntent`/`GestureAdmission` require exact released mission provenance, fresh matching bridge state, and independently confirmed physical posture; the bridge latches posture uncertainty for posture-changing generic actions. `ShadowLifeLoop` and `run_beep_life_loop.py` replay synthetic scenes across a checkpoint/restart, with a separate stationary evidence path and **no motor dispatcher or robot connection**. This is not an integrated live LifeLoop or permission for automatic gestures. Supervised physical trials and independent review remain later gates.
+
 ## Objective and identity
 
 BEEP should behave as a coherent, self-directed robot dog: GLADIS chooses and revises goals from a durable lifetime charter, memory, LiDAR/map, moving video, audio, and the consequences of its actions. Max may override or talk to it, but need not supply an object or route each session. “Consciousness-simulating” means continuity of attention, experience, curiosity and social response—not a claim of subjective sentience. The cap was a replaceable perception test, not the organism's life purpose.

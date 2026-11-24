@@ -102,6 +102,8 @@ class RepertoireTests(unittest.TestCase):
         self.assertEqual(result[0][1]['trick']['id'], 13)
         self.assertIsNotNone(observed[0][1])
         self.assertIsNone(bridge.state['motion_lease_id'])
+        self.assertTrue(bridge.snapshot()['posture_uncertain'])
+        self.assertEqual(self.post({'name':'pray'})[0],409)
 
     def test_adapter_dispatch_requires_supervised_and_validated_name(self):
         adapter = BridgeBodyAdapter('http://beep.invalid')

@@ -151,7 +151,7 @@ TRICK_ACTIONS = {
     "seek": {"id": 18, "label": "Seek", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["search_pose"]},
     "handshake": {"id": 19, "label": "Handshake", "duration_s": 3.0, "safe_for_fair": False, "aliases": ["shake_hand", "shake_paw"]},
 }
-POSTURE_UNCERTAIN_ACTION_IDS = frozenset({1, 3, 4, 6})
+# Generic SDK actions cannot prove physical uprightness after completion.
 # SDK action mappings are vendor-source-derived, NOT commissioned on this S2.
 # Keep overrides explicit; do not invent app protocol bytes for postures.
 POSTURE_ACTIONS = {
@@ -209,7 +209,7 @@ state = {
     "moving": False,
     "posture": "standing",
     "posture_action_acknowledged": False,
-    "posture_uncertain": False,
+    "posture_uncertain": True,  # Cold start is not physical posture evidence.
     "motion_cancelled": False,
     "motion_lease_id": None,
     "motion_lease_source": None,
@@ -491,8 +491,8 @@ def app_packet_guard(action, lease, deadline, stop_seq=None):
         raise MotionCancelled("app packet has no owning lease")
     if action == "stop":
         return
-    if state["posture"] != "standing":
-        raise MotionBusy("locomotion refused while sitting")
+    if state["posture"] != "standing" or state["posture_uncertain"]:
+        raise MotionBusy("locomotion refused while sitting or posture uncertain")
     if stop_seq is not None and stop_seq != _last_stop_seq:
         raise MotionCancelled("app transaction predates stop")
     if time.monotonic() >= deadline:
@@ -3880,7 +3880,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
                     resolved = resolve_trick(name=name, action_id=action_id)
-                    sensitive = resolved["id"] in POSTURE_UNCERTAIN_ACTION_IDS or resolved["name"].startswith("raw_")
+                    sensitive = True  # Generic SDK action has unmeasured physical aftermath.
                     self.send_json(run_owned_gesture("http_get_trick", lambda: sdk_trick(name=name, action_id=action_id, dry_run=False, settle_s=settle),
                         max_duration=settle_limit + 2.0, posture_sensitive=sensitive))
             elif p.path == "/mark_object":
@@ -4016,7 +4016,7 @@ class Handler(BaseHTTPRequestHandler):
                     settle_limit = 8.0 if settle is None else min(8.0, max(0.0, float(settle)))
                     resolved = resolve_trick(name=body.get("name", body.get("action", body.get("trick"))),
                                              action_id=body.get("id", body.get("action_id")))
-                    sensitive = resolved["id"] in POSTURE_UNCERTAIN_ACTION_IDS or resolved["name"].startswith("raw_")
+                    sensitive = True  # Generic SDK action has unmeasured physical aftermath.
                     self.send_json(run_owned_gesture("http_post_trick", callback,
                         max_duration=settle_limit + 2.0, posture_sensitive=sensitive,
                         expected_release=body.get("release") if "release" in body else None))
