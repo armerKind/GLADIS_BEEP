@@ -45,7 +45,7 @@ def main() -> None:
         from beep_agent.supervised_wave import supervised_wave_cycle, SupervisedWaveError
         from scripts.run_social_voice import bridge_playback, edge_sonia, supplied_audio
         bank=SemanticMemory(args.memory_file)
-        adapter=BridgeBodyAdapter(args.bridge_url)
+        adapter=BridgeBodyAdapter(args.bridge_url, timeout_s=20.)
         synth=(lambda _: supplied_audio(args.audio_file)) if args.audio_file else (
                lambda text: edge_sonia(text,'en-GB-SoniaNeural'))
         play=lambda audio: bridge_playback(audio,args.gain,args.bridge_url)
