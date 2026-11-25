@@ -65,7 +65,7 @@ class ShadowLoopTests(unittest.TestCase):
 
     def test_real_cli_replays_checkpoint_with_network_calls_forbidden(self):
         script=Path(__file__).resolve().parents[1]/'scripts'/'run_beep_life_loop.py'
-        argv=['run_beep_life_loop.py','--shadow','--output-root',str(self.root)]
+        argv=['run_beep_life_loop.py','--output-root',str(self.root)]
         output=io.StringIO()
         with patch.object(sys,'argv',argv), redirect_stdout(output), \
              patch.object(socket.socket,'connect',side_effect=AssertionError('network forbidden')), \

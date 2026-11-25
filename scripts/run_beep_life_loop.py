@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay saved synthetic LifeLoop windows. Strictly no robot or motor I/O."""
+"""Shadow fixture replay by default; supervised one-shot wave only by opt-in."""
 from __future__ import annotations
 
 import argparse
@@ -14,15 +14,55 @@ from beep_agent.life_loop import ShadowLifeLoop  # noqa: E402
 
 def main() -> None:
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--shadow',action='store_true',required=True,
-                        help='mandatory shadow-only mode; no dispatch option exists')
+    modes=parser.add_mutually_exclusive_group()
+    modes.add_argument('--shadow',action='store_true',help='offline fixture replay (default)')
+    modes.add_argument('--supervised-wave',action='store_true',
+                       help='one operator-triggered wave + audio + stand; never automatic')
     parser.add_argument('--fixture',type=Path,
         default=ROOT/'tests'/'fixtures'/'life_loop_shadow_events.json')
     parser.add_argument('--output-root',type=Path,required=True,
                         help='local checkpoint and trace directory')
     parser.add_argument('--split-at',type=int,default=4,
                         help='simulate process restart before this event')
+    parser.add_argument('--bridge-url',default=None)
+    parser.add_argument('--memory-file',type=Path,default=None)
+    parser.add_argument('--person-id',default=None,
+                        help='exact operator-confirmed memory ID; no visual recognition')
+    parser.add_argument('--audio-file',type=Path,default=None,
+                        help='optional pre-rendered MP3/WAV greeting')
+    parser.add_argument('--physical-confirmed',action='store_true',
+                        help='nearby operator has confirmed stable standing and clear floor')
+    parser.add_argument('--gain',type=float,default=3.)
     args=parser.parse_args()
+    if args.supervised_wave:
+        if (not args.bridge_url or args.memory_file is None or not args.physical_confirmed
+                or not 0.1 <= args.gain <= 3.):
+            parser.error('--supervised-wave needs --bridge-url, --memory-file, '
+                         '--physical-confirmed and gain within 0.1..3')
+        from uuid import uuid4
+        from beep_agent.body import BridgeBodyAdapter
+        from beep_agent.memory import SemanticMemory
+        from beep_agent.supervised_wave import supervised_wave_cycle, SupervisedWaveError
+        from scripts.run_social_voice import bridge_playback, edge_sonia, supplied_audio
+        bank=SemanticMemory(args.memory_file)
+        adapter=BridgeBodyAdapter(args.bridge_url)
+        synth=(lambda _: supplied_audio(args.audio_file)) if args.audio_file else (
+               lambda text: edge_sonia(text,'en-GB-SoniaNeural'))
+        play=lambda audio: bridge_playback(audio,args.gain,args.bridge_url)
+        try:
+            result=supervised_wave_cycle(adapter,bank,event_id='operator-'+uuid4().hex,
+                physical_posture_confirmed=True,synthesize=synth,play=play,
+                person_id=args.person_id)
+        except SupervisedWaveError as exc:
+            result={**exc.report,'error':str(exc)}
+            args.output_root.mkdir(parents=True,exist_ok=True)
+            (args.output_root/'supervised_wave_result.json').write_text(json.dumps(result,indent=2)+'\n')
+            print(json.dumps(result,sort_keys=True))
+            raise SystemExit(1) from exc
+        args.output_root.mkdir(parents=True,exist_ok=True)
+        (args.output_root/'supervised_wave_result.json').write_text(json.dumps(result,indent=2)+'\n')
+        print(json.dumps(result,sort_keys=True))
+        return
     # The CLI accepts local fixture JSON only; URLs cannot become I/O endpoints.
     if args.fixture.suffix != '.json' or not args.fixture.is_file():
         parser.error('fixture must be an existing local JSON file')

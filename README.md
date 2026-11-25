@@ -118,13 +118,13 @@ scripts/probe_bridge_perception.py       # Probe camera, microphone, API latency
 scripts/run_moving_eyes.py               # Continuous 4/6/9-frame moving vision → shadow AgentSession
 scripts/run_beep_explore.py              # One bounded coverage mission + parallel moving eyes
 scripts/run_beep_autonomy.py             # Offline observe-only supervisor replay
-scripts/run_beep_life_loop.py            # Synthetic shadow LifeLoop; no motor/HTTP dispatcher
+scripts/run_beep_life_loop.py            # Shadow default; explicit supervised one-shot wave opt-in
 scripts/replay_goal_coordinator.py       # Offline goal-coordinator replay over recorded packets
 scripts/install_systemd_service.py       # Install the bridge systemd service
 scripts/save_slam_map.sh                 # Pi-side Cartographer exporter
 ```
 
-Offline LifeLoop replay: `python scripts/run_beep_life_loop.py --shadow --output-root /path/to/local/trace-dir`. It uses saved synthetic events, persists a session/policy checkpoint across a simulated restart, and never connects to BEEP. The initial proposal policy permits only wave_hand/pray/stretch; supervised gesture admission is a separate gated adapter. Neither this shell nor one observed vendor gesture authorizes autonomous physical gesture dispatch.
+Offline LifeLoop replay (default): `python scripts/run_beep_life_loop.py --output-root /path/to/local/trace-dir`. It uses saved synthetic events, persists a session/policy checkpoint across a simulated restart, and never connects to BEEP. The initial proposal policy permits only wave_hand/pray/stretch; one explicit `--supervised-wave` mode adds a **single operator-confirmed** wave, greeting audio, and stand recovery under fresh stationary admission. No automatic physical LifeLoop dispatch exists. A software stand receipt cannot replace the nearby observer's physical check.
 
 Jupyter helpers default to `192.168.8.88`; set `BEEP_HOST=beep.tailb08b32.ts.net` for the Tailscale path. The source retains Yahboom's vendor-default Jupyter password for the stock image; use `BEEP_JUPYTER_PASSWORD` for any changed credential and never commit private alternatives or tokens.
 

@@ -26,6 +26,30 @@ def fixture():
 
 
 class IntentDispatchTests(unittest.TestCase):
+    def test_explicit_stationary_preflight_requires_no_latest_owner(self):
+        intent, gate, readback, receipt = fixture()
+        from dataclasses import replace
+        intent=replace(intent, released_mission_id='stationary_preflight',
+                       released_lease_id='none', release_id='d1',stationary_preflight=True)
+        gate=GestureAdmission(session_id='s',boot_id='boot',
+            released_mission_id='stationary_preflight', released_lease_id='none',
+            release_id='d1')
+        readback={**readback,'mission':None}
+        adapter=BridgeBodyAdapter('http://invalid')
+        with patch.object(adapter,'_json',side_effect=[readback,receipt,readback]) as http:
+            result=adapter.execute_gesture_intent(intent,gate,physical_posture_confirmed=True)
+        self.assertTrue(result.dispatched)
+        self.assertEqual(http.call_args_list[1].args[1],{'name':'wave_hand'})
+        bad={**readback,'mission':{'id':'new','state':'running'}}
+        second=replace(intent,decision_id='d2',event_id='e2',release_id='d2')
+        gate2=GestureAdmission(session_id='s',boot_id='boot',
+            released_mission_id='stationary_preflight',released_lease_id='none',
+            release_id='d2')
+        with patch.object(adapter,'_json',return_value=bad) as http:
+            with self.assertRaises(GestureAdmissionError):
+                adapter.execute_gesture_intent(second,gate2,physical_posture_confirmed=True)
+            http.assert_called_once_with('/mission')
+
     def test_preflight_denies_without_http_action(self):
         intent, gate, readback, _ = fixture()
         adapter = BridgeBodyAdapter('http://invalid')

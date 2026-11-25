@@ -128,6 +128,7 @@ class GestureIntent:
     released_lease_id: str
     release_id: str
     rollout_mode: str = 'shadow'
+    stationary_preflight: bool = False
 
     def __post_init__(self):
         for field in ('decision_id', 'session_id', 'boot_id', 'event_id',
@@ -139,6 +140,10 @@ class GestureIntent:
             raise GestureAdmissionError('gesture is outside the initial LifeLoop allowlist')
         if self.rollout_mode not in ('shadow', 'supervised'):
             raise GestureAdmissionError('invalid gesture rollout mode')
+        if type(self.stationary_preflight) is not bool or (self.stationary_preflight and
+                (self.released_mission_id, self.released_lease_id, self.release_id) !=
+                ('stationary_preflight', 'none', self.decision_id)):
+            raise GestureAdmissionError('invalid explicit stationary preflight identity')
         times = (self.observed_at_robot, self.issued_at_robot, self.expires_at_robot)
         if (any(type(t) not in (int, float) or not math.isfinite(t) for t in times)
                 or not 0 <= times[0] <= times[1] < times[2]
@@ -182,10 +187,13 @@ class GestureAdmission:
         if intent.decision_id in self.claimed or intent.event_id in self.claimed_events:
             raise GestureAdmissionError('duplicate gesture intent')
         latest = readback.get('mission') if isinstance(readback, dict) else None
-        if (not isinstance(latest, dict) or latest.get('state') not in
-                ('completed', 'cancelled', 'failed')
-                or (latest.get('id'), latest.get('lease_id'), latest.get('release_id')) !=
-                   (intent.released_mission_id, intent.released_lease_id, intent.release_id)):
+        if intent.stationary_preflight:
+            if latest is not None:
+                raise GestureAdmissionError('explicit stationary preflight has mission owner')
+        elif (not isinstance(latest, dict) or latest.get('state') not in
+              ('completed', 'cancelled', 'failed')
+              or (latest.get('id'), latest.get('lease_id'), latest.get('release_id')) !=
+                 (intent.released_mission_id, intent.released_lease_id, intent.release_id)):
             raise GestureAdmissionError('exact mission-release readback missing')
         s = readback.get('status')
         if not isinstance(s, dict):

@@ -147,9 +147,10 @@ class BridgeBodyAdapter:
         error = None
         final = None
         try:
-            response = self._json('/action', {'name': intent.name, 'release': {
+            payload = {'name': intent.name} if intent.stationary_preflight else {'name': intent.name, 'release': {
                 'boot_id': intent.boot_id, 'mission_id': intent.released_mission_id,
-                'lease_id': intent.released_lease_id, 'release_id': intent.release_id}})
+                'lease_id': intent.released_lease_id, 'release_id': intent.release_id}}
+            response = self._json('/action', payload)
         except Exception as exc:
             error = exc
         finally:
@@ -174,9 +175,11 @@ class BridgeBodyAdapter:
         # finally/watchdog; never issue an unowned global stop here.
         status = final.get('status') if isinstance(final, dict) else None
         latest = final.get('mission') if isinstance(final, dict) else None
-        if (not isinstance(status, dict) or not isinstance(latest, dict)
-                or (latest.get('id'), latest.get('lease_id'), latest.get('release_id')) !=
-                   (intent.released_mission_id, intent.released_lease_id, intent.release_id)
+        release_ok = (latest is None if intent.stationary_preflight else
+            isinstance(latest, dict) and
+            (latest.get('id'), latest.get('lease_id'), latest.get('release_id')) ==
+            (intent.released_mission_id, intent.released_lease_id, intent.release_id))
+        if (not isinstance(status, dict) or not release_ok
                 or status.get('boot_id') != intent.boot_id
                 or status.get('moving') is not False
                 or status.get('motion_lease_id') is not None
