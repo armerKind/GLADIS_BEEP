@@ -28,7 +28,15 @@ def parse_args():
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument("--inference-interval", type=float, default=2.0)
     parser.add_argument("--target", default="scene")
+    parser.add_argument("--memory-file", type=Path,
+                        help="existing host semantic bank; never stores raw frames")
     parser.add_argument("--mock-response", type=Path, help="Offline/test perception only")
+    parser.add_argument("--no-cloud-vision", action="store_true",
+                        help="LiDAR mission only: child makes no camera or cloud vision requests")
+    parser.add_argument("--vision-switch-file", type=Path,
+                        help="local one-way runtime switch file for an occluded camera")
+    parser.add_argument("--occlusion-audio-file", type=Path,
+                        help="optional pre-rendered one-shot lens-cap reaction")
     parser.add_argument("--max-inferences", type=int, default=0)
     parser.add_argument("--output-root", type=Path, default=Path("captures/eyes/moving"))
     return parser.parse_args()
@@ -37,6 +45,8 @@ def parse_args():
 def run(args, *, adapter=None, runner=None):
     if not 5 <= args.duration <= 600:
         raise ValueError("duration must be within [5, 600]")
+    if getattr(args, 'no_cloud_vision', False) and args.mock_response:
+        raise ValueError('--no-cloud-vision cannot use mock visual responses')
     adapter = adapter or BridgeBodyAdapter(args.base_url, args.timeout)
     runner = runner or subprocess.run
     preflight = adapter.mission()
@@ -76,6 +86,14 @@ def run(args, *, adapter=None, runner=None):
         ]
         if args.mock_response:
             command += ["--mock-response", str(args.mock_response)]
+        if getattr(args, 'memory_file', None) is not None:
+            command += ['--memory-file', str(args.memory_file)]
+        if getattr(args, 'no_cloud_vision', False):
+            command.append('--no-cloud-vision')
+        if getattr(args, 'vision_switch_file', None) is not None:
+            command += ['--vision-switch-file', str(args.vision_switch_file)]
+        if getattr(args, 'occlusion_audio_file', None) is not None:
+            command += ['--occlusion-audio-file', str(args.occlusion_audio_file)]
         if args.max_inferences:
             command += ["--max-inferences", str(args.max_inferences)]
         child_result = runner(command, capture_output=True, text=True, timeout=args.duration + args.timeout + 15)

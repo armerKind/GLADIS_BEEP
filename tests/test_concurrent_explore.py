@@ -162,6 +162,26 @@ class ConcurrentExploreTests(unittest.TestCase):
         self.assertEqual(bridge.calls[1], ("/mission/cancel",
                                            {"mission_id": "mission-exact", "lease_id": "lease-exact"}))
 
+    def test_no_cloud_mode_forwards_to_child_without_visual_mock(self):
+        bridge = FakeBridge()
+        args = options()
+        args.mock_response = None
+        args.no_cloud_vision = True
+        args.memory_file = Path('/local/beep_memory_bank.json')
+        args.vision_switch_file = Path('/local/vision-switch')
+        def child(command, **_kwargs):
+            self.assertIn('--no-cloud-vision', command)
+            self.assertEqual(command[command.index('--memory-file') + 1],
+                             '/local/beep_memory_bank.json')
+            self.assertEqual(command[command.index('--vision-switch-file') + 1],
+                             '/local/vision-switch')
+            self.assertNotIn('--mock-response', command)
+            return subprocess.CompletedProcess(command, 0, stdout='{}', stderr='')
+        result = run(args, adapter=bridge, runner=child)
+        self.assertTrue(result['original_lease_released'])
+        self.assertEqual([path for path, _ in bridge.calls],
+                         ['/mission/start', '/mission/cancel'])
+
     def test_model_failure_still_cancels_exact_mission(self):
         bridge = FakeBridge()
         with self.assertRaisesRegex(RuntimeError, "model failed"):

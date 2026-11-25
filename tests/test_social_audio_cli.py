@@ -37,6 +37,15 @@ class SocialAudioCliTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 social.parse_args()
 
+    def test_no_cloud_flag_drops_visual_context_without_disabling_audio(self):
+        with patch.object(sys, 'argv', ['run_social_voice.py', '--read-context',
+                                        '--memory-file', '/local/bank.json',
+                                        '--visual-context', 'unverified person',
+                                        '--no-cloud-vision']):
+            args = social.parse_args()
+        self.assertTrue(args.no_cloud_vision)
+        self.assertIsNone(args.visual_context)
+
     def test_vad_suggestion_uses_noise_ceiling_and_speech_distribution(self):
         result = social.suggest_vad([18] * 90 + [20] * 10, [35] * 80 + [44] * 20)
         self.assertEqual(result['noise_floor_rms'], 18)

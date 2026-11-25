@@ -1,13 +1,22 @@
 """Host-only HTTP posture and stationary social-view contracts (no robot I/O)."""
+import io
 import json
 import threading
 import unittest
 import urllib.error
 import urllib.request
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from PIL import Image
 
 from beep_bridge import beep_bridge as bridge
 from beep_eyes.social_view import upward_social_turn, SocialViewError
+
+
+def jpeg(color):
+    output = io.BytesIO()
+    Image.new('RGB', (160, 120), color).save(output, 'JPEG')
+    return output.getvalue()
 
 
 class PostureHttpTests(unittest.TestCase):
@@ -123,7 +132,7 @@ class PostureHttpTests(unittest.TestCase):
                 return {'state': 'initiated'}
         voice = FakeVoice()
         with patch.object(bridge, 'sdk_trick', return_value={'ok': True}), \
-             patch.object(bridge, 'capture_frame', return_value=b'\xff\xd8fixture\xff\xd9') as frame:
+             patch.object(bridge, 'capture_frame', return_value=jpeg('gray')) as frame:
             with self.assertRaises(SocialViewError):
                 upward_social_turn(self.origin, voice, lambda jpg: 'A person near BEEP.')
             self.assertEqual(bridge.state['posture'], 'standing')
@@ -139,6 +148,31 @@ class PostureHttpTests(unittest.TestCase):
                                    opt_in=True)
             self.assertEqual(bridge.state['posture'], 'standing')
 
+    def test_local_dark_social_frame_blocks_captioner_and_speaks_reaction(self):
+        class FakeVoice:
+            def read_authority(self): return None, None, True
+            def synthesize(self, text):
+                self.text = text
+                return b'pre-rendered-audio'
+            def play(self, audio):
+                self.audio = audio
+                return True
+        voice = FakeVoice()
+        caption = Mock(side_effect=AssertionError('image provider must not be called'))
+        with patch.object(bridge, 'sdk_trick', return_value={'ok': True}), \
+             patch.object(bridge, 'capture_frame', return_value=jpeg('black')) as frame:
+            result = upward_social_turn(self.origin, voice, caption, opt_in=True)
+            self.assertEqual(result['state'], 'camera_occluded')
+            self.assertTrue(result['audio_confirmed'])
+            self.assertEqual(result['cloud_vision_calls'], 0)
+            self.assertIn('lens cap', voice.text)
+            self.assertEqual(voice.audio, b'pre-rendered-audio')
+            self.assertEqual(bridge.state['posture'], 'standing')
+            self.assertEqual(frame.call_count, 1)
+        caption.assert_not_called()
+        with self.assertRaisesRegex(SocialViewError, 'no-cloud-vision'):
+            upward_social_turn(self.origin, voice, caption, opt_in=True, no_cloud_vision=True)
+
     def test_helper_does_not_claim_stand_after_failed_cleanup(self):
         class FakeVoice:
             def read_authority(self):
@@ -146,7 +180,7 @@ class PostureHttpTests(unittest.TestCase):
             def initiate_turn(self, *, trigger, visual_context):
                 return {'state': 'initiated'}
         with patch.object(bridge, 'sdk_trick', side_effect=({'ok': True}, {'ok': False})), \
-             patch.object(bridge, 'capture_frame', return_value=b'\xff\xd8fixture\xff\xd9'):
+             patch.object(bridge, 'capture_frame', return_value=jpeg('gray')):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 upward_social_turn(self.origin, FakeVoice(), lambda jpg: 'Person nearby.', opt_in=True)
             self.assertEqual(error.exception.code, 409)

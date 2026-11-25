@@ -97,6 +97,8 @@ def parse_args(argv=None):
     p.add_argument('--greet-trigger', choices=('session_start', 'person_noticed'),
                    default='session_start')
     p.add_argument('--visual-context', help='Optional short unverified stationary-view description')
+    p.add_argument('--no-cloud-vision', action='store_true',
+                   help='disable visual context for this session; audio/text cloud services remain separate')
     p.add_argument('--duration', type=float, default=60.0)
     p.add_argument('--onset-rms', type=float, default=850.0, help='Bench placeholder; calibrate before live use')
     p.add_argument('--offset-rms', type=float, default=400.0)
@@ -117,6 +119,8 @@ def parse_args(argv=None):
         p.error('--memory-file is required except for --calibrate-mic')
     if not math.isfinite(args.speaker_gain):
         p.error('--speaker-gain must be finite')
+    if args.no_cloud_vision:
+        args.visual_context = None
     try:
         args.tts_voice = voice_for_language(args.language, args.tts_voice)
     except ValueError as exc:

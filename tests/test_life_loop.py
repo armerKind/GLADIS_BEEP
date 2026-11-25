@@ -63,6 +63,18 @@ class ShadowLoopTests(unittest.TestCase):
         self.assertEqual(runner.process(wrong)['blocked_reason'],'release_mismatch')
         self.assertEqual(runner.http_paths,[])
 
+    def test_no_cloud_shadow_flag_still_has_zero_http_and_dispatch(self):
+        script=Path(__file__).resolve().parents[1]/'scripts'/'run_beep_life_loop.py'
+        argv=['run_beep_life_loop.py','--no-cloud-vision','--output-root',str(self.root)]
+        output=io.StringIO()
+        with patch.object(sys,'argv',argv), redirect_stdout(output), \
+             patch.object(socket.socket,'connect',side_effect=AssertionError('network forbidden')):
+            runpy.run_path(str(script),run_name='__main__')
+        report=json.loads(output.getvalue())
+        self.assertTrue(report['no_cloud_vision'])
+        self.assertEqual(report['http_paths'],[])
+        self.assertFalse(report['dispatch_performed'])
+
     def test_real_cli_replays_checkpoint_with_network_calls_forbidden(self):
         script=Path(__file__).resolve().parents[1]/'scripts'/'run_beep_life_loop.py'
         argv=['run_beep_life_loop.py','--output-root',str(self.root)]

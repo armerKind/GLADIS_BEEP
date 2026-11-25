@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -26,6 +27,7 @@ from beep_agent.live_bridge_observer import LiveBridgeObserver, LiveEvidenceUnav
 from beep_eyes.contact_sheet import fetch_json, fetch_slam_map
 from beep_eyes.gemini import GeminiError, GeminiVisionClient
 from beep_eyes.moving_window import ContinuousMovingCapture
+from beep_eyes.privacy import CameraOccluded, CameraPrivacyError, VisionMode, ensure_visible
 from beep_eyes.schema import validate_perception_response
 
 
@@ -42,6 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--credential-source", choices=("auto", "environment", "hermes"), default="auto")
     parser.add_argument("--hermes-home", default=None)
     parser.add_argument("--mock-response", type=Path)
+    parser.add_argument("--no-cloud-vision", action="store_true",
+                        help="latch out all external image requests; monitor LiDAR mission without camera")
+    parser.add_argument("--vision-switch-file", type=Path,
+                        help="runtime one-way switch: write no-cloud-vision to this local file")
+    parser.add_argument("--occlusion-audio-file", type=Path,
+                        help="pre-rendered MP3/WAV for the one-time camera-occluded warning")
+    parser.add_argument("--audio-gain", type=float, default=3.0)
     parser.add_argument("--allow-no-mission", action="store_true", help="Permit stationary/bench capture")
     parser.add_argument("--max-inferences", type=int, default=0, help="Zero means until duration or mission end")
     parser.add_argument("--output-root", type=Path, default=Path("captures/eyes/moving"))
@@ -148,6 +157,21 @@ def write_window(directory: Path, frames, contact_sheet: bytes, packet: dict, re
     (directory / "semantic_decision.json").write_text(json.dumps(semantic, indent=2, sort_keys=True))
 
 
+def speak_camera_occluded(base_url: str, *, audio_file: Path | None, gain: float) -> bool:
+    """Speak a fixed reaction; no camera bytes enter TTS or the bridge audio POST."""
+    from scripts.run_social_voice import bridge_playback, edge_sonia, supplied_audio
+    text = ("My camera has gone dark. If that is a lens cap, excellent privacy; "
+            "less excellent sightseeing. Please switch me to no-cloud vision mode.")
+    audio = supplied_audio(audio_file) if audio_file else edge_sonia(text, 'en-GB-SoniaNeural')
+    return bridge_playback(audio, gain, base_url)
+
+
+def trace_event(path: Path, event: dict) -> None:
+    with path.open('a') as stream:
+        stream.write(json.dumps(event, sort_keys=True) + '\n')
+    print(json.dumps(event, sort_keys=True), flush=True)
+
+
 def main() -> int:
     args = parse_args()
     bias_mission_enabled = bool(getattr(args, "bias_mission", False))
@@ -161,6 +185,11 @@ def main() -> int:
         raise SystemExit("legacy session-only resume lacks journal/lease identity; use --resume-checkpoint")
     if bias_mission_enabled and args.allow_no_mission:
         raise SystemExit("--bias-mission requires a live autonomous mission")
+    if getattr(args, 'no_cloud_vision', False) and (bias_mission_enabled or args.mock_response):
+        raise SystemExit('--no-cloud-vision cannot use visual bias or mock vision responses')
+    audio_gain = getattr(args, 'audio_gain', 3.0)
+    if not math.isfinite(audio_gain) or not 0.5 <= audio_gain <= 6.0:
+        raise SystemExit('--audio-gain must be finite and within 0.5..6')
     memory_path = getattr(args, "memory_file", None)
     place_label = getattr(args, "place_label", None)
     if place_label and not memory_path:
@@ -182,10 +211,13 @@ def main() -> int:
         raise SystemExit("--mock-response sequence must not be empty")
     mock = (validate_perception_response(raw_mock)
             if raw_mock is not None and mock_sequence is None else None)
-    client = None if mock is not None or mock_sequence is not None else gemini_client(args)
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-moving-" + uuid.uuid4().hex[:8]
     output_dir = args.output_root / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
+    mode = VisionMode(getattr(args, 'vision_switch_file', None) or output_dir / 'vision_mode',
+                      no_cloud_vision=getattr(args, 'no_cloud_vision', False))
+    mode.refresh()  # A pre-existing runtime switch forbids credential loading.
+    client = None if mode.no_cloud_vision or mock is not None or mock_sequence is not None else gemini_client(args)
     trace_path = output_dir / "trace.jsonl"
     # Keep up to thirty seconds of camera history, not only the last three
     # seconds of a nine-panel request. Inference never blocks the capture ring.
@@ -204,11 +236,27 @@ def main() -> int:
     inference_count = 0
     inference_errors = 0
     last_inference_finished = 0.0
-    capture.start()
+    capture_started = False
+    awaiting_switch = False
+    occlusion_events = 0
+    if mode.cloud_allowed:
+        capture.start()
+        capture_started = True
     try:
-        if not capture.ring.wait_for(1, min(args.duration, args.timeout)):
+        if capture_started and not capture.ring.wait_for(1, min(args.duration, args.timeout)):
             raise RuntimeError(f"moving camera did not produce a frame: {capture.stats()}")
         while time.monotonic() < deadline:
+            mode.refresh()
+            if mode.no_cloud_vision or awaiting_switch:
+                if capture_started:
+                    capture.stop()
+                    capture_started = False
+                if not args.allow_no_mission:
+                    monitored = fetch_json(args.base_url, "/mission", args.timeout).get("mission")
+                    if not isinstance(monitored, dict) or monitored.get("state") not in {"starting", "running"}:
+                        break
+                time.sleep(min(0.25, max(0., deadline - time.monotonic())))
+                continue
             if mock_sequence is not None and inference_count >= len(mock_sequence):
                 break
             wait_s = last_inference_finished + args.inference_interval - time.monotonic()
@@ -226,6 +274,33 @@ def main() -> int:
             except Exception as exc:
                 slam_map = {"ok": False, "reason": f"fetch_failed:{type(exc).__name__}"}
             frames, sheet, packet = capture.temporal_window(args.panel, slam_map=slam_map)
+            # Contact sheets contain bright labels; inspect every *raw* JPEG,
+            # including the newest ring sample, before any provider call.
+            if mode.refresh():
+                continue
+            try:
+                for frame in frames:
+                    ensure_visible(frame.jpeg)
+                ensure_visible(capture.ring.latest(1)[-1].frame.jpeg)
+            except CameraPrivacyError as exc:
+                awaiting_switch = True
+                occlusion_events += 1
+                event = {"state": "camera_occluded", "window": inference_count,
+                         "latest_frame_id": frames[-1].frame_id,
+                         "reason": "dark_or_unreadable_local_frame",
+                         "dispatch_performed": False, "occluded_frame_cloud_calls": 0,
+                         "vision_switch_file": str(mode.switch_file)}
+                if isinstance(exc, CameraOccluded):
+                    event["mean_luminance"] = exc.visibility.mean_luminance
+                    event["luminance_stddev"] = exc.visibility.luminance_stddev
+                try:
+                    event["audio_confirmed"] = speak_camera_occluded(args.base_url,
+                        audio_file=getattr(args, 'occlusion_audio_file', None), gain=audio_gain)
+                except Exception as audio_exc:
+                    event["audio_confirmed"] = False
+                    event["audio_error"] = type(audio_exc).__name__
+                trace_event(trace_path, event)
+                continue
             packet["semantic_target"] = None if args.target == "scene" else args.target
             packet["vision_context"] = {
                 "previous_scene_summary": session.world.last_scene_summary,
@@ -249,6 +324,8 @@ def main() -> int:
                 elif mock is not None:
                     response = mock
                 else:
+                    if mode.refresh():
+                        continue
                     assert client is not None
                     response = client.analyze(packet, sheet, frames[-1].jpeg)
             except GeminiError as exc:
@@ -371,7 +448,8 @@ def main() -> int:
             if args.max_inferences and inference_count >= args.max_inferences:
                 break
     finally:
-        capture.stop()
+        if capture_started:
+            capture.stop()
 
     summary = {
         "ok": True,
@@ -381,6 +459,10 @@ def main() -> int:
         "inference_interval_s": args.inference_interval,
         "inferences": inference_count,
         "inference_errors": inference_errors,
+        "occlusion_events": occlusion_events,
+        "vision_mode": ("no_cloud_vision" if mode.no_cloud_vision else
+                        "awaiting_no_cloud_vision" if awaiting_switch else "cloud_vision"),
+        "vision_switch_file": str(mode.switch_file),
         "capture": capture.stats(),
         "dispatch_performed": False,
         "bias_mission_enabled": bias_mission_enabled,

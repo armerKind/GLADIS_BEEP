@@ -126,6 +126,8 @@ scripts/save_slam_map.sh                 # Pi-side Cartographer exporter
 
 Offline LifeLoop replay (default): `python scripts/run_beep_life_loop.py --output-root /path/to/local/trace-dir`. It uses saved synthetic events, persists a session/policy checkpoint across a simulated restart, and never connects to BEEP. The initial proposal policy permits only wave_hand/pray/stretch; one explicit `--supervised-wave` mode adds a **single operator-confirmed** wave, greeting audio, and stand recovery under fresh stationary admission. No automatic physical LifeLoop dispatch exists. A software stand receipt cannot replace the nearby observer's physical check.
 
+Hackathon privacy preparation: [local lens-occlusion gate, one-way `--no-cloud-vision` switch, and Ditzingen host memory bank](docs/vision_privacy.md). This is host-tested source, not a deployed or physically rehearsed camera-cap response.
+
 Jupyter helpers default to `192.168.8.88`; set `BEEP_HOST=beep.tailb08b32.ts.net` for the Tailscale path. The source retains Yahboom's vendor-default Jupyter password for the stock image; use `BEEP_JUPYTER_PASSWORD` for any changed credential and never commit private alternatives or tokens.
 
 ## Networking

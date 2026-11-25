@@ -26,6 +26,8 @@ def main() -> None:
                         help='simulate process restart before this event')
     parser.add_argument('--bridge-url',default=None)
     parser.add_argument('--memory-file',type=Path,default=None)
+    parser.add_argument('--no-cloud-vision',action='store_true',
+                        help='explicit privacy latch; shadow and supervised-wave never use cloud images')
     parser.add_argument('--person-id',default=None,
                         help='exact operator-confirmed memory ID; no visual recognition')
     parser.add_argument('--audio-file',type=Path,default=None,
@@ -54,11 +56,12 @@ def main() -> None:
                 physical_posture_confirmed=True,synthesize=synth,play=play,
                 person_id=args.person_id)
         except SupervisedWaveError as exc:
-            result={**exc.report,'error':str(exc)}
+            result={**exc.report,'error':str(exc),'no_cloud_vision':args.no_cloud_vision}
             args.output_root.mkdir(parents=True,exist_ok=True)
             (args.output_root/'supervised_wave_result.json').write_text(json.dumps(result,indent=2)+'\n')
             print(json.dumps(result,sort_keys=True))
             raise SystemExit(1) from exc
+        result={**result,'no_cloud_vision':args.no_cloud_vision}
         args.output_root.mkdir(parents=True,exist_ok=True)
         (args.output_root/'supervised_wave_result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result,sort_keys=True))
@@ -77,6 +80,7 @@ def main() -> None:
     if runner.http_paths or any(t['dispatch_performed'] or t['motor_authority'] for t in trace):
         raise RuntimeError('shadow-only invariant violated')
     summary={'mode':'synthetic_shadow_only','fixture':args.fixture.name,
+        'no_cloud_vision':args.no_cloud_vision,
         'events':len(trace),'session_id':runner.session.session_id,
         'selected_goal':trace[-1]['selected_goal'],
         'selected_drive':trace[-1]['selected_drive'],

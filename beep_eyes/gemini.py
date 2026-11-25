@@ -13,6 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .privacy import ensure_visible
 from .schema import (
     GEMINI_COMPACT_JSON_SCHEMA,
     PerceptionValidationError,
@@ -103,6 +104,9 @@ class GeminiVisionClient:
         return cls(api_key=key, model=model or os.environ.get("BEEP_EYES_MODEL", DEFAULT_MODEL), timeout_s=timeout_s)
 
     def analyze(self, packet: dict[str, Any], contact_sheet_jpeg: bytes, latest_frame_jpeg: bytes) -> dict[str, Any]:
+        # Defense in depth: the actual unannotated camera JPEG is screened
+        # before either image is encoded or the transport is invoked.
+        ensure_visible(latest_frame_jpeg)
         prompt = (
             "You are the visual perception route for BEEP, a quadruped robot. "
             "The first image is a chronological camera contact sheet with a top-down Cartographer map/context band; the second is the latest full-resolution camera frame. "
