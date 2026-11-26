@@ -64,7 +64,9 @@ def run(args, *, adapter=None, runner=None):
     started = False
     mission_id = lease_id = None
     child_result = None
-    outcome = {}
+    outcome = {"accepted": False, "eyes_exit_code": None,
+               "perception_outcome": "not_started", "motion_outcome": "not_started",
+               "motion_reason": None, "cleanup_requested": False}
     try:
         response = adapter._json("/mission/start", {
             "mode": "coverage", "duration_s": args.duration,
@@ -72,7 +74,10 @@ def run(args, *, adapter=None, runner=None):
         })
         started = response.get("accepted") is True
         if not started:
-            return {"accepted": False, "reason": response.get("reason") or response.get("error")}
+            outcome.update({"motion_outcome": "start_rejected",
+                            "reason": response.get("reason") or response.get("error"),
+                            "motion_reason": response.get("reason") or response.get("error")})
+            return outcome
         mission = response.get("mission") or {}
         mission_id, lease_id = mission.get("id"), mission.get("lease_id")
         if not mission_id or not lease_id:
@@ -99,6 +104,7 @@ def run(args, *, adapter=None, runner=None):
         child_result = runner(command, capture_output=True, text=True, timeout=args.duration + args.timeout + 15)
         outcome.update({"accepted": True, "mission_id": mission_id, "lease_id": lease_id,
                         "eyes_exit_code": child_result.returncode,
+                        "perception_outcome": ("completed" if child_result.returncode == 0 else "failed"),
                         "eyes_output": child_result.stdout[-3000:],
                         "eyes_error": child_result.stderr[-1000:]})
         return outcome
@@ -110,7 +116,10 @@ def run(args, *, adapter=None, runner=None):
                 if (mission_id and lease_id and active.get("id") == mission_id
                         and active.get("lease_id") == lease_id
                         and active.get("state") in {"starting", "running"}):
-                    adapter._json("/mission/cancel", {"mission_id": mission_id, "lease_id": lease_id})
+                    outcome["cleanup_requested"] = True
+                    cancel_reply = adapter._json("/mission/cancel", {"mission_id": mission_id,
+                                                                       "lease_id": lease_id})
+                    outcome["cleanup_acknowledged"] = cancel_reply.get("cancelled") is True
                 # Cancellation and natural mission completion both release
                 # asynchronously; never report cleanup failure mid-finally.
                 for _ in range(12):
@@ -121,9 +130,25 @@ def run(args, *, adapter=None, runner=None):
                 if current["status"].get("motion_lease_id") == lease_id:
                     raise RuntimeError("mission cleanup unverified: original lease still active")
                 final_mission = current.get("mission") or {}
-                outcome["final_mission_state"] = (final_mission.get("state")
-                                                  if final_mission.get("id") == mission_id else "replaced")
-                outcome["original_lease_released"] = True
+                final_state = (final_mission.get("state") if final_mission.get("id") == mission_id
+                               else "replaced")
+                mission_result = final_mission.get("result") or {}
+                motion_reason = final_mission.get("error")
+                if not motion_reason and isinstance(mission_result, dict):
+                    motion_reason = mission_result.get("reason")
+                if final_state == "failed":
+                    motion_outcome = "failed"
+                elif final_state == "completed":
+                    motion_outcome = "completed"
+                elif (final_state == "cancelled" and outcome["cleanup_requested"]
+                      and outcome.get("cleanup_acknowledged") is True):
+                    motion_outcome = "intentional_cleanup"
+                else:
+                    motion_outcome = "unverified_or_external_termination"
+                outcome.update({"final_mission_state": final_state,
+                                "original_lease_released": True,
+                                "motion_outcome": motion_outcome,
+                                "motion_reason": motion_reason})
             except Exception as exc:
                 # Do not hide an earlier model error or invent a successful stop.
                 print(json.dumps({"cleanup_unverified": str(exc), "mission_id": mission_id,
@@ -134,7 +159,8 @@ def run(args, *, adapter=None, runner=None):
 def main():
     result = run(parse_args())
     print(json.dumps(result, sort_keys=True))
-    return 0 if result.get("accepted") and result.get("eyes_exit_code") == 0 else 1
+    return 0 if (result.get("accepted") and result.get("eyes_exit_code") == 0
+                 and result.get("motion_outcome") in {"completed", "intentional_cleanup"}) else 1
 
 
 if __name__ == "__main__":

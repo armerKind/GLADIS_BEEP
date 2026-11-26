@@ -235,6 +235,8 @@ def main() -> int:
     deadline = time.monotonic() + args.duration
     inference_count = 0
     inference_errors = 0
+    repeated_window_skips = 0
+    last_processed_frame_id: str | None = None
     last_inference_finished = 0.0
     capture_started = False
     awaiting_switch = False
@@ -269,6 +271,12 @@ def main() -> int:
                 not isinstance(mission, dict) or mission.get("state") not in {"starting", "running"}
             ):
                 break
+            if (last_processed_frame_id is not None and
+                    capture.ring.latest(1)[-1].frame.frame_id == last_processed_frame_id):
+                repeated_window_skips += 1
+                capture.ring.wait_for_newer(last_processed_frame_id,
+                    min(0.25, max(0.0, deadline - time.monotonic())))
+                continue
             try:
                 slam_map = fetch_slam_map(args.base_url, args.timeout)
             except Exception as exc:
@@ -317,6 +325,17 @@ def main() -> int:
             }
             packet["mission"] = mission
             requested_latest = frames[-1].frame_id
+            # The ring may advance between the cheap preflight and panel build.
+            # Never give the supervisor (or a model) a second event for one
+            # acquisition, even if the image content happens to look identical.
+            if requested_latest == last_processed_frame_id:
+                repeated_window_skips += 1
+                capture.ring.wait_for_newer(requested_latest,
+                    min(0.25, max(0.0, deadline - time.monotonic())))
+                continue
+            if mode.refresh():
+                continue
+            last_processed_frame_id = requested_latest
             started_at = time.time()
             try:
                 if mock_sequence is not None:
@@ -459,6 +478,7 @@ def main() -> int:
         "inference_interval_s": args.inference_interval,
         "inferences": inference_count,
         "inference_errors": inference_errors,
+        "repeated_window_skips": repeated_window_skips,
         "occlusion_events": occlusion_events,
         "vision_mode": ("no_cloud_vision" if mode.no_cloud_vision else
                         "awaiting_no_cloud_vision" if awaiting_switch else "cloud_vision"),

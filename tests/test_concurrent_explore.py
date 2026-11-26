@@ -1,4 +1,5 @@
 import argparse
+from contextlib import redirect_stdout
 import io
 import json
 import subprocess
@@ -8,11 +9,11 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from scripts.run_beep_explore import run
+from scripts.run_beep_explore import main, run
 
 
 class FakeBridge:
@@ -181,6 +182,44 @@ class ConcurrentExploreTests(unittest.TestCase):
         self.assertTrue(result['original_lease_released'])
         self.assertEqual([path for path, _ in bridge.calls],
                          ['/mission/start', '/mission/cancel'])
+
+    def test_failed_motion_is_nonzero_even_when_vision_exits_cleanly(self):
+        bridge = FakeBridge()
+        def child(command, **_kwargs):
+            assert bridge.active is not None
+            bridge.active.update(state="failed", error="guarded navigation fault")
+            bridge.lease = None
+            return subprocess.CompletedProcess(command, 0, stdout='{}', stderr='')
+        output = io.StringIO()
+        with (patch('scripts.run_beep_explore.parse_args', return_value=options()),
+              patch('scripts.run_beep_explore.BridgeBodyAdapter', return_value=bridge),
+              patch('scripts.run_beep_explore.subprocess.run', side_effect=child),
+              redirect_stdout(output)):
+            exit_code = main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result['eyes_exit_code'], 0)
+        self.assertEqual(result['perception_outcome'], 'completed')
+        self.assertEqual(result['final_mission_state'], 'failed')
+        self.assertEqual(result['motion_outcome'], 'failed')
+        self.assertEqual(result['motion_reason'], 'guarded navigation fault')
+        self.assertFalse(result['cleanup_requested'])
+        self.assertEqual([path for path, _ in bridge.calls], ['/mission/start'])
+
+    def test_operator_cleanup_is_distinct_from_motion_failure(self):
+        bridge = FakeBridge()
+        output = io.StringIO()
+        with (patch('scripts.run_beep_explore.parse_args', return_value=options()),
+              patch('scripts.run_beep_explore.BridgeBodyAdapter', return_value=bridge),
+              patch('scripts.run_beep_explore.subprocess.run', return_value=
+                    subprocess.CompletedProcess([], 0, stdout='{}', stderr='')),
+              redirect_stdout(output)):
+            exit_code = main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result['motion_outcome'], 'intentional_cleanup')
+        self.assertTrue(result['cleanup_requested'])
+        self.assertTrue(result['cleanup_acknowledged'])
 
     def test_model_failure_still_cancels_exact_mission(self):
         bridge = FakeBridge()

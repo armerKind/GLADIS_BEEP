@@ -100,6 +100,17 @@ class MovingFrameRing:
                 self._condition.wait(remaining)
             return True
 
+    def wait_for_newer(self, frame_id: str, timeout_s: float = 0.25) -> bool:
+        """Sleep on the acquisition condition, not on repeated visual windows."""
+        deadline = time.monotonic() + float(timeout_s)
+        with self._condition:
+            while not self._frames or self._frames[-1].frame.frame_id == frame_id:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
     def diverse(self, count: int, *, min_spacing_s: float = 0.7,
                 min_appearance_delta: float = 5.0, max_age_s: float = 30.0) -> tuple[list[MovingFrameSample], int]:
         """Newest visually distinct evidence, not N successive copies of a scene.

@@ -36,24 +36,34 @@ class InferenceFaultTests(unittest.TestCase):
                   "slam": {"usable": True, "pose_valid": True, **provenance}}
         mission = {"id": "mission-1", "lease_id": lease, "state": "running"}
         sample = MovingFrameSample(CapturedFrame("f000", now, jpeg), status)
+        next_sample = MovingFrameSample(CapturedFrame("f001", now + .1, jpeg), status)
 
         class Capture:
             def __init__(self):
                 self.ring = self
+                self.sample = sample
                 self.running = False
                 self.windows = 0
+                self.waits_for_newer = 0
             def start(self):
                 self.running = True
             def stop(self):
                 self.running = False
             def wait_for(self, count, timeout):
                 return self.running
+            def wait_for_newer(self, frame_id, timeout):
+                self.waits_for_newer += 1
+                self.assert_frame(frame_id)
+                self.sample = next_sample
+                return True
+            def assert_frame(self, frame_id):
+                assert self.sample.frame.frame_id == frame_id
             def latest(self, count):
-                return [sample]
+                return [self.sample]
             def temporal_window(self, count, *, slam_map=None):
                 self.windows += 1
-                return [sample.frame], jpeg, {
-                    "frames": [sample.metadata()], "panel_count": 1,
+                return [self.sample.frame], jpeg, {
+                    "frames": [self.sample.metadata()], "panel_count": 1,
                     "distinct_appearance_count": 1, "candidate_frame_count": 1,
                     "bridge_status": status, "navigation_context": {},
                 }
@@ -100,6 +110,8 @@ class InferenceFaultTests(unittest.TestCase):
             self.assertIn("model output violates contract", events[0]["model_error"])
             self.assertFalse(events[0]["dispatch_performed"])
             self.assertIn("scene", events[1])
+            self.assertEqual([event['latest_frame_id'] for event in events], ['f000', 'f001'])
+            self.assertEqual(capture.waits_for_newer, 1)
             self.assertFalse(capture.running)
             self.assertEqual(mission["state"], "running")
 
