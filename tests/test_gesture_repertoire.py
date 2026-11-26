@@ -227,6 +227,108 @@ class RepertoireTests(unittest.TestCase):
         self.assertIn('preflight', reply['error'])
         sdk.assert_not_called()
 
+    def test_stop_in_flight_fences_http_gestures_and_motion_admission(self):
+        entered, release = threading.Event(), threading.Event()
+        stop_result = []
+        def slow_stop(_n):
+            entered.set()
+            if not release.wait(4):
+                raise AssertionError('stop fixture timed out')
+            return None
+        def stop_request():
+            request = urllib.request.Request(self.origin + '/stop', data=b'{}',
+                headers={'Content-Type':'application/json'}, method='POST')
+            with urllib.request.urlopen(request, timeout=6) as response:
+                stop_result.append((response.status, json.load(response)))
+        with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+            token = json.load(response)['stationary_preflight']
+        self.assertIsNotNone(token)
+        with (patch.object(bridge, 'stop_burst', side_effect=slow_stop),
+              patch.object(bridge, 'sdk_trick', side_effect=AssertionError('SDK forbidden')) as sdk):
+            worker = threading.Thread(target=stop_request)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2), 'stop did not reach I/O')
+                with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+                    self.assertIsNone(json.load(response)['stationary_preflight'])
+                status, reply = self.post({'name':'wave_hand','stationary_preflight': token})
+                self.assertEqual(status, 409, reply)
+                self.assertIn('stop in progress', reply['error'])
+                try:
+                    urllib.request.urlopen(self.origin + '/move?action=forward&duration=0.2', timeout=4)
+                except urllib.error.HTTPError as error:
+                    with error:
+                        self.assertEqual(error.code, 409)
+                        self.assertIn('stop in progress', json.load(error)['error'])
+                else:
+                    self.fail('motion admitted while stop I/O was in flight')
+                sdk.assert_not_called()
+            finally:
+                release.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(stop_result[0][0], 200)
+            self.assertTrue(stop_result[0][1]['ok'])
+            with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+                refreshed = json.load(response)['stationary_preflight']
+            self.assertIsNotNone(refreshed)
+            self.assertNotEqual(refreshed, token)
+
+    def test_overlapping_stops_keep_fence_until_last_stop_io_exits(self):
+        entered = [threading.Event(), threading.Event()]
+        release = [threading.Event(), threading.Event()]
+        calls = []
+        replies = []
+        def slow_stop(_n):
+            with call_lock:
+                index = len(calls)
+                calls.append(index)
+            entered[index].set()
+            if not release[index].wait(5):
+                raise AssertionError('stop fixture timed out')
+            return None
+        def stop_request():
+            request = urllib.request.Request(self.origin + '/stop', data=b'{}',
+                headers={'Content-Type':'application/json'}, method='POST')
+            with urllib.request.urlopen(request, timeout=7) as response:
+                replies.append(json.load(response))
+        call_lock = threading.Lock()
+        with patch.object(bridge, 'stop_burst', side_effect=slow_stop):
+            first = threading.Thread(target=stop_request)
+            second = threading.Thread(target=stop_request)
+            first.start()
+            try:
+                self.assertTrue(entered[0].wait(2))
+                second.start()
+                self.assertTrue(entered[1].wait(2))
+                self.assertEqual(bridge._stop_in_progress, 2)
+                release[0].set()
+                first.join(3)
+                self.assertFalse(first.is_alive())
+                self.assertEqual(bridge._stop_in_progress, 1)
+                with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+                    self.assertIsNone(json.load(response)['stationary_preflight'])
+            finally:
+                release[0].set()
+                release[1].set()
+                first.join(6)
+                if second.ident is not None:
+                    second.join(6)
+        self.assertFalse(second.is_alive())
+        self.assertEqual(bridge._stop_in_progress, 0)
+        self.assertEqual(len(replies), 2)
+        self.assertTrue(all(reply['ok'] for reply in replies))
+        with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+            self.assertIsNotNone(json.load(response)['stationary_preflight'])
+
+    def test_failed_stop_io_releases_inflight_fence(self):
+        with patch.object(bridge, 'stop_burst', side_effect=RuntimeError('mock stop I/O failure')):
+            with self.assertRaisesRegex(RuntimeError, 'mock stop I/O failure'):
+                bridge.request_stop('test')
+        self.assertEqual(bridge._stop_in_progress, 0)
+        with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+            self.assertIsNotNone(json.load(response)['stationary_preflight'])
+
     def test_release_race_new_mission_rejected_before_callback(self):
         with bridge.mission_lock:
             bridge._latest_mission = {'id':'m1','lease_id':'l1','release_id':'r1',

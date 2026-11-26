@@ -192,6 +192,7 @@ app_transition_lock = threading.RLock()
 _last_stop_seq = 0
 motion_context = threading.local()
 _active_motion_lease = None
+_stop_in_progress = 0  # Guarded by motion_owner_lock; overlapping STOPs retain the fence.
 _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
@@ -239,7 +240,8 @@ def mission_readback_with_preflight():
         mission = mission_snapshot()
         status = snapshot()
         preflight = None
-        if (mission is None and _active_mission is None and _active_motion_lease is None
+        if (_stop_in_progress == 0 and mission is None and _active_mission is None
+                and _active_motion_lease is None
                 and status.get("moving") is False and status.get("posture") == "standing"
                 and status.get("posture_uncertain") is False
                 and status.get("fall_suspected") is False):
@@ -325,6 +327,8 @@ def begin_motion(source="api", max_duration=600.0, *, allow_posture=False):
     now = time.monotonic()
     max_duration = max(0.1, min(float(max_duration), 600.0))
     with motion_owner_lock:
+        if _stop_in_progress > 0:
+            raise MotionBusy("stop in progress")
         if allow_posture and source != "posture":
             raise ValueError("posture lease reserved for posture endpoint")
         with state_lock:
@@ -381,6 +385,8 @@ def run_owned_gesture(source, callback, max_duration, *, posture_sensitive=False
     """Atomically admit only stationary, standing, mission-free HTTP actions."""
     global _idle_gesture_preflight
     with mission_lock, motion_owner_lock:
+        if _stop_in_progress > 0:
+            raise MotionBusy("stop in progress")
         with state_lock:
             if (_active_mission is not None or _active_motion_lease is not None
                     or state["moving"] or state["posture"] != "standing"
@@ -432,12 +438,13 @@ def motion_is_cancelled():
 
 def _reset_motion_state_for_tests():
     """Test isolation helper; never used by HTTP or physical control paths."""
-    global _active_motion_lease
+    global _active_motion_lease, _stop_in_progress
     with motion_owner_lock:
         if _active_motion_lease is not None:
             _active_motion_lease.cancel_event.set()
             _active_motion_lease.ended_event.set()
         _active_motion_lease = None
+        _stop_in_progress = 0
     if hasattr(motion_context, "lease"):
         del motion_context.lease
     with state_lock:
@@ -1112,20 +1119,24 @@ def stop_burst(n=3):
 
 
 def request_stop(source="api", n=3):
-    """Cancel the exact active lease before stopping; its token can never be revived."""
-    global _last_stop_seq, _idle_gesture_preflight
+    """Cancel the active lease and fence admission until this STOP's I/O finishes."""
+    global _last_stop_seq, _idle_gesture_preflight, _stop_in_progress
     with motion_owner_lock:
-        # A STOP fences even a currently unowned, previously issued idle-wave
-        # token. Do this before potentially slow stop I/O or HTTP readback.
+        _stop_in_progress += 1
         _idle_gesture_preflight = None
         lease = _active_motion_lease
         if lease is not None:
             lease.cancel_event.set()
-    with state_lock:
-        state["motion_cancelled"] = True
-        _last_stop_seq += 1  # Latch before any stop I/O; never revive old handshakes.
-    remember("motion_cancel_requested", source=str(source), lease_id=None if lease is None else lease.lease_id)
-    return stop_burst(n)
+    try:
+        with state_lock:
+            state["motion_cancelled"] = True
+            _last_stop_seq += 1  # Latch before any stop I/O; never revive old handshakes.
+        remember("motion_cancel_requested", source=str(source), lease_id=None if lease is None else lease.lease_id)
+        return stop_burst(n)
+    finally:
+        with motion_owner_lock:
+            _stop_in_progress -= 1
+            _idle_gesture_preflight = None  # No pre-STOP token survives I/O or overlap.
 
 
 def sector_min(msg, deg_a, deg_b):
