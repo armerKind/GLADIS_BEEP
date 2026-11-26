@@ -60,6 +60,8 @@ class InferenceFaultTests(unittest.TestCase):
                 assert self.sample.frame.frame_id == frame_id
             def latest(self, count):
                 return [self.sample]
+            def raw_candidates(self):
+                return [self.sample]
             def temporal_window(self, count, *, slam_map=None):
                 self.windows += 1
                 return [self.sample.frame], jpeg, {

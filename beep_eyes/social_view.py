@@ -70,9 +70,16 @@ def upward_social_turn(base_url: str, voice_loop, describe_frame: Callable[[byte
             outcome = {'state': 'camera_occluded', 'audio_confirmed': False,
                        'cloud_vision_calls': 0, 'mean_luminance': exc.visibility.mean_luminance}
             try:
-                audio = voice_loop.synthesize(text)
-                outcome['audio_confirmed'] = (isinstance(audio, bytes) and 0 < len(audio) <= 2_000_000
-                    and voice_loop.read_authority() == authority and voice_loop.play(audio) is True)
+                if voice_loop.read_authority()[2] is not True:
+                    outcome['audio_error'] = 'voice_consent_revoked_before_synthesis'
+                else:
+                    audio = voice_loop.synthesize(text)
+                    current_authority = voice_loop.read_authority()
+                    if current_authority[2] is not True:
+                        outcome['audio_error'] = 'voice_consent_revoked_before_playback'
+                    elif (isinstance(audio, bytes) and 0 < len(audio) <= 2_000_000
+                          and current_authority == authority):
+                        outcome['audio_confirmed'] = voice_loop.play(audio) is True
             except Exception as audio_exc:
                 outcome['audio_error'] = type(audio_exc).__name__
         except CameraPrivacyError as exc:

@@ -26,6 +26,7 @@ class FakeCapture:
         self.ring = SimpleNamespace(
             wait_for=lambda *_: True,
             latest=lambda *_: [SimpleNamespace(frame=frames[-1])],
+            raw_candidates=lambda: [SimpleNamespace(frame=f) for f in frames],
         )
 
     def temporal_window(self, *_args, **_kwargs):
@@ -109,6 +110,89 @@ class MovingEyesPrivacyTests(unittest.TestCase):
             self.assertEqual(report['vision_mode'], 'awaiting_no_cloud_vision')
             self.assertEqual(report['inferences'], 0)
             self.assertFalse((root / 'control').exists())
+
+    def test_corrupt_marker_jpeg_is_held_before_panel_decode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = FakeCapture([CapturedFrame('broken', 1., b'\xff\xd8not-a-jpeg\xff\xd9')])
+            capture.temporal_window = Mock(side_effect=AssertionError('panel decoder must not run'))
+            reads = [1, 1, 0]
+            def read(_origin, path, _timeout):
+                self.assertEqual(path, '/mission')
+                return {'mission': {'id': 'm1', 'state': 'running'} if reads.pop(0) else None}
+            def speak(*_args, **_kwargs):
+                (root / 'control').write_text('no-cloud-vision\n')
+                return True
+            model = Mock(analyze=Mock(side_effect=AssertionError('cloud forbidden')))
+            with (patch.object(eyes, 'parse_args', return_value=options(root)),
+                  patch.object(eyes, 'fetch_json', side_effect=read),
+                  patch.object(eyes, 'fetch_slam_map', return_value={'ok': False}),
+                  patch.object(eyes, 'ContinuousMovingCapture', return_value=capture),
+                  patch.object(eyes, 'gemini_client', return_value=model),
+                  patch.object(eyes, 'speak_camera_occluded', side_effect=speak)):
+                self.assertEqual(eyes.main(), 0)
+            capture.temporal_window.assert_not_called()
+            model.analyze.assert_not_called()
+            run = next(root.glob('*-moving-*'))
+            report = json.loads((run / 'summary.json').read_text())
+            event = json.loads((run / 'trace.jsonl').read_text().splitlines()[0])
+            self.assertEqual(event['state'], 'camera_occluded')
+            self.assertEqual(event['latest_frame_id'], 'broken')
+            self.assertEqual(event['occluded_frame_cloud_calls'], 0)
+            self.assertEqual(report['vision_mode'], 'no_cloud_vision')
+
+    def test_runtime_switch_during_inference_drops_result_and_window_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = FakeCapture([CapturedFrame('f00', 1., jpeg('gray'))])
+            reads = [1, 1, 0]
+            def read(_origin, path, _timeout):
+                self.assertEqual(path, '/mission')
+                return {'mission': {'id': 'm1', 'state': 'running'} if reads.pop(0) else None}
+            response = json.loads((Path(__file__).parent / 'fixtures' / 'eyes_response.json').read_text())
+            def infer(*_args):
+                (root / 'control').write_text('no-cloud-vision\n')
+                return response
+            model = Mock(analyze=Mock(side_effect=infer))
+            with (patch.object(eyes, 'parse_args', return_value=options(root)),
+                  patch.object(eyes, 'fetch_json', side_effect=read),
+                  patch.object(eyes, 'fetch_slam_map', return_value={'ok': False}),
+                  patch.object(eyes, 'ContinuousMovingCapture', return_value=capture),
+                  patch.object(eyes, 'gemini_client', return_value=model),
+                  patch.object(eyes, 'speak_camera_occluded', side_effect=AssertionError('camera visible'))):
+                self.assertEqual(eyes.main(), 0)
+            model.analyze.assert_called_once()
+            run = next(root.glob('*-moving-*'))
+            report = json.loads((run / 'summary.json').read_text())
+            self.assertEqual(report['vision_mode'], 'no_cloud_vision')
+            self.assertEqual(report['inferences'], 0)
+            self.assertFalse(list(run.glob('w*')))
+            self.assertFalse((run / 'agent_session.json').exists())
+            self.assertFalse((run / 'event_journal.jsonl').exists())
+
+    def test_switch_written_during_final_report_is_reflected_in_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = FakeCapture([CapturedFrame('f00', 1., jpeg('gray'))])
+            original_stats = capture.stats
+            def final_stats():
+                (root / 'control').write_text('no-cloud-vision\n')
+                return original_stats()
+            capture.stats = Mock(side_effect=final_stats)
+            reads = [1, 0]
+            def read(_origin, path, _timeout):
+                self.assertEqual(path, '/mission')
+                return {'mission': {'id': 'm1', 'state': 'running'} if reads.pop(0) else None}
+            model = Mock(analyze=Mock(side_effect=AssertionError('no inference expected')))
+            with (patch.object(eyes, 'parse_args', return_value=options(root)),
+                  patch.object(eyes, 'fetch_json', side_effect=read),
+                  patch.object(eyes, 'ContinuousMovingCapture', return_value=capture),
+                  patch.object(eyes, 'gemini_client', return_value=model)):
+                self.assertEqual(eyes.main(), 0)
+            run = next(root.glob('*-moving-*'))
+            report = json.loads((run / 'summary.json').read_text())
+            self.assertEqual(report['vision_mode'], 'no_cloud_vision')
+            model.analyze.assert_not_called()
 
     def test_startup_no_cloud_skips_camera_credentials_and_model(self):
         with tempfile.TemporaryDirectory() as directory:

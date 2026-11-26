@@ -108,6 +108,18 @@ class BridgeBodyAdapter:
             raise BodyDispatchError("mission bias rejected or bridge acknowledgement invalid")
         return response
 
+    @staticmethod
+    def _stationary_preflight(readback: dict) -> dict[str, str]:
+        status = readback.get('status') or {}
+        fence = readback.get('stationary_preflight')
+        if (not isinstance(fence, dict) or set(fence) != {'boot_id', 'token'}
+                or not isinstance(fence.get('boot_id'), str)
+                or fence['boot_id'] != status.get('boot_id')
+                or not isinstance(fence.get('token'), str)
+                or not fence['token']):
+            raise BodyDispatchError('bridge did not issue an exact stationary preflight token')
+        return fence
+
     def perform_gesture(self, name: str, *, rollout_mode: str = "shadow") -> DispatchResult:
         """Suggest by default; supervised dispatch only after a fresh bridge preflight."""
         canonical = canonical_gesture(name)  # Never accept raw IDs or posture aliases.
@@ -123,7 +135,8 @@ class BridgeBodyAdapter:
                 or status.get("motion_lease_id") is not None
                 or status.get("posture") != "standing"):
             raise BodyDispatchError("gesture requires a fresh stationary standing unowned mission-free readback")
-        response = self._json("/action", {"name": canonical})
+        fence = self._stationary_preflight(preflight)
+        response = self._json("/action", {"name": canonical, "stationary_preflight": fence})
         trick = response.get("trick")
         if (response.get("ok") is not True or response.get("dry_run") is not False
                 or response.get("http_status") is not None or not isinstance(trick, dict)
@@ -142,14 +155,18 @@ class BridgeBodyAdapter:
         preflight = self.mission()
         admission.check(intent, preflight,
                         physical_posture_confirmed=physical_posture_confirmed)
+        fence = self._stationary_preflight(preflight) if intent.stationary_preflight else None
+        if fence is not None and fence['boot_id'] != intent.boot_id:
+            raise BodyDispatchError('stationary preflight belongs to another bridge boot')
         admission.claim(intent)  # One-shot before any potentially accepted POST.
         response = None
         error = None
         final = None
         try:
-            payload = {'name': intent.name} if intent.stationary_preflight else {'name': intent.name, 'release': {
+            payload = ({'name': intent.name, 'stationary_preflight': fence}
+                if intent.stationary_preflight else {'name': intent.name, 'release': {
                 'boot_id': intent.boot_id, 'mission_id': intent.released_mission_id,
-                'lease_id': intent.released_lease_id, 'release_id': intent.release_id}}
+                'lease_id': intent.released_lease_id, 'release_id': intent.release_id}})
             response = self._json('/action', payload)
         except Exception as exc:
             error = exc

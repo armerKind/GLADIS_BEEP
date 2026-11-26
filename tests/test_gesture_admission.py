@@ -34,12 +34,15 @@ class IntentDispatchTests(unittest.TestCase):
         gate=GestureAdmission(session_id='s',boot_id='boot',
             released_mission_id='stationary_preflight', released_lease_id='none',
             release_id='d1')
-        readback={**readback,'mission':None}
+        readback={**readback,'mission':None,
+                  'stationary_preflight': {'boot_id': 'boot', 'token': 'idle-token'}}
         adapter=BridgeBodyAdapter('http://invalid')
         with patch.object(adapter,'_json',side_effect=[readback,receipt,readback]) as http:
             result=adapter.execute_gesture_intent(intent,gate,physical_posture_confirmed=True)
         self.assertTrue(result.dispatched)
-        self.assertEqual(http.call_args_list[1].args[1],{'name':'wave_hand'})
+        self.assertEqual(http.call_args_list[1].args[1],
+                         {'name':'wave_hand', 'stationary_preflight':
+                          {'boot_id':'boot', 'token':'idle-token'}})
         bad={**readback,'mission':{'id':'new','state':'running'}}
         second=replace(intent,decision_id='d2',event_id='e2',release_id='d2')
         gate2=GestureAdmission(session_id='s',boot_id='boot',

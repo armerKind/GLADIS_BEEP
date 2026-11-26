@@ -196,7 +196,7 @@ _motion_lease_sequence = 0
 events = deque(maxlen=300)
 last_run = None
 state = {
-    "version": "0.22.15-gesture-posture-fence-offline",
+    "version": "0.22.16-idle-gesture-preflight-fence-offline",
     "started_at": time.time(),
     "last_command": None,
     "last_command_at": None,
@@ -229,6 +229,28 @@ mission_lock = threading.RLock()
 _active_mission = None
 _latest_mission = None
 _mission_sequence = 0
+_idle_gesture_preflight = None  # Short-lived bridge-issued one-use idle authority.
+
+
+def mission_readback_with_preflight():
+    """Issue an idle token under the same locks that admit a gesture/mission."""
+    global _idle_gesture_preflight
+    with mission_lock, motion_owner_lock:
+        mission = mission_snapshot()
+        status = snapshot()
+        preflight = None
+        if (mission is None and _active_mission is None and _active_motion_lease is None
+                and status.get("moving") is False and status.get("posture") == "standing"
+                and status.get("posture_uncertain") is False
+                and status.get("fall_suspected") is False):
+            fence = _idle_gesture_preflight
+            if (fence is None or fence[1] != _mission_sequence
+                    or time.monotonic() >= fence[2]):
+                token = uuid.uuid4().hex
+                fence = (token, _mission_sequence, time.monotonic() + 3.0)
+                _idle_gesture_preflight = fence
+            preflight = {"boot_id": BOOT_ID, "token": fence[0]}
+        return {"mission": mission, "status": status, "stationary_preflight": preflight}
 
 
 def remember(event, **data):
@@ -299,7 +321,7 @@ def motion_lease_watchdog(lease):
 
 def begin_motion(source="api", max_duration=600.0, *, allow_posture=False):
     """Acquire exclusive motion ownership immediately; never queue behind another run."""
-    global _active_motion_lease, _motion_lease_sequence
+    global _active_motion_lease, _motion_lease_sequence, _idle_gesture_preflight
     now = time.monotonic()
     max_duration = max(0.1, min(float(max_duration), 600.0))
     with motion_owner_lock:
@@ -312,6 +334,7 @@ def begin_motion(source="api", max_duration=600.0, *, allow_posture=False):
             current = _active_motion_lease
             raise MotionBusy(f"motion busy: lease {current.lease_id} from {current.source}")
         _motion_lease_sequence += 1
+        _idle_gesture_preflight = None  # Even a completed intervening owner fences old idle reads.
         lease = MotionLease(f"motion-{BOOT_ID}-{_motion_lease_sequence}", source, now + max_duration)
         _active_motion_lease = lease
         motion_context.lease = lease
@@ -354,14 +377,26 @@ def run_owned_motion(source, callback, max_duration=600.0):
 
 
 def run_owned_gesture(source, callback, max_duration, *, posture_sensitive=False,
-                      expected_release=None):
+                      expected_release=None, expected_preflight=None):
     """Atomically admit only stationary, standing, mission-free HTTP actions."""
+    global _idle_gesture_preflight
     with mission_lock, motion_owner_lock:
         with state_lock:
             if (_active_mission is not None or _active_motion_lease is not None
                     or state["moving"] or state["posture"] != "standing"
                     or state["posture_uncertain"]):
                 raise MotionBusy("gesture requires stationary, standing, unowned robot with no active mission")
+        if expected_preflight is not None:
+            fence = _idle_gesture_preflight
+            if (expected_release is not None or not isinstance(expected_preflight, dict)
+                    or set(expected_preflight) != {"boot_id", "token"}
+                    or expected_preflight.get("boot_id") != BOOT_ID
+                    or not isinstance(expected_preflight.get("token"), str)
+                    or fence is None or expected_preflight["token"] != fence[0]
+                    or fence[1] != _mission_sequence or time.monotonic() >= fence[2]
+                    or _latest_mission is not None):
+                raise MotionBusy("stationary gesture preflight expired or owner changed")
+            _idle_gesture_preflight = None  # One-shot even if the SDK call fails.
         if expected_release is not None:
             latest = _latest_mission
             if (not isinstance(expected_release, dict) or latest is None
@@ -416,11 +451,12 @@ def _reset_motion_state_for_tests():
 
 def _reset_mission_state_for_tests():
     """Test isolation helper for completed mocked mission workers."""
-    global _active_mission, _latest_mission, _mission_sequence
+    global _active_mission, _latest_mission, _mission_sequence, _idle_gesture_preflight
     with mission_lock:
         _active_mission = None
         _latest_mission = None
         _mission_sequence = 0
+        _idle_gesture_preflight = None
 
 
 def wait_motion(duration, poll_s=0.05):
@@ -3775,7 +3811,7 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path == "/last_run":
                 self.send_json({"last_run": last_run})
             elif p.path == "/mission":
-                self.send_json({"mission": mission_snapshot(), "status": snapshot()})
+                self.send_json(mission_readback_with_preflight())
             elif p.path == "/config":
                 self.send_json({"version": state["version"], "semantic_execution_enabled": False,
                                 "audio_playback": {"endpoint": "POST /audio/play"},
@@ -4019,7 +4055,9 @@ class Handler(BaseHTTPRequestHandler):
                     sensitive = True  # Generic SDK action has unmeasured physical aftermath.
                     self.send_json(run_owned_gesture("http_post_trick", callback,
                         max_duration=settle_limit + 2.0, posture_sensitive=sensitive,
-                        expected_release=body.get("release") if "release" in body else None))
+                        expected_release=body.get("release") if "release" in body else None,
+                        expected_preflight=(body.get("stationary_preflight", {})
+                                            if "stationary_preflight" in body else None)))
             elif p.path == "/mark_object":
                 dry = bool(body.get("dry_run", body.get("dry", False)))
                 approach_s = float(body.get("max_duration", 5.0))

@@ -173,6 +173,35 @@ class PostureHttpTests(unittest.TestCase):
         with self.assertRaisesRegex(SocialViewError, 'no-cloud-vision'):
             upward_social_turn(self.origin, voice, caption, opt_in=True, no_cloud_vision=True)
 
+    def test_occlusion_reaction_withholds_playback_when_consent_revoked(self):
+        caption = Mock(side_effect=AssertionError('capped image must not reach captioner'))
+        for revoke_at in (3, 4):
+            with self.subTest(revoke_at=revoke_at):
+                class FakeVoice:
+                    def __init__(self):
+                        self.reads = 0
+                        self.synthesized = False
+                        self.played = False
+                    def read_authority(self):
+                        self.reads += 1
+                        return ('boot', 'owner', self.reads < revoke_at)
+                    def synthesize(self, text):
+                        self.synthesized = True
+                        return b'audio'
+                    def play(self, audio):
+                        self.played = True
+                        return True
+                voice = FakeVoice()
+                with patch.object(bridge, 'sdk_trick', return_value={'ok': True}), \
+                     patch.object(bridge, 'capture_frame', return_value=jpeg('black')):
+                    result = upward_social_turn(self.origin, voice, caption, opt_in=True)
+                self.assertFalse(result['audio_confirmed'])
+                self.assertFalse(voice.played)
+                self.assertEqual(voice.synthesized, revoke_at == 4)
+                self.assertIn('voice_consent_revoked', result['audio_error'])
+                self.assertEqual(bridge.state['posture'], 'standing')
+        caption.assert_not_called()
+
     def test_helper_does_not_claim_stand_after_failed_cleanup(self):
         class FakeVoice:
             def read_authority(self):

@@ -111,6 +111,18 @@ class MovingFrameRing:
                 self._condition.wait(remaining)
             return True
 
+    def raw_candidates(self, *, max_age_s: float = 30.0) -> list[MovingFrameSample]:
+        """Snapshot same-owner raw JPEGs before any diversity/panel decode."""
+        with self._condition:
+            samples = list(self._frames)
+        if not samples:
+            raise RuntimeError("moving frame ring is empty")
+        newest = samples[-1]
+        owner = newest.bridge_status.get("motion_lease_id")
+        return [sample for sample in samples
+                if sample.bridge_status.get("motion_lease_id") == owner
+                and newest.frame.captured_at - sample.frame.captured_at <= max_age_s]
+
     def diverse(self, count: int, *, min_spacing_s: float = 0.7,
                 min_appearance_delta: float = 5.0, max_age_s: float = 30.0) -> tuple[list[MovingFrameSample], int]:
         """Newest visually distinct evidence, not N successive copies of a scene.
@@ -120,15 +132,8 @@ class MovingFrameRing:
         """
         if count not in PANEL_COUNTS:
             raise ValueError("panel count must be 4, 6, or 9")
-        with self._condition:
-            samples = list(self._frames)
-        if not samples:
-            raise RuntimeError("moving frame ring is empty")
-        newest = samples[-1]
-        owner = newest.bridge_status.get("motion_lease_id")
-        candidates = [sample for sample in samples
-                      if sample.bridge_status.get("motion_lease_id") == owner
-                      and newest.frame.captured_at - sample.frame.captured_at <= max_age_s]
+        candidates = self.raw_candidates(max_age_s=max_age_s)
+        newest = candidates[-1]
         selected = [newest]
         signatures = [_appearance(newest.frame)]
         for sample in reversed(candidates[:-1]):

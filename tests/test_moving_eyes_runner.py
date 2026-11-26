@@ -89,7 +89,6 @@ class MovingEyesRunnerTests(unittest.TestCase):
         frame = jpeg()
         seen_posts = []
         map_counter = [0]
-        mission_calls = [0]
         started_at = time.time()
 
         class Handler(BaseHTTPRequestHandler):
@@ -128,8 +127,10 @@ class MovingEyesRunnerTests(unittest.TestCase):
                     }).encode()
                     content_type = "application/json"
                 elif self.path == "/mission":
-                    mission_calls[0] += 1
-                    replaced = replace_owner_on_bias_read and mission_calls[0] > 1 and mission_calls[0] % 2 == 1
+                    # Only the body adapter's exact-owner advisory preflight
+                    # sees the replacement; camera/runner polling is irrelevant.
+                    replaced = (replace_owner_on_bias_read and
+                                self.headers.get('User-Agent') == 'beep-middle-layer/1.0')
                     body = json.dumps({"mission": {
                         "id": "mission-other" if replaced else "mission-1",
                         "lease_id": "lease-other" if replaced else "lease-1",

@@ -281,20 +281,28 @@ def main() -> int:
                 slam_map = fetch_slam_map(args.base_url, args.timeout)
             except Exception as exc:
                 slam_map = {"ok": False, "reason": f"fetch_failed:{type(exc).__name__}"}
-            frames, sheet, packet = capture.temporal_window(args.panel, slam_map=slam_map)
-            # Contact sheets contain bright labels; inspect every *raw* JPEG,
-            # including the newest ring sample, before any provider call.
+            # Screen the raw same-owner candidate pool before *any* panel or
+            # diversity decoder touches it. A JPEG marker pair is not proof
+            # that the camera produced a decodable image.
+            raw_latest = capture.ring.latest(1)[-1].frame
             if mode.refresh():
                 continue
             try:
+                for sample in capture.ring.raw_candidates():
+                    ensure_visible(sample.frame.jpeg)
+                ensure_visible(raw_latest.jpeg)
+                frames, sheet, packet = capture.temporal_window(args.panel, slam_map=slam_map)
+                # A new frame can enter the ring during panel construction.
+                if mode.refresh():
+                    continue
                 for frame in frames:
                     ensure_visible(frame.jpeg)
                 ensure_visible(capture.ring.latest(1)[-1].frame.jpeg)
-            except CameraPrivacyError as exc:
+            except (CameraPrivacyError, OSError) as exc:
                 awaiting_switch = True
                 occlusion_events += 1
                 event = {"state": "camera_occluded", "window": inference_count,
-                         "latest_frame_id": frames[-1].frame_id,
+                         "latest_frame_id": raw_latest.frame_id,
                          "reason": "dark_or_unreadable_local_frame",
                          "dispatch_performed": False, "occluded_frame_cloud_calls": 0,
                          "vision_switch_file": str(mode.switch_file)}
@@ -348,6 +356,8 @@ def main() -> int:
                     assert client is not None
                     response = client.analyze(packet, sheet, frames[-1].jpeg)
             except GeminiError as exc:
+                if mode.refresh():
+                    continue
                 # Invalid model output must not terminate the independent
                 # LiDAR/map mission or manufacture a motor command. Keep
                 # collecting new views and retry at the next window.
@@ -362,6 +372,11 @@ def main() -> int:
                 last_inference_finished = time.monotonic()
                 if args.max_inferences and inference_count >= args.max_inferences:
                     break
+                continue
+            # A switch written while analyze() was in flight cannot retract
+            # that already-sent request, but its result never enters memory,
+            # the observer, or local window JPEG artifacts.
+            if mode.refresh():
                 continue
             completed_at = time.time()
             newest_latest = capture.ring.latest(1)[-1].frame.frame_id
@@ -383,6 +398,8 @@ def main() -> int:
                 # capture-time snapshot solely as qualitative provenance.
                 current_map = fetch_slam_map(args.base_url, args.timeout)
                 current = fetch_json(args.base_url, "/status", args.timeout)
+                if mode.refresh():
+                    continue
                 after = packet["bridge_status"]
                 before = after.get("capture_before") or {}
                 try:
@@ -414,6 +431,8 @@ def main() -> int:
                 stack2 = {"status": "bench_only", "motor_authority": False}
                 session.update(response, observed_at=frames[-1].captured_at,
                                packet_id=f"{run_id}-{inference_count:04d}")
+            if mode.refresh():
+                continue
             # Only accepted observations become durable notes. Anonymous
             # packet IDs are session-scoped, never promoted to named people.
             if memory is not None:
@@ -443,6 +462,8 @@ def main() -> int:
                 "mission_bias": bias,
                 "stack2": stack2,
             }
+            if mode.refresh():
+                continue
             session.save(session_path)
             window_dir = output_dir / f"w{inference_count:04d}-{requested_latest}"
             write_window(window_dir, frames, sheet, packet, response, semantic, slam_map)
@@ -480,8 +501,7 @@ def main() -> int:
         "inference_errors": inference_errors,
         "repeated_window_skips": repeated_window_skips,
         "occlusion_events": occlusion_events,
-        "vision_mode": ("no_cloud_vision" if mode.no_cloud_vision else
-                        "awaiting_no_cloud_vision" if awaiting_switch else "cloud_vision"),
+        "vision_mode": None,  # Filled from the final latched switch immediately before write.
         "vision_switch_file": str(mode.switch_file),
         "capture": capture.stats(),
         "dispatch_performed": False,
@@ -493,6 +513,9 @@ def main() -> int:
         "event_journal": None if observer is None else str(observer.journal.path),
         "mission_id": session.mission_id,
     }
+    mode.refresh()
+    summary["vision_mode"] = ("no_cloud_vision" if mode.no_cloud_vision else
+                              "awaiting_no_cloud_vision" if awaiting_switch else "cloud_vision")
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
     print(json.dumps(summary, sort_keys=True))
     return 0

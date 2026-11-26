@@ -119,7 +119,12 @@ def run(args, *, adapter=None, runner=None):
                     outcome["cleanup_requested"] = True
                     cancel_reply = adapter._json("/mission/cancel", {"mission_id": mission_id,
                                                                        "lease_id": lease_id})
-                    outcome["cleanup_acknowledged"] = cancel_reply.get("cancelled") is True
+                    outcome["cleanup_acknowledged"] = (cancel_reply.get("ok") is True
+                                                        and cancel_reply.get("cancelled") is True)
+                    if not outcome["cleanup_acknowledged"]:
+                        outcome["cleanup_error"] = (cancel_reply.get("error") or
+                                                    cancel_reply.get("reason") or
+                                                    "bridge did not confirm successful cancellation and stop")
                 # Cancellation and natural mission completion both release
                 # asynchronously; never report cleanup failure mid-finally.
                 for _ in range(12):
@@ -136,6 +141,8 @@ def run(args, *, adapter=None, runner=None):
                 motion_reason = final_mission.get("error")
                 if not motion_reason and isinstance(mission_result, dict):
                     motion_reason = mission_result.get("reason")
+                if not motion_reason:
+                    motion_reason = outcome.get("cleanup_error")
                 if final_state == "failed":
                     motion_outcome = "failed"
                 elif final_state == "completed":
@@ -160,6 +167,7 @@ def main():
     result = run(parse_args())
     print(json.dumps(result, sort_keys=True))
     return 0 if (result.get("accepted") and result.get("eyes_exit_code") == 0
+                 and not result.get("cleanup_error")
                  and result.get("motion_outcome") in {"completed", "intentional_cleanup"}) else 1
 
 

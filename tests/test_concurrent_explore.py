@@ -221,6 +221,32 @@ class ConcurrentExploreTests(unittest.TestCase):
         self.assertTrue(result['cleanup_requested'])
         self.assertTrue(result['cleanup_acknowledged'])
 
+    def test_cancelled_with_failed_stop_io_is_not_success(self):
+        class FailedStopBridge(FakeBridge):
+            def _json(self, path, body):
+                reply = super()._json(path, body)
+                if path == '/mission/cancel':
+                    return {'ok': False, 'cancelled': True, 'error': 'vendor stop I/O failed'}
+                return reply
+        bridge = FailedStopBridge()
+        output = io.StringIO()
+        with (patch('scripts.run_beep_explore.parse_args', return_value=options()),
+              patch('scripts.run_beep_explore.BridgeBodyAdapter', return_value=bridge),
+              patch('scripts.run_beep_explore.subprocess.run', return_value=
+                    subprocess.CompletedProcess([], 0, stdout='{}', stderr='')),
+              redirect_stdout(output)):
+            exit_code = main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result['perception_outcome'], 'completed')
+        self.assertEqual(result['final_mission_state'], 'cancelled')
+        self.assertTrue(result['original_lease_released'])
+        self.assertTrue(result['cleanup_requested'])
+        self.assertFalse(result['cleanup_acknowledged'])
+        self.assertEqual(result['cleanup_error'], 'vendor stop I/O failed')
+        self.assertEqual(result['motion_reason'], 'vendor stop I/O failed')
+        self.assertNotEqual(result['motion_outcome'], 'intentional_cleanup')
+
     def test_model_failure_still_cancels_exact_mission(self):
         bridge = FakeBridge()
         with self.assertRaisesRegex(RuntimeError, "model failed"):
