@@ -48,7 +48,7 @@ def inspect_frame(jpeg: bytes) -> FrameVisibility:
             gray = gray.resize((64, 48), Image.Resampling.BILINEAR)
             mean = ImageStat.Stat(gray).mean[0]
             stddev = ImageStat.Stat(gray).stddev[0]
-    except (OSError, ValueError, UnidentifiedImageError) as exc:
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
         raise CameraPrivacyError('camera JPEG could not be decoded locally') from exc
     # Flat bright covers are also suspicious. This is a conservative heuristic,
     # not a certification that every opaque/printed lens cap is detected.

@@ -1113,10 +1113,14 @@ def stop_burst(n=3):
 
 def request_stop(source="api", n=3):
     """Cancel the exact active lease before stopping; its token can never be revived."""
-    global _last_stop_seq
-    lease = active_motion_lease()
-    if lease is not None:
-        lease.cancel_event.set()
+    global _last_stop_seq, _idle_gesture_preflight
+    with motion_owner_lock:
+        # A STOP fences even a currently unowned, previously issued idle-wave
+        # token. Do this before potentially slow stop I/O or HTTP readback.
+        _idle_gesture_preflight = None
+        lease = _active_motion_lease
+        if lease is not None:
+            lease.cancel_event.set()
     with state_lock:
         state["motion_cancelled"] = True
         _last_stop_seq += 1  # Latch before any stop I/O; never revive old handshakes.

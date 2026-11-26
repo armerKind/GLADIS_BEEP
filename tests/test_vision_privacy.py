@@ -40,6 +40,15 @@ class VisionPrivacyTests(unittest.TestCase):
             with self.subTest(size=len(frame)), self.assertRaises(CameraPrivacyError):
                 inspect_frame(frame)
 
+    def test_oversized_dimension_jpeg_header_fails_closed_without_decode(self):
+        frame = bytearray(jpeg('gray'))
+        sof = frame.find(b'\xff\xc0')
+        self.assertGreater(sof, 0)
+        frame[sof + 5:sof + 9] = b'\xff\xff\xff\xff'
+        with self.assertRaises(CameraPrivacyError) as error:
+            inspect_frame(bytes(frame))
+        self.assertIsInstance(error.exception.__cause__, Image.DecompressionBombError)
+
     def test_gemini_transport_never_receives_capped_or_undecodable_frame(self):
         transport = Mock(side_effect=AssertionError('cloud request forbidden'))
         client = GeminiVisionClient('sentinel', transport=transport)

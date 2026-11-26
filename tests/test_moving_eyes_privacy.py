@@ -18,6 +18,13 @@ def jpeg(color):
     return output.getvalue()
 
 
+def oversized_jpeg():
+    frame = bytearray(jpeg('gray'))
+    sof = frame.find(b'\xff\xc0')
+    assert sof > 0
+    frame[sof + 5:sof + 9] = b'\xff\xff\xff\xff'
+    return bytes(frame)
+
 class FakeCapture:
     def __init__(self, frames):
         self.frames = frames
@@ -112,9 +119,15 @@ class MovingEyesPrivacyTests(unittest.TestCase):
             self.assertFalse((root / 'control').exists())
 
     def test_corrupt_marker_jpeg_is_held_before_panel_decode(self):
+        self.assert_unreadable_frame_held(b'\xff\xd8not-a-jpeg\xff\xd9', 'broken')
+
+    def test_decompression_bomb_jpeg_takes_camera_occluded_path(self):
+        self.assert_unreadable_frame_held(oversized_jpeg(), 'oversized')
+
+    def assert_unreadable_frame_held(self, frame, frame_id):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            capture = FakeCapture([CapturedFrame('broken', 1., b'\xff\xd8not-a-jpeg\xff\xd9')])
+            capture = FakeCapture([CapturedFrame(frame_id, 1., frame)])
             capture.temporal_window = Mock(side_effect=AssertionError('panel decoder must not run'))
             reads = [1, 1, 0]
             def read(_origin, path, _timeout):
@@ -137,7 +150,7 @@ class MovingEyesPrivacyTests(unittest.TestCase):
             report = json.loads((run / 'summary.json').read_text())
             event = json.loads((run / 'trace.jsonl').read_text().splitlines()[0])
             self.assertEqual(event['state'], 'camera_occluded')
-            self.assertEqual(event['latest_frame_id'], 'broken')
+            self.assertEqual(event['latest_frame_id'], frame_id)
             self.assertEqual(event['occluded_frame_cloud_calls'], 0)
             self.assertEqual(report['vision_mode'], 'no_cloud_vision')
 

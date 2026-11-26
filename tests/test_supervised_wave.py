@@ -8,7 +8,7 @@ import tempfile
 
 
 def state(now=10.):
-    return {'mission':None,'status':{'version':'0.22.15-gesture-posture-fence-offline',
+    return {'mission':None,'status':{'version':'0.22.16-idle-gesture-preflight-fence-offline',
       'boot_id':'boot','robot_monotonic_s':now,
       'moving':False,'motion_lease_id':None,'posture':'standing',
       'posture_uncertain':False,'fall_suspected':False,'scan_age_s':.1,

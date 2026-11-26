@@ -73,7 +73,7 @@ def supervised_wave_cycle(adapter: BridgeBodyAdapter, bank: SemanticMemory, *,
     if (not isinstance(s,dict) or not isinstance(s.get('boot_id'),str)
             or not _unowned(preflight,boot=s['boot_id'])):
         raise SupervisedWaveError('active or unknown owner',report)
-    if s.get('version') != '0.22.15-gesture-posture-fence-offline':
+    if s.get('version') != '0.22.16-idle-gesture-preflight-fence-offline':
         raise SupervisedWaveError('unverified bridge version',report)
     boot=s.get('boot_id'); now=s.get('robot_monotonic_s'); age=s.get('scan_age_s')
     slam=s.get('slam') or {}

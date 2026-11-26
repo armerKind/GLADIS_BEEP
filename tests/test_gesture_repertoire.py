@@ -211,6 +211,22 @@ class RepertoireTests(unittest.TestCase):
         sdk.assert_not_called()
         self.assertIn('preflight', reply['error'])
 
+    def test_stop_revokes_idle_preflight_token_before_action(self):
+        with urllib.request.urlopen(self.origin + '/mission', timeout=4) as response:
+            token = json.load(response)['stationary_preflight']
+        self.assertIsNotNone(token)
+        request = urllib.request.Request(self.origin + '/stop', data=b'{}',
+            headers={'Content-Type':'application/json'}, method='POST')
+        with patch.object(bridge, 'stop_burst', return_value=None), \
+             patch.object(bridge, 'sdk_trick', side_effect=AssertionError('SDK callback forbidden')) as sdk:
+            with urllib.request.urlopen(request, timeout=4) as response:
+                self.assertTrue(json.load(response)['ok'])
+            self.assertIsNone(bridge._idle_gesture_preflight)
+            status, reply = self.post({'name':'wave_hand','stationary_preflight':token})
+        self.assertEqual(status, 409, reply)
+        self.assertIn('preflight', reply['error'])
+        sdk.assert_not_called()
+
     def test_release_race_new_mission_rejected_before_callback(self):
         with bridge.mission_lock:
             bridge._latest_mission = {'id':'m1','lease_id':'l1','release_id':'r1',
