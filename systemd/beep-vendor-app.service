@@ -1,6 +1,6 @@
 [Unit]
 Description=BEEP vendor DogZilla camera and control servers
-After=NetworkManager.service network-online.target yahboom_oled.service
+After=NetworkManager.service network-online.target
 Wants=network-online.target
 
 [Service]
